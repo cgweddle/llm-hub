@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+passlib
+langchain
+langgraph
+langchain-aws
+pydantic[email]
+google-adk
+pytest

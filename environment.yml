@@ -7,8 +7,10 @@ dependencies:
   - fastapi
   - uvicorn
   - passlib
+  - mamba
   - pip:
       - langchain
       - langgraph
       - langchain-aws
       - pydantic[email]
+      - google-adk

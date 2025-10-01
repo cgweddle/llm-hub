@@ -1,0 +1,220 @@
+<script lang="ts">
+  import { Handle, Position, type NodeProps } from '@xyflow/svelte';
+
+  type $$Props = Omit<NodeProps, 'id'>;
+  export let data: $$Props['data'];
+  export let isConnectable: $$Props['isConnectable'];
+
+  let { label, handles = ['a'] } = data;
+  let expanded = false;
+</script>
+
+<div class="customNode">
+  <div class="customNodeBody">
+    <div class="node-header">
+      <span class="node-title">{label}</span>
+      <button 
+        class="expand-button"
+        on:click={() => (expanded = !expanded)}
+        on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { expanded = !expanded; } }}
+        aria-label={expanded ? 'Collapse node' : 'Expand node'}
+      >
+        {expanded ? '−' : '+'}
+      </button>
+    </div>
+    <div class="node-content">
+      {#if expanded}
+        <div class="expanded-content">
+          <div class="node-details">
+            <p>This is a {label.toLowerCase()} node.</p>
+            <p>You can configure its properties here.</p>
+          </div>
+          <div class="node-actions">
+            <button class="action-button primary">Configure</button>
+            <button class="action-button secondary">Settings</button>
+          </div>
+        </div>
+      {:else}
+        <div class="collapsed-content">
+          <div class="node-icon">📦</div>
+          <span class="node-text">Click to expand</span>
+        </div>
+      {/if}
+    </div>
+  </div>
+</div>
+
+<!-- Target Handle -->
+<Handle type="target" position={Position.Left} style="background: #555;" {isConnectable} />
+
+<!-- Dynamically Generated Source Handles -->
+{#each handles as handleId, index}
+  <Handle
+    type="source"
+    position={Position.Right}
+    id={handleId}
+    style="top: {index * 20 + 10}px; background: #555;"
+    {isConnectable}
+  />
+{/each}
+
+<style>
+  .customNode {
+    width: 200px;
+    min-height: 100px;
+    position: relative;
+    cursor: move;
+  }
+
+  .customNodeBody {
+    width: 100%;
+    min-height: 100px;
+    border: 3px solid #28a745;
+    position: relative;
+    overflow: hidden;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    transition: all 0.3s ease;
+  }
+
+  .customNodeBody:hover {
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+    transform: translateY(-2px);
+  }
+
+  .node-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px 8px;
+    border-bottom: 1px solid #dee2e6;
+    background: #fff;
+    border-radius: 9px 9px 0 0;
+  }
+
+  .node-title {
+    font-weight: 600;
+    color: #495057;
+    font-size: 14px;
+  }
+
+  .expand-button {
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: #28a745;
+    color: white;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: bold;
+    transition: all 0.2s ease;
+    line-height: 1;
+  }
+
+  .expand-button:hover {
+    background: #218838;
+    transform: scale(1.1);
+  }
+
+  .expand-button:active {
+    transform: scale(0.95);
+  }
+
+  .node-content {
+    padding: 12px 16px;
+  }
+
+  .expanded-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .node-details {
+    font-size: 13px;
+    color: #6c757d;
+    line-height: 1.4;
+  }
+
+  .node-details p {
+    margin: 0 0 8px 0;
+  }
+
+  .node-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .action-button {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+  }
+
+  .action-button.primary {
+    background: #007bff;
+    color: white;
+  }
+
+  .action-button.primary:hover {
+    background: #0056b3;
+  }
+
+  .action-button.secondary {
+    background: #6c757d;
+    color: white;
+  }
+
+  .action-button.secondary:hover {
+    background: #545b62;
+  }
+
+  .collapsed-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    justify-content: center;
+  }
+
+  .node-icon {
+    font-size: 20px;
+  }
+
+  .node-text {
+    font-size: 12px;
+    color: #6c757d;
+    font-style: italic;
+  }
+
+  /* The handles should be along the borders */
+  :global(div.customHandle) {
+    width: 20px;
+    height: 20px;
+    background: #28a745;
+    position: absolute;
+    border-radius: 50%;
+    opacity: 0.8;
+    border: 2px solid #fff;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  }
+
+  /* Ensure that only the inside of the node is draggable */
+  .customNodeBody {
+    pointer-events: auto;
+  }
+
+  /* Prevent text selection on the expand button */
+  .expand-button {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+</style>
