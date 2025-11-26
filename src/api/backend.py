@@ -12,6 +12,7 @@ from src.database.database import (
     create_tool, get_user_tools, create_flow, get_user_flows
 )
 from src.database.database_setup import DatabaseManager
+from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from datetime import datetime
@@ -54,7 +55,7 @@ class AgentResponse(BaseModel):
     description: str
     agent_type: str
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -70,7 +71,7 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -80,8 +81,10 @@ class ToolCreate(BaseModel):
     tool_type: str
     function_name: Optional[str] = None
     function_code: Optional[str] = None
+    script_code: Optional[str] = None
+    input_schema: Optional[dict] = None
+    output_schema: Optional[dict] = None
     api_config: Optional[dict] = None
-    parameters: Optional[dict] = None
     is_public: bool = False
 
 class ToolResponse(BaseModel):
@@ -92,7 +95,7 @@ class ToolResponse(BaseModel):
     is_public: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -111,9 +114,16 @@ class FlowResponse(BaseModel):
     is_public: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
+
+class ValidateTwoToolsRequest(BaseModel):
+    tool1_id: int
+    tool2_id: int
+
+class ValidateToolChainRequest(BaseModel):
+    tool_ids: List[int]
 
 @app.post("/agents/", response_model=AgentResponse)
 def create_agent_endpoint(agent_data: AgentCreate, user_id: int, db: Session = Depends(get_db)):
@@ -190,8 +200,9 @@ def create_tool_endpoint(tool_data: ToolCreate, user_id: int, db: Session = Depe
         tool_type=tool_data.tool_type,
         function_name=tool_data.function_name,
         function_code=tool_data.function_code,
-        api_config=tool_data.api_config,
-        parameters=tool_data.parameters,
+        script_code=tool_data.script_code,
+        input_schema=tool_data.input_schema,
+        output_schema=tool_data.output_schema,
         is_public=tool_data.is_public
     )
     return tool
@@ -210,6 +221,45 @@ def get_public_tools_endpoint(db: Session = Depends(get_db)):
 def get_user_tools_endpoint(user_id: int, db: Session = Depends(get_db)):
     """Get all tools for a specific user"""
     return get_user_tools(db, user_id)
+
+# Tool Validation endpoints
+@app.post("/tools/validate-two")
+def validate_two_tools_endpoint(request: ValidateTwoToolsRequest):
+    """
+    Validate if two tools are compatible (tool1 output -> tool2 input)
+
+    Returns:
+        - compatible: bool
+        - issues: list of compatibility issues
+        - compatible_inputs: list of compatible input parameters
+        - unsatisfied_required_inputs: list of required inputs that can't be satisfied
+        - output_schema: tool1's output schema
+        - input_schema: tool2's input schema
+    """
+    try:
+        result = validate_two_tools(request.tool1_id, request.tool2_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Validation failed: {str(e)}")
+
+@app.post("/tools/validate-chain")
+def validate_tool_chain_endpoint(request: ValidateToolChainRequest):
+    """
+    Validate a chain of tools in sequence
+
+    Args:
+        tool_ids: List of tool IDs in the order they would be chained
+
+    Returns:
+        - compatible: bool indicating if all tools are compatible
+        - issues: list of compatibility issues found
+        - tool_chain: list of tool information with positions
+    """
+    try:
+        result = validate_tool_compatibility(request.tool_ids)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Validation failed: {str(e)}")
 
 # Flow endpoints
 @app.post("/flows/", response_model=FlowResponse)

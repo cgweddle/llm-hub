@@ -71,6 +71,7 @@ class Tool(Base):
     function_name = Column(String(100))  # For function-based tools
     function_code = Column(Text)  # Store actual function code
     helper_functions = Column(JSON)  # Store helper functions as {"name": "code"}
+    script_code = Column(Text)  # Store full original Python script text
     input_schema = Column(JSON)  # Input parameters with types and validation
     output_schema = Column(JSON)  # Output structure with types for flow validation
     api_config = Column(JSON)  # For API-based tools
@@ -78,7 +79,7 @@ class Tool(Base):
     is_public = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    
+
     # Relationships
     agents = relationship("Agent", secondary=agent_tool_association, back_populates="tools")
 
@@ -138,28 +139,26 @@ class Message(Base):
 
 
 class DatabaseManager:
-    def __init__(self, database_url=None, environment=None):
+    def __init__(self, environment=None):
         """
         Initialize database manager with support for both SQLite and PostgreSQL
         
         Args:
-            database_url: Optional custom database URL
             environment: 'development', 'production', or None (auto-detect)
         """
-        if database_url is None:
             # Auto-detect environment if not specified
-            if environment is None:
-                environment = os.getenv('ENVIRONMENT', 'development')
-            
-            if environment == 'production':
-                # Production defaults to PostgreSQL
-                database_url = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost/llm_hub')
-            else:
-                # Development defaults to SQLite
-                default_sqlite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../database/llm_hub.db'))
-                os.makedirs(os.path.dirname(default_sqlite_path), exist_ok=True)
-                database_url = os.getenv('DATABASE_URL', f'sqlite:///{default_sqlite_path}')
+        if environment is None:
+            environment = os.getenv('ENVIRONMENT', 'development')
         
+        if environment == 'production':
+            # Production defaults to PostgreSQL
+            database_url = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost/llm_hub')
+        else:
+            # Development defaults to SQLite
+            default_sqlite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../database/llm_hub.db'))
+            os.makedirs(os.path.dirname(default_sqlite_path), exist_ok=True)
+            database_url = os.getenv('DATABASE_URL', f'sqlite:///{default_sqlite_path}')
+    
         self.database_url = database_url
         self.is_sqlite = self.database_url.startswith('sqlite')
         
@@ -235,116 +234,27 @@ class DatabaseManager:
             "is_sqlite": self.is_sqlite
         }
 
-def create_tables(database_url=None, environment=None):
-    """Create tables with optional database URL and environment"""
-    db_manager = DatabaseManager(database_url=database_url, environment=environment)
-    db_manager.create_tables()
 
-def drop_tables(database_url=None, environment=None):
-    """Drop all tables - use with caution!"""
-    db_manager = DatabaseManager(database_url=database_url, environment=environment)
-    db_manager.drop_tables()
-
-def get_database_manager(database_url=None, environment=None):
+def get_database_manager(environment=None):
     """Get a database manager instance"""
-    return DatabaseManager(database_url=database_url, environment=environment)
+    return DatabaseManager(environment=environment)
 
-def setup_development(args):
-    """Set up SQLite database for development"""
-    print("=== Setting up SQLite Database for Development ===")
-    
-    # Set environment variables for development
-    os.environ['ENVIRONMENT'] = 'development'
-    
+def setup_database(environment: str):
     db_manager = get_database_manager(
-        database_url=args.url, 
-        environment='development'
+        environment=environment
     )
-    info = db_manager.get_database_info()
     
-    print(f"Database Type: {info['type']}")
-    print(f"Database URL: {info['url']}")
+    print("Creating tables...")
+    db_manager.create_tables()
     
-    # Check if database file already exists
-    db_file = "llm_hub.db"
-    if os.path.exists(db_file) and not args.force:
-        print(f"\nDatabase file '{db_file}' already exists.")
-        choice = input("Do you want to:\n1. Recreate the database (this will delete all data)\n2. Keep existing database\nEnter your choice (1 or 2): ")
-        
-        if choice == "1":
-            print("Dropping existing tables...")
-            drop_tables(database_url=args.url, environment='development')
-            print("Creating new tables...")
-            create_tables(database_url=args.url, environment='development')
-        else:
-            print("Keeping existing database. No changes made.")
-    else:
-        if args.force and os.path.exists(db_file):
-            print("Force flag set - recreating existing database...")
-            drop_tables(database_url=args.url, environment='development')
-        
-        print(f"\nCreating new SQLite database: {db_file}")
-        create_tables(database_url=args.url, environment='development')
-    
-    # Test connection
-    if db_manager.test_connection():
-        print("✓ Database connection successful!")
-    else:
-        print("✗ Database connection failed!")
-    
-    print("\n=== Development Database Setup Complete ===")
-    print(f"Database file: {os.path.abspath(db_file)}")
-
-def setup_production(args):
-    """Set up PostgreSQL database for production"""
-    print("=== Setting up PostgreSQL Database for Production ===")
-    
-    # Set environment variables for production
-    os.environ['ENVIRONMENT'] = 'production'
-    
-    # Check if DATABASE_URL is set
-    database_url = args.url or os.getenv('DATABASE_URL')
-    if not database_url:
-        print("ERROR: DATABASE_URL environment variable is not set!")
-        print("Please set DATABASE_URL for your PostgreSQL connection.")
-        print("Example: export DATABASE_URL='postgresql://user:password@localhost/llm_hub'")
-        print("Or use: --url postgresql://user:password@localhost/llm_hub")
-        return False
-    
-    db_manager = get_database_manager(
-        database_url=database_url, 
-        environment='production'
-    )
-    info = db_manager.get_database_info()
-    
-    print(f"Database Type: {info['type']}")
-    print(f"Database URL: {info['url']}")
-    
-    # Test connection
-    if not db_manager.test_connection():
-        print("✗ Database connection failed!")
-        print("Please check your DATABASE_URL and ensure PostgreSQL is running.")
-        return False
-    
-    print("✓ Database connection successful!")
-    
-    # Create tables
-    print("\nCreating tables...")
-    create_tables(database_url=database_url, environment='production')
-    
-    print("\n=== Production Database Setup Complete ===")
+    print("Database setup complete!")
     return True
 
-def show_info(args):
+
+def show_info(environment: str):
     """Show database information"""
     print("=== Database Information ===")
-    
-    # Check environment
-    environment = args.environment or os.getenv('ENVIRONMENT', 'development')
-    print(f"Environment: {environment}")
-    
     db_manager = get_database_manager(
-        database_url=args.url, 
         environment=environment
     )
     info = db_manager.get_database_info()
@@ -368,18 +278,17 @@ def show_info(args):
     else:
         print("✗ Database connection failed")
 
-def drop_database(args):
+def drop_database(environment, force):
     """Drop all tables from the database"""
-    environment = args.environment or os.getenv('ENVIRONMENT', 'development')
-    
-    if not args.force:
+    if not force:
         confirm = input(f"Are you sure you want to drop ALL tables from {environment} environment? This action cannot be undone! (yes/no): ")
         if confirm.lower() != 'yes':
             print("Operation cancelled.")
             return
     
     print(f"Dropping tables from {environment} environment...")
-    drop_tables(database_url=args.url, environment=environment)
+    db_manager = get_database_manager(environment=environment)
+    db_manager.drop_tables()
     print("✓ Tables dropped successfully!")
 
 def parse_arguments():
@@ -403,7 +312,7 @@ Examples:
         'action',
         nargs='?',
         default='development',
-        choices=['development', 'production', 'info', 'drop'],
+        choices=['setup', 'info', 'drop'],
         help='Action to perform (default: development)'
     )
     
@@ -447,14 +356,14 @@ def main():
                 print(f"Environment: {args.environment}")
         
         # Handle different actions
-        if args.action == 'development':
-            setup_development(args)
+        if args.action == 'setup':
+            setup_database(args.environment)
         elif args.action == 'production':
-            setup_production(args)
+            setup_database(args.environment)
         elif args.action == 'info':
-            show_info(args)
+            show_info(args.environment)
         elif args.action == 'drop':
-            drop_database(args)
+            drop_database(args.environment, args.force)
         else:
             print(f"Unknown action: {args.action}")
             return False

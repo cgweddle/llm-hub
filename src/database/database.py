@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Any
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 import os
 import logging
@@ -54,7 +55,24 @@ def get_session():
     # For SQLite, we need check_same_thread=False
     if database_url.startswith('sqlite'):
         logger.info("Creating SQLite engine with check_same_thread=False")
-        engine = create_engine(database_url, connect_args={"check_same_thread": False})
+        # Parse URL so we can grab the DB path
+        url = make_url(database_url)
+
+        # url.database is the path part, e.g. "llm_hub/database/llm_hub"
+        db_path = url.database
+
+        # If it's not absolute, make it relative to project_root
+        if not os.path.isabs(db_path):
+            db_path = os.path.join(project_root, db_path)
+
+        fixed_url = f"sqlite:///{db_path}"
+        logger.info(f"Using SQLite DB path: {db_path}")
+        logger.info(f"Final SQLite URL: {fixed_url}")
+
+        engine = create_engine(
+            fixed_url,
+            connect_args={"check_same_thread": False}
+        )
     else:
         logger.info("Creating database engine")
         engine = create_engine(database_url)
@@ -152,7 +170,7 @@ def create_user(session: Any, username: str, email: str, password_hash: str, is_
 ## Tool database functions
 def create_tool(session: Any, user_id: int, name: str, description: str,
                 tool_type: str, function_name: str = None, function_code: str = None,
-                helper_functions: Dict = None, input_schema: Dict = None,
+                helper_functions: Dict = None, script_code: str = None, input_schema: Dict = None,
                 output_schema: Dict = None, api_config: Dict = None, is_public: bool = False) -> Tool:
     """Create a new tool with helper functions and type schemas"""
     tool = Tool(
@@ -162,10 +180,9 @@ def create_tool(session: Any, user_id: int, name: str, description: str,
         tool_type=tool_type,
         function_name=function_name,
         function_code=function_code,
-        helper_functions=helper_functions or {},
+        script_code=script_code,
         input_schema=input_schema or {},
         output_schema=output_schema or {},
-        api_config=api_config or {},
         is_public=is_public
     )
     session.add(tool)

@@ -56,48 +56,112 @@ class DatabaseToLangGraphTransformer:
 
         return self.session.query(Tool).filter(Tool.id == tool_id).first()
 
-    def create_pydantic_model_from_schema(self, schema: Dict[str, Any], model_name: str) -> BaseModel:
-        """Create a Pydantic model from JSON schema"""
-        if not schema or not schema.get('properties'):
+    def create_pydantic_model_from_schema(self, schema: Dict[str, Any], model_name: str, namespace: Dict[str, Any] = None) -> BaseModel:
+        """
+        Create a Pydantic model from input schema (new format: {param: {type: str, optional: bool}})
+
+        Args:
+            schema: Input schema with parameter info
+            model_name: Name for the Pydantic model
+            namespace: Namespace containing imported/defined classes from the tool's Python code
+        """
+        if not schema:
             return None
 
         fields = {}
-        properties = schema.get('properties', {})
-        required_fields = schema.get('required', [])
 
-        for field_name, field_schema in properties.items():
-            field_type = self._json_type_to_python_type(field_schema.get('type', 'string'))
-            field_description = field_schema.get('description', f'{field_name} parameter')
+        for field_name, field_info in schema.items():
+            # Type is already the correct Python type name as a string (e.g., "str", "DataFrame", "MyCustomClass")
+            type_str = field_info.get('type', 'Any')
+            is_optional = field_info.get('optional', False)
 
-            if field_name in required_fields:
-                fields[field_name] = (field_type, Field(..., description=field_description))
-            else:
+            # Evaluate the type string to get the actual type object
+            field_type = self._eval_type_string(type_str, namespace)
+            field_description = field_info.get('description', f'{field_name} parameter')
+
+            if is_optional:
                 fields[field_name] = (field_type, Field(None, description=field_description))
+            else:
+                fields[field_name] = (field_type, Field(..., description=field_description))
 
         # Create model with arbitrary types allowed for custom types
         model = create_model(model_name, **fields)
         model.__config__.arbitrary_types_allowed = True
         return model
 
-    def _json_type_to_python_type(self, json_type: str):
-        """Convert JSON schema type to Python type"""
-        type_mapping = {
-            'string': str,
-            'integer': int,
-            'number': float,
-            'boolean': bool,
-            'array': List,
-            'object': Dict,
-            'null': type(None)
+    def _parse_imports_and_classes(self, script_code: str) -> Dict[str, Any]:
+        """
+        Parse imports and class definitions from full Python script using AST
+        Returns a namespace dict that can be used to resolve type strings
+        """
+        import ast
+
+        namespace = {}
+
+        try:
+            tree = ast.parse(script_code)
+
+            # Extract imports
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        # Store module name mapping (e.g., 'os' -> 'os')
+                        module_name = alias.asname if alias.asname else alias.name
+                        try:
+                            namespace[module_name] = __import__(alias.name)
+                        except ImportError:
+                            logger.warning(f"Could not import {alias.name}")
+
+                elif isinstance(node, ast.ImportFrom):
+                    module = node.module
+                    for alias in node.names:
+                        # Store imported name (e.g., 'DataFrame' from pandas)
+                        name = alias.asname if alias.asname else alias.name
+                        try:
+                            imported_module = __import__(module, fromlist=[alias.name])
+                            namespace[name] = getattr(imported_module, alias.name)
+                        except (ImportError, AttributeError):
+                            logger.warning(f"Could not import {alias.name} from {module}")
+
+                elif isinstance(node, ast.ClassDef):
+                    # For custom classes defined in the script, use Any as placeholder
+                    # since we can't instantiate them without execution
+                    namespace[node.name] = Any
+
+        except SyntaxError as e:
+            logger.error(f"Syntax error parsing code: {e}")
+
+        return namespace
+
+    def _eval_type_string(self, type_str: str, namespace: Dict[str, Any] = None):
+        """
+        Evaluate a Python type string to get the actual type object
+        Uses the namespace containing imports and custom classes from the tool's code
+
+        E.g., "str" -> str, "List[int]" -> List[int], "DataFrame" -> DataFrame (from namespace)
+        """
+        # Build a namespace with common built-in types
+        type_namespace = {
+            'str': str,
+            'int': int,
+            'float': float,
+            'bool': bool,
+            'List': List,
+            'Dict': Dict,
+            'Optional': Optional,
+            'Any': Any,
         }
 
-        # For standard JSON types, return the mapped Python type
-        if json_type in type_mapping:
-            return type_mapping[json_type]
+        # Merge in the namespace from the tool's code
+        if namespace:
+            type_namespace.update(namespace)
 
-        # For custom types, return Any - Pydantic will handle validation at runtime
-        # with arbitrary_types_allowed = True
-        return Any
+        try:
+            # Safely evaluate the type string
+            return eval(type_str, {"__builtins__": {}}, type_namespace)
+        except:
+            logger.warning(f"Could not evaluate type string '{type_str}', using Any")
+            return Any
 
     def create_executable_function(self, tool: Tool) -> Callable:
         """Create an executable function from database tool"""
@@ -144,6 +208,11 @@ class DatabaseToLangGraphTransformer:
 
             logger.info(f"Transforming tool: {db_tool.name} (ID: {tool_id})")
 
+            # Parse imports and class definitions from the full script text
+            namespace = {}
+            if db_tool.script_code:
+                namespace = self._parse_imports_and_classes(db_tool.script_code)
+
             # Create executable function
             executable_func = self.create_executable_function(db_tool)
 
@@ -153,7 +222,8 @@ class DatabaseToLangGraphTransformer:
                 model_name = f"{db_tool.function_name.title()}Input"
                 input_model = self.create_pydantic_model_from_schema(
                     db_tool.input_schema,
-                    model_name
+                    model_name,
+                    namespace  # Pass namespace so custom classes can be resolved
                 )
 
             # Create LangGraph tool wrapper
@@ -214,53 +284,6 @@ class DatabaseToLangGraphTransformer:
         else:
             return create_react_agent(llm, tools)
 
-    def validate_tool_compatibility(self, tool_ids: List[int]) -> Dict[str, Any]:
-        """Validate that tools can work together in a workflow"""
-        compatibility_report = {
-            "compatible": True,
-            "issues": [],
-            "tool_chain": []
-        }
-
-        for i, tool_id in enumerate(tool_ids):
-            if tool_id not in self.transformed_tools:
-                self.transform_tool(tool_id)
-
-            tool_info = self.transformed_tools[tool_id]
-            db_tool = self.get_database_tool(tool_id)
-
-            compatibility_report["tool_chain"].append({
-                "position": i,
-                "tool_id": tool_id,
-                "name": tool_info.name,
-                "input_schema": db_tool.input_schema,
-                "output_schema": db_tool.output_schema
-            })
-
-            # Check compatibility with next tool
-            if i < len(tool_ids) - 1:
-                next_tool_id = tool_ids[i + 1]
-                next_db_tool = self.get_database_tool(next_tool_id)
-
-                if db_tool.output_schema and next_db_tool.input_schema:
-                    # Basic type compatibility check
-                    output_type = db_tool.output_schema.get('type')
-                    next_input_props = next_db_tool.input_schema.get('properties', {})
-
-                    # Check if any input property can accept the output
-                    compatible_inputs = []
-                    for prop_name, prop_schema in next_input_props.items():
-                        if prop_schema.get('type') == output_type:
-                            compatible_inputs.append(prop_name)
-
-                    if not compatible_inputs:
-                        compatibility_report["compatible"] = False
-                        compatibility_report["issues"].append(
-                            f"Tool {tool_id} output type '{output_type}' "
-                            f"not compatible with tool {next_tool_id} inputs"
-                        )
-
-        return compatibility_report
 
     def close(self):
         """Close database session"""
@@ -361,10 +384,6 @@ if __name__ == "__main__":
         for tool_id in tool_ids:
             tool_info = transformer.transform_tool(tool_id)
             print(f"✓ Transformed tool: {tool_info.name}")
-
-        # Test compatibility validation
-        compatibility = transformer.validate_tool_compatibility(tool_ids)
-        print(f"✓ Compatibility check: {compatibility['compatible']}")
 
         # Test getting LangGraph tools
         langgraph_tools = transformer.get_langgraph_tools(tool_ids)

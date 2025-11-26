@@ -184,13 +184,6 @@ class PythonScriptToolFactory:
 
             main_func = functions[self.analyzer.main_function]
 
-            # Separate main function from helpers
-            helper_functions = {
-                name: func.code
-                for name, func in functions.items()
-                if not func.is_main
-            }
-
             # Generate schemas
             input_schema = self.schema_generator.generate_input_schema(main_func)
             output_schema = self.schema_generator.generate_output_schema(main_func)
@@ -206,7 +199,7 @@ class PythonScriptToolFactory:
                     tool_type="python_script",
                     function_name=main_func.name,
                     function_code=main_func.code,
-                    helper_functions=helper_functions,
+                    script_code=script_code,
                     input_schema=input_schema,
                     output_schema=output_schema,
                     is_public=True
@@ -222,56 +215,6 @@ class PythonScriptToolFactory:
             logger.error(f"Failed to create tool from script: {e}")
             raise
 
-    def validate_tool_compatibility(self, tool1_id: int, tool2_id: int) -> Dict[str, Any]:
-        """
-        Validate if tool1's output is compatible with tool2's input
-
-        Args:
-            tool1_id: ID of first tool (output provider)
-            tool2_id: ID of second tool (input consumer)
-
-        Returns:
-            Dict with compatibility information
-        """
-        if not DATABASE_AVAILABLE:
-            return {"compatible": False, "error": "Database not available"}
-
-        session = get_session()
-        try:
-            from database.database_setup import Tool
-
-            tool1 = session.query(Tool).filter(Tool.id == tool1_id).first()
-            tool2 = session.query(Tool).filter(Tool.id == tool2_id).first()
-
-            if not tool1 or not tool2:
-                return {"compatible": False, "error": "Tool not found"}
-
-            output_schema = tool1.output_schema or {}
-            input_schema = tool2.input_schema or {}
-
-            # Basic compatibility check
-            compatibility_issues = []
-
-            # Check if output type matches any input requirements
-            output_type = output_schema.get("type")
-            input_properties = input_schema.get("properties", {})
-
-            for prop_name, prop_schema in input_properties.items():
-                expected_type = prop_schema.get("type")
-                if expected_type and output_type and expected_type != output_type:
-                    compatibility_issues.append(
-                        f"Output type '{output_type}' doesn't match input property '{prop_name}' type '{expected_type}'"
-                    )
-
-            return {
-                "compatible": len(compatibility_issues) == 0,
-                "issues": compatibility_issues,
-                "output_schema": output_schema,
-                "input_schema": input_schema
-            }
-
-        finally:
-            session.close()
 
 # Example usage
 if __name__ == "__main__":
@@ -316,10 +259,6 @@ def compute_statistics(data: List[int]) -> Dict[str, float]:
             user_id=1
         )
         print(f"✓ Created example tool with ID: {tool_id}")
-
-        # Test compatibility validation (with itself)
-        compatibility = factory.validate_tool_compatibility(tool_id, tool_id)
-        print(f"✓ Compatibility check: {compatibility}")
 
     except Exception as e:
         print(f"✗ Error: {e}")
