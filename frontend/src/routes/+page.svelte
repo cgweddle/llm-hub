@@ -93,7 +93,9 @@
         // Pass full tool data for ToolNode
         name: tool?.name || nodeName,
         description: tool?.description || '',
-        script_code: tool?.script_code || ''
+        script_code: tool?.script_code || '',
+        input_schema: tool?.input_schema || null,
+        output_schema: tool?.output_schema || null
       },
       position,
       sourcePosition: Position.Right,

@@ -104,6 +104,8 @@ class ToolResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     script_code: Optional[str] = None
+    input_schema: Optional[dict] = None
+    output_schema: Optional[dict] = None
 
     class Config:
         from_attributes = True

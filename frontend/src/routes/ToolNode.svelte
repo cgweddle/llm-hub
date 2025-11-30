@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Handle, Position, type NodeProps } from '@xyflow/svelte';
+  import { Handle, Position, type NodeProps, useUpdateNodeInternals } from '@xyflow/svelte';
   import { onMount, onDestroy } from 'svelte';
   import { EditorView, basicSetup } from 'codemirror';
   import { python } from '@codemirror/lang-python';
@@ -9,8 +9,78 @@
   type $$Props = Omit<NodeProps, 'id'>;
   export let data: $$Props['data'];
   export let isConnectable: $$Props['isConnectable'];
+  export let id: string;
 
-  let { name, description, script_code, handles = ['a'], toolId } = data;
+  let { name, description, script_code, handles = ['a'], toolId, input_schema, output_schema } = data;
+
+  // Get the function to update node internals when handles change
+  const updateNodeInternals = useUpdateNodeInternals();
+
+  // Extract input parameter names from the input schema
+  let inputParameters: string[] = [];
+  $: {
+    if (input_schema && typeof input_schema === 'object') {
+      // Assuming input_schema has a "properties" field like JSON Schema
+      if (input_schema.properties) {
+        inputParameters = Object.keys(input_schema.properties);
+      } else {
+        // Fallback: use all keys from input_schema
+        inputParameters = Object.keys(input_schema);
+      }
+    } else {
+      inputParameters = [];
+    }
+  }
+
+  // Extract output properties if the output is a dictionary
+  let outputIsDictionary = false;
+  let outputProperties: Array<{key: string, type: string}> = [];
+  let outputExpanded = false;
+
+  $: {
+    if (output_schema && typeof output_schema === 'object' && output_schema.properties) {
+      // Has properties defined - treat as expandable dictionary
+      outputIsDictionary = true;
+      outputProperties = Object.entries(output_schema.properties).map(([key, value]: [string, any]) => ({
+        key,
+        type: value.type || 'any'
+      }));
+    } else {
+      outputIsDictionary = false;
+      outputProperties = [];
+    }
+  }
+
+  // Update node internals when expansion state changes
+  $: if (outputExpanded !== undefined) {
+    updateNodeInternals(id);
+  }
+
+  // Track custom parameter values
+  let parameterValues: { [key: string]: string } = {};
+  let editingParameter: string | null = null;
+  let tempValue: string = '';
+
+  function handleParameterClick(paramName: string) {
+    editingParameter = paramName;
+    tempValue = parameterValues[paramName] || '';
+  }
+
+  function saveParameterValue(paramName: string) {
+    if (tempValue.trim()) {
+      parameterValues[paramName] = tempValue;
+    } else {
+      delete parameterValues[paramName];
+    }
+    editingParameter = null;
+    tempValue = '';
+  }
+
+  function cancelEdit() {
+    editingParameter = null;
+    tempValue = '';
+  }
+
   let expanded = false;
   let isEditing = false;
   let isSaving = false;
@@ -84,12 +154,8 @@
   }
 
   // Update editor mode when switching between edit/view
-  $: {
-    // Reference isEditing to make this reactive to its changes
-    const editMode = isEditing;
-    if (editorView) {
-      updateEditorMode();
-    }
+  $: if (isEditing !== undefined && editorView) {
+    updateEditorMode();
   }
 
   async function handleSave() {
@@ -237,19 +303,104 @@
   </div>
 </div>
 
-<!-- Target Handle -->
-<Handle type="target" position={Position.Left} style="background: #007acc;" {isConnectable} />
+<!-- Input Handles (Target) - one for each input parameter -->
+{#if inputParameters.length > 0}
+  {#each inputParameters as paramName, index}
+    <div class="input-handle-wrapper" style="top: {60 + index * 35}px;">
+      {#if editingParameter === paramName}
+        <div class="parameter-input-container">
+          <input
+            type="text"
+            class="parameter-input"
+            bind:value={tempValue}
+            on:keydown={(e) => {
+              if (e.key === 'Enter') saveParameterValue(paramName);
+              if (e.key === 'Escape') cancelEdit();
+            }}
+            on:blur={() => saveParameterValue(paramName)}
+            placeholder="Enter value..."
+            autofocus
+          />
+        </div>
+      {:else}
+        <button
+          class="handle-label-outside"
+          on:click|stopPropagation={() => handleParameterClick(paramName)}
+          title="Click to set custom value"
+        >
+          <div class="param-content">
+            <span class="param-name">{paramName}</span>
+            {#if parameterValues[paramName]}
+              <span class="param-value">{parameterValues[paramName]}</span>
+            {/if}
+          </div>
+        </button>
+      {/if}
+      <Handle
+        type="target"
+        position={Position.Left}
+        id={`input-${paramName}`}
+        style="background: #007acc; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
+        {isConnectable}
+      />
+    </div>
+  {/each}
+{:else}
+  <!-- Default single target handle if no input schema -->
+  <Handle type="target" position={Position.Left} style="background: #007acc; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;" {isConnectable} />
+{/if}
 
-<!-- Dynamically Generated Source Handles -->
-{#each handles as handleId, index}
-  <Handle
-    type="source"
-    position={Position.Right}
-    id={handleId}
-    style="top: {index * 20 + 10}px; background: #007acc;"
-    {isConnectable}
-  />
-{/each}
+<!-- Output Handles (Source) -->
+{#if outputIsDictionary}
+  <!-- Dictionary output with expand/collapse -->
+  <div class="output-handle-wrapper" style="top: 60px;">
+    <button
+      class="handle-label-outside output-label"
+      on:click|stopPropagation={() => outputExpanded = !outputExpanded}
+      title={outputExpanded ? 'Click to collapse' : 'Click to expand properties'}
+    >
+      <span class="expander-icon">{outputExpanded ? '∨' : '→'}</span>
+      <span>Output</span>
+    </button>
+    <Handle
+      type="source"
+      position={Position.Right}
+      id="output"
+      style="background: #0e7a0d; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
+      isConnectable={!outputExpanded && isConnectable}
+    />
+  </div>
+
+  {#if outputExpanded}
+    {#each outputProperties as prop, index}
+      <div class="output-handle-wrapper" style="top: {95 + index * 35}px;">
+        <span class="handle-label-outside output-label property-label">
+          {prop.key}
+          <span class="property-type">({prop.type})</span>
+        </span>
+        <Handle
+          type="source"
+          position={Position.Right}
+          id={`output-${prop.key}`}
+          style="background: #0e7a0d; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
+          {isConnectable}
+        />
+      </div>
+    {/each}
+  {/if}
+{:else}
+  <!-- Single output handle for non-dictionary outputs -->
+  <div class="output-handle-wrapper" style="top: 60px;">
+    <span class="handle-label-outside output-label">Output</span>
+    <Handle
+      type="source"
+      position={Position.Right}
+      id="output"
+      style="background: #0e7a0d; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
+      {isConnectable}
+    />
+  </div>
+{/if}
 
 <style>
   .toolNode {
@@ -522,5 +673,139 @@
   .expand-button {
     user-select: none;
     -webkit-user-select: none;
+  }
+
+  /* Input handle wrapper and labels */
+  .input-handle-wrapper {
+    position: absolute;
+    left: 0;
+    transform: translateX(-100%);
+    display: flex;
+    align-items: center;
+    height: 20px;
+    pointer-events: all;
+  }
+
+  .handle-label-outside {
+    font-size: 11px;
+    font-weight: 600;
+    color: #ffffff;
+    background: #007acc;
+    padding: 4px 10px;
+    border-radius: 4px 0 0 4px;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0, 122, 204, 0.3);
+    transition: all 0.2s ease;
+    border-top: none;
+    border-bottom: none;
+    border-left: none;
+    border-right: 3px solid #007acc;
+    display: flex;
+    align-items: flex-start;
+  }
+
+  .handle-label-outside:hover {
+    background: #005a9e;
+    box-shadow: 0 3px 8px rgba(0, 122, 204, 0.5);
+  }
+
+  .param-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-start;
+  }
+
+  .param-name {
+    white-space: nowrap;
+    font-weight: 600;
+  }
+
+  .param-value {
+    font-size: 10px;
+    font-weight: 400;
+    color: #e0e0e0;
+    white-space: nowrap;
+    font-style: italic;
+  }
+
+  .parameter-input-container {
+    display: flex;
+    align-items: center;
+  }
+
+  .parameter-input {
+    font-size: 11px;
+    padding: 4px 8px;
+    border: 2px solid #007acc;
+    border-radius: 4px 0 0 4px;
+    background: #1e1e1e;
+    color: #ffffff;
+    outline: none;
+    min-width: 120px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  .parameter-input:focus {
+    border-color: #005a9e;
+    box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.3);
+  }
+
+  /* Output handle wrapper and labels */
+  .output-handle-wrapper {
+    position: absolute;
+    right: 0;
+    transform: translateX(100%);
+    display: flex;
+    align-items: center;
+    pointer-events: all;
+  }
+
+  .output-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #ffffff;
+    background: #0e7a0d;
+    padding: 4px 10px;
+    border-radius: 0 4px 4px 0;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(14, 122, 13, 0.3);
+    transition: all 0.2s ease;
+    border-top: none;
+    border-bottom: none;
+    border-right: none;
+    border-left: 3px solid #0e7a0d;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .output-label:hover {
+    background: #0c6b0c;
+    box-shadow: 0 3px 8px rgba(14, 122, 13, 0.5);
+  }
+
+  .expander-icon {
+    font-size: 10px;
+    font-weight: bold;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+  }
+
+  .property-label {
+    background: #0e7a0d;
+    border-left-color: #0e7a0d;
+    padding-left: 20px;
+    gap: 4px;
+  }
+
+  .property-type {
+    font-size: 9px;
+    font-weight: 400;
+    color: #d0d0d0;
+    font-style: italic;
   }
 </style>

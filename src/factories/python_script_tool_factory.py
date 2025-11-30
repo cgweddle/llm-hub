@@ -59,18 +59,24 @@ class PythonScriptAnalyzer:
         self.functions = {}
         self.main_function = main_function
         self.pydantic_models = {}
+        self.typed_dicts = {}
 
     def parse_script(self, script_code: str) -> Dict[str, FunctionInfo]:
         """Parse a Python script and extract all functions"""
         try:
             tree = ast.parse(script_code)
             self.functions = {}
+            self.typed_dicts = {}
 
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef):
                     func_info = self._extract_function_info(node, script_code)
                     self.functions[func_info.name] = func_info
-
+                elif isinstance(node, ast.ClassDef):
+                    # Check if it's a TypedDict
+                    typed_dict_info = self._extract_typed_dict_info(node)
+                    if typed_dict_info:
+                        self.typed_dicts[node.name] = typed_dict_info
 
             return self.functions
 
@@ -112,6 +118,17 @@ class PythonScriptAnalyzer:
             return_type=return_type
         )
 
+    def _extract_typed_dict_info(self, node: ast.ClassDef) -> Optional[Dict[str, str]]:
+        """Extract field definitions from a class with type annotations"""
+        fields = {}
+        for item in node.body:
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                field_name = item.target.id
+                field_type = ast.unparse(item.annotation)
+                fields[field_name] = field_type
+
+        return fields if fields else None
+
 
 
 
@@ -119,6 +136,8 @@ class PythonScriptAnalyzer:
 class TypeSchemaGenerator:
     """Generates JSON schemas from Python type hints"""
 
+    def __init__(self):
+        self.typed_dicts = {}
 
     def generate_input_schema(self, func_info: FunctionInfo) -> Dict[str, Any]:
         """Generate JSON schema for function inputs"""
@@ -138,16 +157,31 @@ class TypeSchemaGenerator:
 
 
     def generate_output_schema(self, func_info: FunctionInfo) -> Dict[str, Any]:
-        #TODO: Handle List, Dict, Tuple and other multi-return types
         """
         Generate JSON schema for function output
-        Return 
-        {"type": type}
-        Or, if multiple return types,
-        {"type": Tuple[type1, type2]}
+
+        Args:
+            func_info: Function information
+
+        Returns:
+            Output schema with type and optionally properties
         """
+        return_type = func_info.return_type if func_info.return_type else "None"
+
+        # Check if return type matches a class definition
+        if self.typed_dicts and return_type in self.typed_dicts:
+            properties = {}
+            for field_name, field_type in self.typed_dicts[return_type].items():
+                properties[field_name] = {"type": field_type}
+
+            return {
+                "type": "object",
+                "properties": properties
+            }
+
+        # Fallback for simple types
         return {
-            "type": func_info.return_type if func_info.return_type else "None"
+            "type": return_type
         }
 
 
@@ -183,6 +217,9 @@ class PythonScriptToolFactory:
                 raise ValueError("Could not identify main function")
 
             main_func = functions[self.analyzer.main_function]
+
+            # Pass typed_dicts to schema generator
+            self.schema_generator.typed_dicts = self.analyzer.typed_dicts
 
             # Generate schemas
             input_schema = self.schema_generator.generate_input_schema(main_func)
