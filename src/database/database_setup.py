@@ -85,7 +85,7 @@ class Tool(Base):
 
 class Flow(Base):
     __tablename__ = 'flows'
-    
+
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     name = Column(String(100), nullable=False)
@@ -93,9 +93,10 @@ class Flow(Base):
     graph_config = Column(JSON, nullable=False)  # Store adjacency matrix and node configs
     entry_point = Column(String(100), nullable=False)
     exit_points = Column(JSON)  # List of exit points
+    is_public = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    
+
     # Relationships
     user = relationship("User", back_populates="flows")
     agents = relationship("Agent", secondary=agent_flow_association, back_populates="flows")

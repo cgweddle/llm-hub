@@ -9,7 +9,8 @@ from src.database.database import (
     get_session, create_agent, get_user_agents, create_user,
     get_available_agents, get_available_tools, get_available_flows,
     get_public_agents, get_public_tools, get_public_flows,
-    create_tool, get_user_tools, create_flow, get_user_flows
+    create_tool, get_user_tools, create_flow, get_user_flows,
+    get_tool_by_id, update_tool
 )
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility
@@ -23,7 +24,14 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,9 +103,21 @@ class ToolResponse(BaseModel):
     is_public: bool
     created_at: datetime
     updated_at: datetime
+    script_code: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+class ToolUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    script_code: Optional[str] = None
+    tool_type: Optional[str] = None
+    function_name: Optional[str] = None
+    function_code: Optional[str] = None
+    input_schema: Optional[dict] = None
+    output_schema: Optional[dict] = None
+    is_public: Optional[bool] = None
 
 class FlowCreate(BaseModel):
     name: str
@@ -221,6 +241,33 @@ def get_public_tools_endpoint(db: Session = Depends(get_db)):
 def get_user_tools_endpoint(user_id: int, db: Session = Depends(get_db)):
     """Get all tools for a specific user"""
     return get_user_tools(db, user_id)
+
+@app.options("/tools/{tool_id}")
+async def options_update_tool(tool_id):
+    """Handle CORS preflight for PATCH requests on /tools/{tool_id}"""
+    # Don't validate tool_id type for OPTIONS - just return empty response
+    # CORS middleware will add the necessary headers
+    return {}
+
+@app.patch("/tools/{tool_id}", response_model=ToolResponse)
+def update_tool_endpoint(tool_id: int, tool_update: ToolUpdate, db: Session = Depends(get_db)):
+    """Update a tool's properties (e.g., script_code, description, etc.)"""
+    # Get the existing tool
+    tool = get_tool_by_id(db, tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail="Tool not found")
+
+    # Only update fields that were provided
+    update_data = tool_update.model_dump(exclude_unset=True)
+    if not update_data:
+        return tool
+
+    # Update the tool
+    updated_tool = update_tool(db, tool_id, **update_data)
+    if not updated_tool:
+        raise HTTPException(status_code=500, detail="Failed to update tool")
+
+    return updated_tool
 
 # Tool Validation endpoints
 @app.post("/tools/validate-two")

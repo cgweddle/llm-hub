@@ -14,23 +14,23 @@
   } from '@xyflow/svelte';
 
   import ColorSelectorNode from './ColorSelectorNode.svelte';
+  import ToolNode from './ToolNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
-  import UserRegistration from './UserRegistration.svelte';
   import { Button } from "$lib/components/ui/button";
-  import { validateTwoTools, type ValidationResult } from '../lib/api';
+  import { validateTwoTools, type ValidationResult, type Tool } from '../lib/api';
   import '@xyflow/svelte/dist/style.css';
+  import type { PageData } from './$types';
+
+  export let data: PageData;
 
   // Validation state
   let validationMessage = '';
   let showValidationToast = false;
   let validationSuccess = false;
 
-  // User registration state
-  let showUserRegistration = false;
-  let currentUser: any = null;
-
   const nodeTypes = {
-    selectorNode: ColorSelectorNode
+    selectorNode: ColorSelectorNode,
+    toolNode: ToolNode
   };
 
   const edgeTypes = {
@@ -76,13 +76,25 @@
 
   let edges: Edge[] = [];
 
-  let availableNodes = ['Color Picker', 'Text Node', 'Decision Node'];
+  // Use tools from database instead of hardcoded nodes
+  $: availableNodes = data.tools.map(tool => tool.name);
 
   function addNode(nodeName: string, position: { x: number; y: number }) {
+    // Find the tool from the database
+    const tool = data.tools.find((t: Tool) => t.name === nodeName);
+
     const newNode: Node = {
       id: String(Date.now()),
-      type: nodeName === 'Color Picker' ? 'selectorNode' : 'default',
-      data: { label: nodeName, handles: ['a'] },
+      type: nodeName === 'Color Picker' ? 'selectorNode' : 'toolNode',
+      data: {
+        label: nodeName,
+        handles: ['a'],
+        toolId: tool?.id, // Store tool ID for validation
+        // Pass full tool data for ToolNode
+        name: tool?.name || nodeName,
+        description: tool?.description || '',
+        script_code: tool?.script_code || ''
+      },
       position,
       sourcePosition: Position.Right,
       targetPosition: Position.Left
@@ -144,26 +156,27 @@
     </div>
   {/if}
 
-  <!-- User Registration Modal -->
-  <UserRegistration
-    bind:open={showUserRegistration}
-    onUserCreated={(user) => {
-      currentUser = user;
-      console.log('User created:', user);
-    }}
-  />
-
   <div class="node-window">
     <div class="user-section">
-      {#if currentUser}
+      {#if data.user}
         <div class="current-user">
-          <strong>{currentUser.username}</strong>
-          <small>{currentUser.email}</small>
+          <strong>{data.user.username}</strong>
+          <small>{data.user.email}</small>
         </div>
+        <form method="POST" action="/logout" class="mt-2">
+          <Button type="submit" variant="outline" class="w-full" size="sm">
+            Logout
+          </Button>
+        </form>
       {:else}
-        <Button class="w-full" onclick={() => showUserRegistration = true}>
-          Create User
-        </Button>
+        <div class="space-y-2">
+          <Button class="w-full" onclick={() => window.location.href = '/login'}>
+            Sign In
+          </Button>
+          <Button variant="outline" class="w-full" onclick={() => window.location.href = '/register'}>
+            Register
+          </Button>
+        </div>
       {/if}
     </div>
 
