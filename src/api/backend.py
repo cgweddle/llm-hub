@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import sys
 import os
+import json
+import subprocess
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.database.database import (
     get_session, create_agent, get_user_agents, create_user,
@@ -146,6 +148,16 @@ class ValidateTwoToolsRequest(BaseModel):
 
 class ValidateToolChainRequest(BaseModel):
     tool_ids: List[int]
+
+class CondaEnvironment(BaseModel):
+    name: str
+    path: str
+
+class CondaEnvironmentResponse(BaseModel):
+    status: str
+    message: str
+    environments: List[CondaEnvironment]
+
 
 @app.post("/agents/", response_model=AgentResponse)
 def create_agent_endpoint(agent_data: AgentCreate, user_id: int, db: Session = Depends(get_db)):
@@ -340,3 +352,33 @@ def get_public_flows_endpoint(db: Session = Depends(get_db)):
 def get_user_flows_endpoint(user_id: int, db: Session = Depends(get_db)):
     """Get all flows for a specific user"""
     return get_user_flows(db, user_id)
+
+
+
+# Conda Environment Endpoint
+@app.get("/conda/environments", response_model=CondaEnvironmentResponse)
+def get_conda_environments():
+    """Get available conda environments"""
+    try:
+        result = subprocess.run(
+            ['conda', 'env', 'list', '--json'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        conda_info = json.loads(result.stdout)
+        envs = conda_info.get('envs', [])
+
+        env_list = []
+        for env_path in envs:
+            env_name = os.path.basename(env_path)
+            env_list.append({"name": env_name, "path": env_path})
+
+        return {
+            "status": "success",
+            "message": f"Found {len(env_list)} environments",
+            "environments": env_list
+        }
+    except:
+        return {"status": "error", "message": "Failed to get conda environments", "environments": []}

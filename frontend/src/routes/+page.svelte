@@ -16,6 +16,7 @@
   import ColorSelectorNode from './ColorSelectorNode.svelte';
   import ToolNode from './ToolNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
+  import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
   import { Button } from "$lib/components/ui/button";
   import { validateTwoTools, type ValidationResult, type Tool } from '../lib/api';
   import '@xyflow/svelte/dist/style.css';
@@ -181,6 +182,8 @@
         </div>
       {/if}
     </div>
+
+    <CondaEnvironmentsPanel />
 
     <h4>Available Nodes</h4>
     {#each availableNodes as node}
