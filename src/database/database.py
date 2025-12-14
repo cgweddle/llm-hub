@@ -131,14 +131,17 @@ def delete_agent(session: Any, agent_id: int) -> bool:
 
 ## Flow database
 def create_flow(session: Any, user_id: int, name: str, description: str,
-                graph_config: Dict, entry_point: str, 
-                exit_points: List[str] = None) -> Flow:
+                graph_config: Dict, is_public: bool = False, conda_env: str = None) -> Flow:
     """Create a new flow"""
     flow = Flow(
         user_id=user_id,
         name=name,
         description=description,
-        graph_config=graph_config
+        graph_config=graph_config,
+        entry_point=graph_config.get("entry_point", "START"),
+        exit_points=graph_config.get("exit_points", []),
+        conda_env=conda_env,
+        is_public=is_public
     )
     session.add(flow)
     session.commit()
@@ -151,6 +154,15 @@ def get_user_flows(session: Any, user_id: int) -> List[Flow]:
 def get_flow_by_id(session: Any, flow_id: int) -> Optional[Flow]:
     """Get flow by ID"""
     return session.query(Flow).filter(Flow.id == flow_id).first()
+
+def update_flow(session: Any, flow_id: int, **kwargs) -> Optional[Flow]:
+    """Update a flow"""
+    flow = get_flow_by_id(session, flow_id)
+    if flow:
+        for key, value in kwargs.items():
+            setattr(flow, key, value)
+        session.commit()
+    return flow
 
 def create_user(session: Any, username: str, email: str, password_hash: str, is_active: bool = True) -> User:
     """Create a new user"""

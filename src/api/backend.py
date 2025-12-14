@@ -12,10 +12,11 @@ from src.database.database import (
     get_available_agents, get_available_tools, get_available_flows,
     get_public_agents, get_public_tools, get_public_flows,
     create_tool, get_user_tools, create_flow, get_user_flows,
-    get_tool_by_id, update_tool
+    get_tool_by_id, update_tool, get_flow_by_id, update_flow
 )
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility
+from src.executors.flow_executor import FlowExecutor
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from datetime import datetime
@@ -127,9 +128,8 @@ class FlowCreate(BaseModel):
     name: str
     description: str
     graph_config: dict
-    entry_point: str
-    exit_points: Optional[List[str]] = None
     is_public: bool = False
+    conda_env: Optional[str] = None
 
 class FlowResponse(BaseModel):
     id: int
@@ -157,6 +157,10 @@ class CondaEnvironmentResponse(BaseModel):
     status: str
     message: str
     environments: List[CondaEnvironment]
+
+class FlowExecuteRequest(BaseModel):
+    initial_input: dict
+    conda_env: Optional[str] = None
 
 
 @app.post("/agents/", response_model=AgentResponse)
@@ -332,9 +336,8 @@ def create_flow_endpoint(flow_data: FlowCreate, user_id: int, db: Session = Depe
         name=flow_data.name,
         description=flow_data.description,
         graph_config=flow_data.graph_config,
-        entry_point=flow_data.entry_point,
-        exit_points=flow_data.exit_points,
-        is_public=flow_data.is_public
+        is_public=flow_data.is_public,
+        conda_env=flow_data.conda_env
     )
     return flow
 
@@ -353,7 +356,48 @@ def get_user_flows_endpoint(user_id: int, db: Session = Depends(get_db)):
     """Get all flows for a specific user"""
     return get_user_flows(db, user_id)
 
+@app.get("/flows/{flow_id}")
+def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
+    """Get a single flow with full details including graph_config"""
+    flow = get_flow_by_id(db, flow_id)
+    if not flow:
+        raise HTTPException(status_code=404, detail="Flow not found")
 
+    return {
+        "id": flow.id,
+        "name": flow.name,
+        "description": flow.description,
+        "graph_config": flow.graph_config,
+        "conda_env": flow.conda_env,
+        "is_public": flow.is_public,
+        "created_at": flow.created_at,
+        "updated_at": flow.updated_at
+    }
+
+@app.post("/flows/{flow_id}/execute")
+def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session = Depends(get_db)):
+    """Execute a flow"""
+    try:
+        executor = FlowExecutor(db, flow_id)
+        result = executor.execute_flow(request.initial_input, request.conda_env)
+
+        # Update the flow's conda_env if provided
+        if request.conda_env:
+            update_flow(db, flow_id, conda_env=request.conda_env)
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Flow execution failed: {str(e)}")
+
+@app.post("/flows/{flow_id}/resume")
+def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, db: Session = Depends(get_db)):
+    """Resume a failed flow"""
+    try:
+        executor = FlowExecutor(db, flow_id)
+        result = executor.resume_flow(execution_trace, resume_input)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Flow resume failed: {str(e)}")
 
 # Conda Environment Endpoint
 @app.get("/conda/environments", response_model=CondaEnvironmentResponse)

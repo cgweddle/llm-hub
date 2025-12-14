@@ -6,12 +6,17 @@ Converts database tools created by python_script_tool_factory into LangGraph-com
 import sys
 import os
 from typing import Dict, Any, Callable, Optional, List
-import json
-import inspect
 import logging
 
 # Add database path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+# Import execution functions
+from .execute_tool import (
+    parse_imports_and_classes,
+    eval_type_string,
+    create_executable_function
+)
 
 try:
     from database.database import get_session
@@ -76,7 +81,7 @@ class DatabaseToLangGraphTransformer:
             is_optional = field_info.get('optional', False)
 
             # Evaluate the type string to get the actual type object
-            field_type = self._eval_type_string(type_str, namespace)
+            field_type = eval_type_string(type_str, namespace)
             field_description = field_info.get('description', f'{field_name} parameter')
 
             if is_optional:
@@ -88,115 +93,6 @@ class DatabaseToLangGraphTransformer:
         model = create_model(model_name, **fields)
         model.__config__.arbitrary_types_allowed = True
         return model
-
-    def _parse_imports_and_classes(self, script_code: str) -> Dict[str, Any]:
-        """
-        Parse imports and class definitions from full Python script using AST
-        Returns a namespace dict that can be used to resolve type strings
-        """
-        import ast
-
-        namespace = {}
-
-        try:
-            tree = ast.parse(script_code)
-
-            # Extract imports
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        # Store module name mapping (e.g., 'os' -> 'os')
-                        module_name = alias.asname if alias.asname else alias.name
-                        try:
-                            namespace[module_name] = __import__(alias.name)
-                        except ImportError:
-                            logger.warning(f"Could not import {alias.name}")
-
-                elif isinstance(node, ast.ImportFrom):
-                    module = node.module
-                    for alias in node.names:
-                        # Store imported name (e.g., 'DataFrame' from pandas)
-                        name = alias.asname if alias.asname else alias.name
-                        try:
-                            imported_module = __import__(module, fromlist=[alias.name])
-                            namespace[name] = getattr(imported_module, alias.name)
-                        except (ImportError, AttributeError):
-                            logger.warning(f"Could not import {alias.name} from {module}")
-
-                elif isinstance(node, ast.ClassDef):
-                    # For custom classes defined in the script, use Any as placeholder
-                    # since we can't instantiate them without execution
-                    namespace[node.name] = Any
-
-        except SyntaxError as e:
-            logger.error(f"Syntax error parsing code: {e}")
-
-        return namespace
-
-    def _eval_type_string(self, type_str: str, namespace: Dict[str, Any] = None):
-        """
-        Evaluate a Python type string to get the actual type object
-        Uses the namespace containing imports and custom classes from the tool's code
-
-        E.g., "str" -> str, "List[int]" -> List[int], "DataFrame" -> DataFrame (from namespace)
-        """
-        # Build a namespace with common built-in types
-        type_namespace = {
-            'str': str,
-            'int': int,
-            'float': float,
-            'bool': bool,
-            'List': List,
-            'Dict': Dict,
-            'Optional': Optional,
-            'Any': Any,
-        }
-
-        # Merge in the namespace from the tool's code
-        if namespace:
-            type_namespace.update(namespace)
-
-        try:
-            # Safely evaluate the type string
-            return eval(type_str, {"__builtins__": {}}, type_namespace)
-        except:
-            logger.warning(f"Could not evaluate type string '{type_str}', using Any")
-            return Any
-
-    def create_executable_function(self, tool: Tool) -> Callable:
-        """Create an executable function from database tool"""
-        # Prepare the execution environment
-        exec_globals = {
-            '__builtins__': __builtins__,
-            'json': json,
-            'os': os,
-            'sys': sys
-        }
-
-        # Add helper functions to the execution environment
-        if tool.helper_functions:
-            for helper_name, helper_code in tool.helper_functions.items():
-                try:
-                    exec(helper_code, exec_globals)
-                    logger.debug(f"Added helper function: {helper_name}")
-                except Exception as e:
-                    logger.error(f"Failed to execute helper function {helper_name}: {e}")
-                    raise
-
-        # Execute the main function code
-        try:
-            exec(tool.function_code, exec_globals)
-            main_function = exec_globals.get(tool.function_name)
-
-            if not main_function:
-                raise ValueError(f"Main function '{tool.function_name}' not found after execution")
-
-            logger.info(f"Successfully created executable function: {tool.function_name}")
-            return main_function
-
-        except Exception as e:
-            logger.error(f"Failed to create executable function: {e}")
-            raise
 
     def transform_tool(self, tool_id: int) -> LangGraphToolInfo:
         """Transform a database tool into a LangGraph tool"""
@@ -211,10 +107,10 @@ class DatabaseToLangGraphTransformer:
             # Parse imports and class definitions from the full script text
             namespace = {}
             if db_tool.script_code:
-                namespace = self._parse_imports_and_classes(db_tool.script_code)
+                namespace = parse_imports_and_classes(db_tool.script_code)
 
             # Create executable function
-            executable_func = self.create_executable_function(db_tool)
+            executable_func = create_executable_function(db_tool)
 
             # Create Pydantic input model if schema exists
             input_model = None

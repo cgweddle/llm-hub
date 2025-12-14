@@ -2,14 +2,16 @@
   import { onMount } from 'svelte';
   import { fetchCondaEnvironments, type CondaEnvironment } from '$lib/api';
 
+  // Bind to parent's selected environment
+  export let selectedEnv: string | null = null;
+
   let environments: CondaEnvironment[] = [];
   let loading = true;
-  let selectedEnv = '';
 
   onMount(async () => {
     try {
       environments = await fetchCondaEnvironments();
-      if (environments.length > 0) {
+      if (environments.length > 0 && !selectedEnv) {
         selectedEnv = environments[0].path;
       }
     } catch (err) {

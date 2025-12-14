@@ -93,6 +93,7 @@ class Flow(Base):
     graph_config = Column(JSON, nullable=False)  # Store adjacency matrix and node configs
     entry_point = Column(String(100), nullable=False)
     exit_points = Column(JSON)  # List of exit points
+    conda_env = Column(String(500), nullable=True)  # Optional conda environment path
     is_public = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
