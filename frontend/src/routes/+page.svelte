@@ -18,6 +18,7 @@
   import ToolNode from './ToolNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
   import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
+  import FullscreenNodeModal from './FullscreenNodeModal.svelte';
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
@@ -495,6 +496,9 @@
       </div>
     </div>
   {/if}
+
+  <!-- Fullscreen Node Modal -->
+  <FullscreenNodeModal />
 </div>
 
 <style>

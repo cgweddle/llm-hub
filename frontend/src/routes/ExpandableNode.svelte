@@ -1,45 +1,45 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
+  import { fullscreenNode } from '$lib/stores/fullscreenNode';
 
   type $$Props = Omit<NodeProps, 'id'>;
   export let data: $$Props['data'];
   export let isConnectable: $$Props['isConnectable'];
+  export let id: string;
 
   let { label, handles = ['a'] } = data;
-  let expanded = false;
+
+  function openFullscreen() {
+    fullscreenNode.open({
+      nodeId: id,
+      nodeType: 'expandable',
+      data: {
+        label,
+        handles,
+        id
+      }
+    });
+  }
 </script>
 
 <div class="customNode">
   <div class="customNodeBody">
     <div class="node-header">
       <span class="node-title">{label}</span>
-      <button 
+      <button
         class="expand-button"
-        on:click={() => (expanded = !expanded)}
-        on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { expanded = !expanded; } }}
-        aria-label={expanded ? 'Collapse node' : 'Expand node'}
+        on:click={openFullscreen}
+        on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { openFullscreen(); } }}
+        aria-label="Expand node fullscreen"
       >
-        {expanded ? '−' : '+'}
+        +
       </button>
     </div>
     <div class="node-content">
-      {#if expanded}
-        <div class="expanded-content">
-          <div class="node-details">
-            <p>This is a {label.toLowerCase()} node.</p>
-            <p>You can configure its properties here.</p>
-          </div>
-          <div class="node-actions">
-            <button class="action-button primary">Configure</button>
-            <button class="action-button secondary">Settings</button>
-          </div>
-        </div>
-      {:else}
-        <div class="collapsed-content">
-          <div class="node-icon">📦</div>
-          <span class="node-text">Click to expand</span>
-        </div>
-      {/if}
+      <div class="collapsed-content">
+        <div class="node-icon">📦</div>
+        <span class="node-text">Click to expand</span>
+      </div>
     </div>
   </div>
 </div>
@@ -127,55 +127,6 @@
 
   .node-content {
     padding: 12px 16px;
-  }
-
-  .expanded-content {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .node-details {
-    font-size: 13px;
-    color: #6c757d;
-    line-height: 1.4;
-  }
-
-  .node-details p {
-    margin: 0 0 8px 0;
-  }
-
-  .node-actions {
-    display: flex;
-    gap: 8px;
-  }
-
-  .action-button {
-    padding: 6px 12px;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 500;
-    transition: all 0.2s ease;
-  }
-
-  .action-button.primary {
-    background: #007bff;
-    color: white;
-  }
-
-  .action-button.primary:hover {
-    background: #0056b3;
-  }
-
-  .action-button.secondary {
-    background: #6c757d;
-    color: white;
-  }
-
-  .action-button.secondary:hover {
-    background: #545b62;
   }
 
   .collapsed-content {

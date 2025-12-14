@@ -1,49 +1,45 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
+  import { fullscreenNode } from '$lib/stores/fullscreenNode';
 
   type $$Props = Omit<NodeProps, 'id'>;
   export let data: $$Props['data'];
   export let isConnectable: $$Props['isConnectable'];
+  export let id: string;
 
   let { color, handles } = data;
-  let expanded = false;
+
+  function openFullscreen() {
+    fullscreenNode.open({
+      nodeId: id,
+      nodeType: 'colorSelector',
+      data: {
+        color,
+        handles,
+        id
+      }
+    });
+  }
 </script>
 
 <div class="customNode">
   <div class="customNodeBody">
     <div class="node-header">
       <span class="node-title">Color Picker</span>
-      <button 
+      <button
         class="expand-button"
-        on:click={() => (expanded = !expanded)}
-        on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { expanded = !expanded; } }}
-        aria-label={expanded ? 'Collapse node' : 'Expand node'}
+        on:click={openFullscreen}
+        on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { openFullscreen(); } }}
+        aria-label="Expand node fullscreen"
       >
-        {expanded ? '−' : '+'}
+        +
       </button>
     </div>
     <div class="node-content">
-      {#if expanded}
-        <div class="expanded-content">
-          <div class="color-display">
-            <span>Color: </span>
-            <span class="color-value" style="color: {$color}">{$color}</span>
-          </div>
-          <input
-            class="nodrag color-input"
-            type="color"
-            on:input={(event) => {
-              $color = event.currentTarget.value;
-            }}
-            value={$color}
-          />
-        </div>
-      {:else}
-        <div class="collapsed-content">
-          <div class="color-preview" style="background-color: {$color}"></div>
-          <span class="color-text">Click to expand</span>
-        </div>
-      {/if}
+      <div class="collapsed-content">
+        <div class="color-preview" style="background-color: {$color}"></div>
+        <span class="color-text">Click to expand</span>
+      </div>
     </div>
   </div>
 </div>
@@ -131,38 +127,6 @@
 
   .node-content {
     padding: 12px 16px;
-  }
-
-  .expanded-content {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .color-display {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: #6c757d;
-  }
-
-  .color-value {
-    font-weight: 600;
-    font-family: 'Courier New', monospace;
-  }
-
-  .color-input {
-    width: 100%;
-    height: 32px;
-    border: 2px solid #dee2e6;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: border-color 0.2s ease;
-  }
-
-  .color-input:hover {
-    border-color: #4a90e2;
   }
 
   .collapsed-content {
