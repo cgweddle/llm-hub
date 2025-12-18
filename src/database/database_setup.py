@@ -1,6 +1,6 @@
 # models.py
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, Table, create_engine, text
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from sqlalchemy.sql import func
 import os
@@ -138,6 +138,16 @@ class Message(Base):
     
     # Relationships
     execution = relationship("Execution", back_populates="messages")
+
+class Prompts(Base):
+    __tablename__ = 'prompts'
+
+    id = Column(Integer, primary_key=True)
+    prompt_name = Column(Text)
+    system_prompt = Column(Text)
+    user_prompt = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
 
 class DatabaseManager:

@@ -4,7 +4,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 import os
 import logging
-from .database_setup import User, Agent, Tool, Flow, Execution, Message
+from .database_setup import User, Agent, Tool, Flow, Execution, Message, Prompts
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -285,5 +285,9 @@ def get_available_flows(session: Any, user_id: int) -> List[Flow]:
         if flow.id not in seen_ids:
             seen_ids.add(flow.id)
             unique_flows.append(flow)
-    
+
     return unique_flows
+
+def get_prompt_by_name(session: Any, prompt_name: str) -> Optional[Prompts]:
+    """Get prompt by name from Prompts table"""
+    return session.query(Prompts).filter(Prompts.prompt_name == prompt_name).first()

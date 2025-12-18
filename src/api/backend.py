@@ -1,6 +1,7 @@
 # api.py
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 import sys
 import os
@@ -14,11 +15,13 @@ from src.database.database import (
     create_tool, get_user_tools, create_flow, get_user_flows,
     get_tool_by_id, update_tool, get_flow_by_id, update_flow
 )
+from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility
 from src.executors.flow_executor import FlowExecutor
+from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from passlib.hash import bcrypt
 
@@ -162,6 +165,49 @@ class FlowExecuteRequest(BaseModel):
     initial_input: dict
     conda_env: Optional[str] = None
 
+class PythonScriptToolCreate(BaseModel):
+    name: str
+    description: str
+    script_code: str
+    main_function: str
+    is_public: bool = False
+
+class CodeGenerateRequest(BaseModel):
+    tool_name: str
+    tool_description: str
+    provider: str  # e.g., 'anthropic', 'openai', 'gemini', 'lmstudio'
+    model: str     # e.g., 'claude-3-5-sonnet-20241022'
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    additional_instructions: Optional[str] = None
+
+class CodeGenerateResponse(BaseModel):
+    script_code: str
+    main_function: str
+
+class CodeEditRequest(BaseModel):
+    existing_code: str
+    editing_instructions: str
+    tool_name: str
+    tool_description: str
+    provider: str  # e.g., 'anthropic', 'openai', 'gemini', 'lmstudio'
+    model: str     # e.g., 'claude-3-5-sonnet-20241022'
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+
+class LLMProviderConfig(BaseModel):
+    name: str
+    provider: str  # 'anthropic' | 'openai' | 'gemini' | 'lmstudio'
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    model: str
+
+class LLMProvidersConfigRequest(BaseModel):
+    models: List[LLMProviderConfig]
+
+class LLMProvidersConfigResponse(BaseModel):
+    models: List[Dict[str, Any]]
+
 
 @app.post("/agents/", response_model=AgentResponse)
 def create_agent_endpoint(agent_data: AgentCreate, user_id: int, db: Session = Depends(get_db)):
@@ -244,6 +290,117 @@ def create_tool_endpoint(tool_data: ToolCreate, user_id: int, db: Session = Depe
         is_public=tool_data.is_public
     )
     return tool
+
+@app.post("/tools/python-script", response_model=ToolResponse)
+def create_python_script_tool_endpoint(tool_data: PythonScriptToolCreate, user_id: int, db: Session = Depends(get_db)):
+    """Create a new tool from a Python script using PythonScriptToolFactory"""
+    try:
+        # Create factory with the specified main function
+        factory = PythonScriptToolFactory(main_function=tool_data.main_function)
+        
+        # Create tool using the factory
+        tool_id = factory.create_tool_from_script(
+            script_code=tool_data.script_code,
+            tool_name=tool_data.name,
+            tool_description=tool_data.description,
+            user_id=user_id
+        )
+        
+        # Fetch the created tool
+        created_tool = get_tool_by_id(db, tool_id)
+        if not created_tool:
+            raise HTTPException(status_code=500, detail="Tool was created but could not be retrieved")
+        
+        # Update is_public if needed (factory doesn't handle this)
+        if created_tool.is_public != tool_data.is_public:
+            update_tool(db, tool_id, is_public=tool_data.is_public)
+            created_tool = get_tool_by_id(db, tool_id)
+        
+        return created_tool
+        
+    except ValueError as e:
+        # Factory validation errors (e.g., invalid syntax, missing function)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Other errors
+        raise HTTPException(status_code=500, detail=f"Failed to create python script tool: {str(e)}")
+
+@app.post("/tools/generate-code")
+def generate_tool_code_endpoint(request: CodeGenerateRequest, db: Session = Depends(get_db)):
+    """Generate Python tool code using AI with user-selected LLM (streaming)"""
+    try:
+        from src.ai_integrations.generate_python_tools import generate_tool_code_stream
+
+        def stream_generator():
+            try:
+                for chunk in generate_tool_code_stream(
+                    session=db,
+                    tool_name=request.tool_name,
+                    tool_description=request.tool_description,
+                    provider=request.provider,
+                    model=request.model,
+                    api_key=request.api_key,
+                    base_url=request.base_url,
+                    additional_instructions=request.additional_instructions
+                ):
+                    yield chunk
+            except Exception as e:
+                yield json.dumps({"error": f"Streaming error: {str(e)}"}) + "\n"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except ValueError as e:
+        # Missing prompts or validation errors
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        # LLM invocation or other errors
+        raise HTTPException(status_code=500, detail=f"Code generation failed: {str(e)}")
+
+@app.post("/tools/edit-code")
+def edit_tool_code_endpoint(request: CodeEditRequest, db: Session = Depends(get_db)):
+    """Edit existing Python tool code using AI with user-selected LLM (streaming)"""
+    try:
+        from src.ai_integrations.generate_python_tools import edit_tool_code_stream
+
+        def stream_generator():
+            try:
+                for chunk in edit_tool_code_stream(
+                    session=db,
+                    existing_code=request.existing_code,
+                    editing_instructions=request.editing_instructions,
+                    tool_name=request.tool_name,
+                    tool_description=request.tool_description,
+                    provider=request.provider,
+                    model=request.model,
+                    api_key=request.api_key,
+                    base_url=request.base_url
+                ):
+                    yield chunk
+            except Exception as e:
+                yield json.dumps({"error": f"Streaming error: {str(e)}"}) + "\n"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except ValueError as e:
+        # Missing prompts or validation errors
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        # LLM invocation or other errors
+        raise HTTPException(status_code=500, detail=f"Code editing failed: {str(e)}")
 
 @app.get("/tools/available/{user_id}", response_model=List[ToolResponse])
 def get_available_tools_endpoint(user_id: int, db: Session = Depends(get_db)):
@@ -426,3 +583,33 @@ def get_conda_environments():
         }
     except:
         return {"status": "error", "message": "Failed to get conda environments", "environments": []}
+
+# LLM Provider Config Endpoints
+@app.get("/llm-providers/config", response_model=LLMProvidersConfigResponse)
+def get_llm_providers_config():
+    """Load LLM provider configuration from ~/.llm_hub/config.yaml"""
+    try:
+        config = load_llm_provider_config()
+        return config
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load LLM config: {str(e)}")
+
+@app.post("/llm-providers/config")
+def save_llm_providers_config(config: LLMProvidersConfigRequest):
+    """Save LLM provider configuration to ~/.llm_hub/config.yaml"""
+    try:
+        from src.utils import get_llm_hub_config_path
+
+        # Convert Pydantic models to dictionaries
+        models_list = [model.model_dump() for model in config.models]
+
+        # Save to config file
+        save_llm_provider_config(models=models_list)
+
+        return {
+            "status": "success",
+            "message": "LLM provider configuration saved successfully",
+            "config_path": str(get_llm_hub_config_path())
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save LLM config: {str(e)}")

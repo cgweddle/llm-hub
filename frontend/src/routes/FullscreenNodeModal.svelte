@@ -5,6 +5,10 @@
   import { oneDark } from '@codemirror/theme-one-dark';
   import { EditorState } from '@codemirror/state';
   import { onDestroy } from 'svelte';
+  import { editToolCodeStream } from '$lib/api';
+  import type { LLMProvider } from '$lib/store';
+
+  export let llmProviders: LLMProvider[] = [];
 
   $: nodeData = $fullscreenNode;
 
@@ -16,6 +20,18 @@
   let editorContainer: HTMLDivElement;
   let editorView: EditorView | null = null;
   let editedCode = '';
+  let mainFunction = '';
+
+  // Edit with AI state
+  let showEditWithAI = false;
+  let editingInstructions = '';
+  let isEditingWithAI = false;
+  let selectedLLMProvider: LLMProvider | null = null;
+
+  // Initialize main function from node data
+  $: if (nodeData?.data.main_function) {
+    mainFunction = nodeData.data.main_function;
+  }
 
   // Watch for node data changes and initialize editor
   $: if (nodeData?.nodeType === 'tool' && editorContainer && nodeData.data.script_code) {
@@ -97,14 +113,21 @@
     saveError = false;
 
     try {
+      const updateData: { script_code: string; main_function?: string } = {
+        script_code: editedCode
+      };
+
+      // Include main function if it's changed
+      if (mainFunction && mainFunction !== nodeData.data.main_function) {
+        updateData.main_function = mainFunction;
+      }
+
       const response = await fetch(`http://localhost:8000/tools/${nodeData.data.toolId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          script_code: editedCode
-        })
+        body: JSON.stringify(updateData)
       });
 
       if (!response.ok) {
@@ -115,6 +138,9 @@
       // Update the node data
       if (nodeData) {
         nodeData.data.script_code = editedCode;
+        if (mainFunction) {
+          nodeData.data.main_function = mainFunction;
+        }
       }
 
       saveError = false;
@@ -134,6 +160,7 @@
 
   function handleCancel() {
     editedCode = nodeData?.data.script_code || '';
+    mainFunction = nodeData?.data.main_function || '';
     if (editorView) {
       editorView.dispatch({
         changes: {
@@ -144,6 +171,134 @@
       });
     }
     isEditing = false;
+  }
+
+  /**
+   * Edit existing code using AI with streaming
+   */
+  async function handleEditWithAI() {
+    // Validate editing instructions
+    if (!editingInstructions.trim()) {
+      saveError = true;
+      saveMessage = 'Please enter editing instructions';
+      setTimeout(() => { saveMessage = ''; }, 3000);
+      return;
+    }
+
+    // Validate code exists
+    if (!editedCode.trim() && !(nodeData?.data.script_code || '').trim()) {
+      saveError = true;
+      saveMessage = 'No code to edit.';
+      setTimeout(() => { saveMessage = ''; }, 3000);
+      return;
+    }
+
+    // Validate LLM provider is selected
+    if (!selectedLLMProvider) {
+      saveError = true;
+      saveMessage = 'Please select an LLM provider';
+      setTimeout(() => { saveMessage = ''; }, 5000);
+      return;
+    }
+
+    try {
+      isEditingWithAI = true;
+      saveError = false;
+
+      // Get the current code
+      const currentCode = isEditing ? editedCode : (nodeData?.data.script_code || '');
+
+      // Clear existing code and enter edit mode if not already editing
+      if (!isEditing) {
+        isEditing = true;
+        editedCode = '';
+      } else {
+        editedCode = '';
+      }
+
+      if (editorView) {
+        const transaction = editorView.state.update({
+          changes: {
+            from: 0,
+            to: editorView.state.doc.length,
+            insert: ''
+          }
+        });
+        editorView.dispatch(transaction);
+      }
+
+      // Update editor to editable mode
+      updateEditorMode();
+
+      // Start streaming edited code
+      await editToolCodeStream(
+        {
+          existing_code: currentCode,
+          editing_instructions: editingInstructions.trim(),
+          tool_name: nodeData?.data.name || 'tool',
+          tool_description: nodeData?.data.description || '',
+          provider: selectedLLMProvider.provider,
+          model: selectedLLMProvider.model,
+          api_key: selectedLLMProvider.apiKey,
+          base_url: selectedLLMProvider.baseUrl
+        },
+        // onChunk: append text to editor as it arrives
+        (chunk: string) => {
+          editedCode += chunk;
+          if (editorView) {
+            const transaction = editorView.state.update({
+              changes: {
+                from: editorView.state.doc.length,
+                to: editorView.state.doc.length,
+                insert: chunk
+              }
+            });
+            editorView.dispatch(transaction);
+          }
+        },
+        // onDone: update with final cleaned code and main function
+        (scriptCode: string, mainFunctionName: string) => {
+          // Replace editor content with cleaned code (markdown stripped)
+          editedCode = scriptCode;
+          if (editorView) {
+            const transaction = editorView.state.update({
+              changes: {
+                from: 0,
+                to: editorView.state.doc.length,
+                insert: scriptCode
+              }
+            });
+            editorView.dispatch(transaction);
+          }
+
+          // Update main function name if provided
+          if (mainFunctionName) {
+            mainFunction = mainFunctionName;
+          }
+
+          // Show success message
+          saveError = false;
+          saveMessage = 'Code edited successfully! Review the changes.';
+          setTimeout(() => { saveMessage = ''; }, 3000);
+
+          isEditingWithAI = false;
+          editingInstructions = '';
+        },
+        // onError: show error message
+        (error: string) => {
+          saveError = true;
+          saveMessage = `Failed to edit code: ${error}`;
+          setTimeout(() => { saveMessage = ''; }, 5000);
+          isEditingWithAI = false;
+        }
+      );
+
+    } catch (error) {
+      saveError = true;
+      saveMessage = `Failed to edit code: ${error}`;
+      setTimeout(() => { saveMessage = ''; }, 5000);
+      isEditingWithAI = false;
+    }
   }
 
   function handleClose() {
@@ -183,6 +338,17 @@
             <p class="description-text">{nodeData.data.description || 'No description available'}</p>
           </div>
 
+          <div class="section">
+            <div class="section-label">Main Function</div>
+            <input
+              type="text"
+              bind:value={mainFunction}
+              placeholder="e.g. process_data"
+              class="main-function-input"
+              readonly={!isEditing}
+            />
+          </div>
+
           {#if nodeData.data.script_code || isEditing}
             <div class="section">
               <div class="section-header">
@@ -212,6 +378,65 @@
               <div class="code-container">
                 <div bind:this={editorContainer} class="editor-container"></div>
               </div>
+            </div>
+
+            <!-- Edit with AI Section -->
+            <div class="section">
+              <button
+                class="create-tool-expand-header"
+                on:click={() => showEditWithAI = !showEditWithAI}
+                type="button"
+              >
+                <span class="expand-icon">{showEditWithAI ? '∨' : '→'}</span>
+                <span>Edit with AI</span>
+              </button>
+
+              {#if showEditWithAI}
+                <div class="create-tool-ai-expanded">
+                  <div class="create-tool-ai-field-left">
+                    <label class="create-tool-label" for="editInstructions">Editing Instructions</label>
+                    <textarea
+                      id="editInstructions"
+                      bind:value={editingInstructions}
+                      placeholder="e.g., Add error handling, convert to async/await, optimize performance..."
+                      rows="8"
+                      class="create-tool-input create-tool-textarea-full"
+                    ></textarea>
+                  </div>
+
+                  <div class="create-tool-ai-field-right">
+                    <div class="create-tool-ai-field">
+                      <label class="create-tool-label" for="editLlmProvider">LLM Provider</label>
+                      <select
+                        id="editLlmProvider"
+                        class="create-tool-input"
+                        bind:value={selectedLLMProvider}
+                      >
+                        <option value={null}>-- Select LLM --</option>
+                        {#each llmProviders as provider}
+                          <option value={provider}>{provider.name}</option>
+                        {/each}
+                      </select>
+                      {#if llmProviders.length === 0}
+                        <div class="create-tool-helper-text" style="color: #f59e0b;">
+                          No LLM providers configured. Configure one in the sidebar's "Attach LLM" panel.
+                        </div>
+                      {/if}
+                    </div>
+
+                    <div class="create-tool-ai-field">
+                      <button
+                        class="edit-ai-button"
+                        on:click={handleEditWithAI}
+                        disabled={isEditingWithAI}
+                        type="button"
+                      >
+                        {isEditingWithAI ? 'Editing...' : 'Edit with AI'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
             </div>
           {:else}
             <div class="section">
@@ -583,5 +808,155 @@
   .modal-body::-webkit-scrollbar-thumb:hover,
   .code-container::-webkit-scrollbar-thumb:hover {
     background: #4e4e4e;
+  }
+
+  /* Main function input */
+  .main-function-input {
+    width: 100%;
+    padding: 10px;
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    color: #cccccc;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  .main-function-input:focus {
+    outline: none;
+    border-color: #007acc;
+  }
+
+  .main-function-input::placeholder {
+    color: #6c6c6c;
+  }
+
+  .main-function-input:read-only {
+    background: #252526;
+    cursor: default;
+  }
+
+  /* Edit with AI expandable section - matching Create Tool modal */
+  .create-tool-expand-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #2d2d30;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    padding: 10px 14px;
+    width: 100%;
+    color: #cccccc;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  .create-tool-expand-header:hover {
+    background: #3e3e42;
+    color: #ffffff;
+  }
+
+  .expand-icon {
+    font-size: 12px;
+    font-weight: bold;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+  }
+
+  .create-tool-ai-expanded {
+    margin-top: 12px;
+    padding: 16px;
+    background: #1e1e1e;
+    border: 1px solid #2d2d30;
+    border-radius: 4px;
+    display: flex;
+    flex-direction: row;
+    gap: 16px;
+  }
+
+  .create-tool-ai-field-left {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .create-tool-ai-field-right {
+    width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .create-tool-ai-field {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .create-tool-textarea-full {
+    flex: 1;
+    min-height: 150px;
+    resize: vertical;
+  }
+
+  .create-tool-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: #cccccc;
+    margin-bottom: 8px;
+  }
+
+  .create-tool-input {
+    width: 100%;
+    padding: 10px;
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    color: #cccccc;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    resize: vertical;
+  }
+
+  .create-tool-input:focus {
+    outline: none;
+    border-color: #007acc;
+  }
+
+  .create-tool-input::placeholder {
+    color: #6c6c6c;
+  }
+
+  .create-tool-helper-text {
+    font-size: 12px;
+    color: #858585;
+    margin-top: 6px;
+  }
+
+  .edit-ai-button {
+    padding: 10px 20px;
+    background: #0e7a0d;
+    border: none;
+    border-radius: 4px;
+    color: white;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    align-self: flex-start;
+  }
+
+  .edit-ai-button:hover:not(:disabled) {
+    background: #0c6b0c;
+  }
+
+  .edit-ai-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 </style>

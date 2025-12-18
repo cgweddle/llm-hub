@@ -1,40 +1,43 @@
 
 from langchain_litellm import ChatLiteLLM
-from utils import load_model_config
 from typing import Optional
 
 
-def create_llm(provider="openai", model="gpt-3.5-turbo", temperature: float = 0.0, config_path: Optional[str] = None) -> ChatLiteLLM:
+def create_llm(
+    provider="openai",
+    model="gpt-3.5-turbo",
+    temperature: float = 0.0,
+    config_path: Optional[str] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None
+) -> ChatLiteLLM:
     """
-    Create an agnostic LLM based on provider and model, validated against config.yaml
-    
+    Create an agnostic LLM based on provider and model
+
     Args:
-        provider (str): The provider name (e.g., 'bedrock', 'mistral')
+        provider (str): The provider name (e.g., 'anthropic', 'openai', 'gemini', 'lmstudio')
         model (str): The specific model name
-        temperature (float): Model temperature (default: 0.7)
-        config_path (str): Path to config.yaml file (default: "config.yaml")
-    
+        temperature (float): Model temperature (default: 0.0)
+        config_path (str): Path to config.yaml file (unused, kept for compatibility)
+        api_key (str): Optional API key for the provider
+        base_url (str): Optional base URL for custom endpoints (e.g., LM Studio)
+
     Returns:
         ChatLiteLLM: Configured LLM instance
-        
-    Raises:
-        ValueError: If provider or model is not found in config
     """
-    config = load_model_config()
-    
-    providers = config['models']['provider']
-    if provider not in providers:
-        available_providers = list(providers.keys())
-        raise ValueError(f"Provider '{provider}' not found in config. Available providers: {available_providers}")
+    # Build kwargs for ChatLiteLLM
+    kwargs = {
+        "model": model,
+        "temperature": temperature
+    }
 
+    # Add API key if provided
+    if api_key:
+        kwargs["api_key"] = api_key
 
-    available_models = providers[provider]
-    if model not in available_models:
-        raise ValueError(f"Model '{model}' not found for provider '{provider}'. Available models: {available_models}")
+    # Add base URL if provided
+    if base_url:
+        kwargs["api_base"] = base_url
 
-    
-    return ChatLiteLLM(
-        model=model,
-        temperature=temperature
-    )
+    return ChatLiteLLM(**kwargs)
 

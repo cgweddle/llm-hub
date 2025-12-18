@@ -13,16 +13,36 @@
     MarkerType,
     type Viewport
   } from '@xyflow/svelte';
+  import { EditorView, basicSetup } from 'codemirror';
+  import { python } from '@codemirror/lang-python';
+  import { oneDark } from '@codemirror/theme-one-dark';
+  import { EditorState } from '@codemirror/state';
+  import { onDestroy } from 'svelte';
 
   import ColorSelectorNode from './ColorSelectorNode.svelte';
   import ToolNode from './ToolNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
   import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
+  import LLMProvidersPanel from './LLMProvidersPanel.svelte';
   import FullscreenNodeModal from './FullscreenNodeModal.svelte';
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
-  import { validateTwoTools, createFlow, executeFlow, getFlowDetails, type ValidationResult, type Tool, type Agent, type FlowCreateRequest, type Flow as FlowType } from '../lib/api';
+  import {
+    validateTwoTools,
+    createFlow,
+    executeFlow,
+    getFlowDetails,
+    createPythonScriptTool,
+    generateToolCodeStream,
+    editToolCodeStream,
+    type ValidationResult,
+    type Tool,
+    type Agent,
+    type FlowCreateRequest,
+    type Flow as FlowType,
+    type CodeGenerateRequest
+  } from '../lib/api';
   import { buildEnhancedGraphConfig } from '$lib/flowBuilder';
   import { autoLayoutNodes } from '$lib/elkLayout';
   import '@xyflow/svelte/dist/style.css';
@@ -46,6 +66,73 @@
 
   // Conda environment state
   let selectedCondaEnv: string | null = null;
+
+  // LLM provider state
+  import type { LLMProvider } from '$lib/store';
+  let selectedLLMProvider: LLMProvider | null = null;
+  let llmProviders: LLMProvider[] = [];
+
+  // Create Tool modal state
+  let showCreateToolModal = false;
+  let newToolName = '';
+  let newToolDescription = '';
+  let newToolCode = '';
+  let newToolMainFunction = '';
+  let newToolIsPublic = false;
+  let showWriteWithAI = false;
+  let additionalInstructions = '';
+  let showEditWithAI = false;
+  let editingInstructions = '';
+  let isCreatingTool = false;
+  let isGeneratingCode = false;
+  let isEditingCode = false;
+
+  // CodeMirror editor for Create Tool modal
+  let createToolEditorContainer: HTMLDivElement;
+  let createToolEditorView: EditorView | null = null;
+
+  function initCreateToolEditor() {
+    destroyCreateToolEditor();
+
+    if (!createToolEditorContainer) return;
+
+    const startState = EditorState.create({
+      doc: newToolCode,
+      extensions: [
+        basicSetup,
+        python(),
+        oneDark,
+        EditorView.lineWrapping,
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            newToolCode = update.state.doc.toString();
+          }
+        })
+      ]
+    });
+
+    createToolEditorView = new EditorView({
+      state: startState,
+      parent: createToolEditorContainer
+    });
+  }
+
+  function destroyCreateToolEditor() {
+    if (createToolEditorView) {
+      createToolEditorView.destroy();
+      createToolEditorView = null;
+    }
+  }
+
+  // Initialize editor when modal opens
+  $: if (showCreateToolModal && createToolEditorContainer) {
+    initCreateToolEditor();
+  }
+
+  // Cleanup on component destroy
+  onDestroy(() => {
+    destroyCreateToolEditor();
+  });
 
   const nodeTypes = {
     selectorNode: ColorSelectorNode,
@@ -342,6 +429,320 @@
       setTimeout(() => { showValidationToast = false; }, 5000);
     }
   }
+
+  /**
+   * Create a new tool
+   */
+  async function handleCreateTool() {
+    if (!newToolName.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter a tool name';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    if (!newToolMainFunction.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter a main function name';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    if (!newToolCode.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter Python script code for the tool';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    try {
+      isCreatingTool = true;
+
+      const userId = data.user?.id || 1;
+      const createdTool = await createPythonScriptTool(userId, {
+        name: newToolName.trim(),
+        description: newToolDescription.trim(),
+        script_code: newToolCode,
+        main_function: newToolMainFunction.trim(),
+        is_public: newToolIsPublic
+      });
+
+      // Add the new tool to the available tools list
+      data.tools = [...data.tools, createdTool];
+
+      // Show success
+      validationSuccess = true;
+      validationMessage = `Tool "${createdTool.name}" created successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+
+      // Reset and close modal
+      closeCreateToolModal();
+      newToolName = '';
+      newToolDescription = '';
+      newToolCode = '';
+      newToolMainFunction = '';
+      newToolIsPublic = false;
+      showWriteWithAI = false;
+      additionalInstructions = '';
+      showEditWithAI = false;
+      editingInstructions = '';
+
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to create tool: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    } finally {
+      isCreatingTool = false;
+    }
+  }
+
+  /**
+   * Generate tool code using AI with streaming
+   */
+  async function handleGenerateWithAI() {
+    // Validate name and description
+    if (!newToolName.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter a tool name before generating code';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+    if (!newToolDescription.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter a tool description before generating code';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    // Validate LLM provider is selected
+    if (!selectedLLMProvider) {
+      validationSuccess = false;
+      validationMessage = 'Please select an LLM provider from the "Attach LLM" panel';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
+
+    try {
+      isGeneratingCode = true;
+
+      // Clear existing code
+      newToolCode = '';
+      if (createToolEditorView) {
+        const transaction = createToolEditorView.state.update({
+          changes: {
+            from: 0,
+            to: createToolEditorView.state.doc.length,
+            insert: ''
+          }
+        });
+        createToolEditorView.dispatch(transaction);
+      }
+
+      // Start streaming
+      await generateToolCodeStream(
+        {
+          tool_name: newToolName.trim(),
+          tool_description: newToolDescription.trim(),
+          provider: selectedLLMProvider.provider,
+          model: selectedLLMProvider.model,
+          api_key: selectedLLMProvider.apiKey,
+          base_url: selectedLLMProvider.baseUrl,
+          additional_instructions: additionalInstructions.trim() || undefined
+        },
+        // onChunk: append text to editor as it arrives
+        (chunk: string) => {
+          newToolCode += chunk;
+          if (createToolEditorView) {
+            const transaction = createToolEditorView.state.update({
+              changes: {
+                from: createToolEditorView.state.doc.length,
+                to: createToolEditorView.state.doc.length,
+                insert: chunk
+              }
+            });
+            createToolEditorView.dispatch(transaction);
+          }
+        },
+        // onDone: update with final cleaned code and main function
+        (scriptCode: string, mainFunction: string) => {
+          // Replace editor content with cleaned code (markdown stripped)
+          newToolCode = scriptCode;
+          if (createToolEditorView) {
+            const transaction = createToolEditorView.state.update({
+              changes: {
+                from: 0,
+                to: createToolEditorView.state.doc.length,
+                insert: scriptCode
+              }
+            });
+            createToolEditorView.dispatch(transaction);
+          }
+
+          // Update main function name
+          newToolMainFunction = mainFunction;
+
+          // Show success toast
+          validationSuccess = true;
+          validationMessage = 'Code generated successfully! Review and edit as needed.';
+          showValidationToast = true;
+          setTimeout(() => { showValidationToast = false; }, 3000);
+
+          isGeneratingCode = false;
+        },
+        // onError: show error message
+        (error: string) => {
+          validationSuccess = false;
+          validationMessage = `Failed to generate code: ${error}`;
+          showValidationToast = true;
+          setTimeout(() => { showValidationToast = false; }, 5000);
+          isGeneratingCode = false;
+        }
+      );
+
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to generate code: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      isGeneratingCode = false;
+    }
+  }
+
+  /**
+   * Edit existing code using AI with streaming
+   */
+  async function handleEditWithAI() {
+    // Validate editing instructions
+    if (!editingInstructions.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter editing instructions';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    // Validate code exists
+    if (!newToolCode.trim()) {
+      validationSuccess = false;
+      validationMessage = 'No code to edit. Please write or generate code first.';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    // Validate LLM provider is selected
+    if (!selectedLLMProvider) {
+      validationSuccess = false;
+      validationMessage = 'Please select an LLM provider';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
+
+    try {
+      isEditingCode = true;
+
+      // Save the existing code before clearing
+      const existingCode = newToolCode;
+
+      // Clear existing code
+      newToolCode = '';
+      if (createToolEditorView) {
+        const transaction = createToolEditorView.state.update({
+          changes: {
+            from: 0,
+            to: createToolEditorView.state.doc.length,
+            insert: ''
+          }
+        });
+        createToolEditorView.dispatch(transaction);
+      }
+
+      // Start streaming edited code
+      await editToolCodeStream(
+        {
+          existing_code: existingCode,
+          editing_instructions: editingInstructions.trim(),
+          tool_name: newToolName.trim() || 'tool',
+          tool_description: newToolDescription.trim() || '',
+          provider: selectedLLMProvider.provider,
+          model: selectedLLMProvider.model,
+          api_key: selectedLLMProvider.apiKey,
+          base_url: selectedLLMProvider.baseUrl
+        },
+        // onChunk: append text to editor as it arrives
+        (chunk: string) => {
+          newToolCode += chunk;
+          if (createToolEditorView) {
+            const transaction = createToolEditorView.state.update({
+              changes: {
+                from: createToolEditorView.state.doc.length,
+                to: createToolEditorView.state.doc.length,
+                insert: chunk
+              }
+            });
+            createToolEditorView.dispatch(transaction);
+          }
+        },
+        // onDone: update with final cleaned code and main function
+        (scriptCode: string, mainFunction: string) => {
+          // Replace editor content with cleaned code (markdown stripped)
+          newToolCode = scriptCode;
+          if (createToolEditorView) {
+            const transaction = createToolEditorView.state.update({
+              changes: {
+                from: 0,
+                to: createToolEditorView.state.doc.length,
+                insert: scriptCode
+              }
+            });
+            createToolEditorView.dispatch(transaction);
+          }
+
+          // Update main function name if provided
+          if (mainFunction) {
+            newToolMainFunction = mainFunction;
+          }
+
+          // Show success toast
+          validationSuccess = true;
+          validationMessage = 'Code edited successfully! Review the changes.';
+          showValidationToast = true;
+          setTimeout(() => { showValidationToast = false; }, 3000);
+
+          isEditingCode = false;
+        },
+        // onError: show error message
+        (error: string) => {
+          validationSuccess = false;
+          validationMessage = `Failed to edit code: ${error}`;
+          showValidationToast = true;
+          setTimeout(() => { showValidationToast = false; }, 5000);
+          isEditingCode = false;
+        }
+      );
+
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to edit code: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      isEditingCode = false;
+    }
+  }
+
+  function closeCreateToolModal() {
+    destroyCreateToolEditor();
+    showCreateToolModal = false;
+  }
 </script>
 
 <div class="app-container">
@@ -380,6 +781,8 @@
 
     <CondaEnvironmentsPanel bind:selectedEnv={selectedCondaEnv} />
 
+    <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
+
     <div class="flows-section">
       <h4>Available Flows</h4>
       <Button class="w-full mb-2" size="sm" on:click={() => showSaveDialog = true}>
@@ -395,16 +798,23 @@
       {/each}
     </div>
 
-    <h4>Available Tools</h4>
-    {#each availableTools as tool}
-      <div
-        class="draggable-node"
-        draggable="true"
-        on:dragstart={(event) => event.dataTransfer?.setData('text/plain', tool)}
-      >
-        {tool}
-      </div>
-    {/each}
+    <div class="tools-section">
+      <h4>Available Tools</h4>
+      <Button size="sm" onclick={() => showCreateToolModal = true} class="w-full mb-2 bg-blue-600 hover:bg-blue-700">
+        {#snippet children()}
+          Create New Tool
+        {/snippet}
+      </Button>
+      {#each availableTools as tool}
+        <div
+          class="draggable-node"
+          draggable="true"
+          on:dragstart={(event) => event.dataTransfer?.setData('text/plain', tool)}
+        >
+          {tool}
+        </div>
+      {/each}
+    </div>
 
     <h4>Available Agents</h4>
     {#each availableAgents as agent}
@@ -498,7 +908,218 @@
   {/if}
 
   <!-- Fullscreen Node Modal -->
-  <FullscreenNodeModal />
+  <FullscreenNodeModal {llmProviders} />
+
+  <!-- Create Tool Modal -->
+  {#if showCreateToolModal}
+    <div class="create-tool-overlay" on:click={closeCreateToolModal}>
+      <div class="create-tool-modal" on:click={(e) => e.stopPropagation()}>
+        <div class="create-tool-header">
+          <h2 class="create-tool-title">Create New Tool</h2>
+          <button class="create-tool-close" on:click={closeCreateToolModal}>×</button>
+        </div>
+
+        <div class="create-tool-body">
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Tool Details</div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="toolName">Name</label>
+              <input
+                id="toolName"
+                class="create-tool-input"
+                bind:value={newToolName}
+                placeholder="Tool Name"
+              />
+            </div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="toolDesc">Description</label>
+              <input
+                id="toolDesc"
+                class="create-tool-input"
+                bind:value={newToolDescription}
+                placeholder="Describe what this tool does..."
+              />
+            </div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label">Public</label>
+              <div class="create-tool-radio-group">
+                <label class="create-tool-radio-label">
+                  <input
+                    type="radio"
+                    name="toolPublic"
+                    value={false}
+                    checked={!newToolIsPublic}
+                    on:change={() => newToolIsPublic = false}
+                  />
+                  <span>No</span>
+                </label>
+                <label class="create-tool-radio-label">
+                  <input
+                    type="radio"
+                    name="toolPublic"
+                    value={true}
+                    checked={newToolIsPublic}
+                    on:change={() => newToolIsPublic = true}
+                  />
+                  <span>Yes</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="create-tool-form-row">
+              <button
+                class="create-tool-expand-header"
+                on:click={() => showWriteWithAI = !showWriteWithAI}
+                type="button"
+              >
+                <span class="expand-icon">{showWriteWithAI ? '∨' : '→'}</span>
+                <span>Write with AI</span>
+              </button>
+
+              {#if showWriteWithAI}
+                <div class="create-tool-ai-expanded">
+                  <div class="create-tool-ai-field-left">
+                    <label class="create-tool-label" for="aiInstructions">Additional Instructions (optional)</label>
+                    <textarea
+                      id="aiInstructions"
+                      class="create-tool-textarea create-tool-textarea-full"
+                      bind:value={additionalInstructions}
+                      placeholder="Any additional requirements or constraints..."
+                      rows="8"
+                    ></textarea>
+                  </div>
+
+                  <div class="create-tool-ai-field-right">
+                    <div class="create-tool-ai-field">
+                      <label class="create-tool-label" for="aiLlmProvider">LLM Provider</label>
+                      <select
+                        id="aiLlmProvider"
+                        class="create-tool-input"
+                        bind:value={selectedLLMProvider}
+                      >
+                        <option value={null}>-- Select LLM --</option>
+                        {#each llmProviders as provider}
+                          <option value={provider}>{provider.name}</option>
+                        {/each}
+                      </select>
+                      {#if llmProviders.length === 0}
+                        <div class="create-tool-helper-text" style="color: #f59e0b;">
+                          No LLM providers configured. Configure one in the sidebar's "Attach LLM" panel.
+                        </div>
+                      {/if}
+                    </div>
+
+                    <div class="create-tool-ai-field">
+                      <Button
+                        onclick={handleGenerateWithAI}
+                        disabled={isGeneratingCode || !newToolName.trim() || !newToolDescription.trim() || !selectedLLMProvider}
+                        class="bg-purple-600 hover:bg-purple-700"
+                      >
+                        {#snippet children()}
+                          {isGeneratingCode ? 'Writing...' : 'Write with AI'}
+                        {/snippet}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+            </div>
+
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="toolMainFunction">Main function name</label>
+              <input
+                id="toolMainFunction"
+                class="create-tool-input"
+                bind:value={newToolMainFunction}
+                placeholder="e.g. process_data"
+              />
+              <div class="create-tool-helper-text">
+                This should be the name of the top-level function to expose as the tool entrypoint. Its type hints will be used to infer inputs and outputs.
+              </div>
+            </div>
+          </div>
+
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Script Code</div>
+            <div class="create-tool-code-container">
+              <div bind:this={createToolEditorContainer} class="create-tool-editor-container"></div>
+            </div>
+          </div>
+
+          <div class="create-tool-section">
+            <button
+              class="create-tool-expand-header"
+              on:click={() => showEditWithAI = !showEditWithAI}
+              type="button"
+            >
+              <span class="expand-icon">{showEditWithAI ? '∨' : '→'}</span>
+              <span>Edit with AI</span>
+            </button>
+
+            {#if showEditWithAI}
+              <div class="create-tool-ai-expanded">
+                <div class="create-tool-ai-field-left">
+                  <label class="create-tool-label" for="editInstructions">Editing Instructions</label>
+                  <textarea
+                    id="editInstructions"
+                    class="create-tool-textarea create-tool-textarea-full"
+                    bind:value={editingInstructions}
+                    placeholder="e.g., Add error handling, convert to async/await, refactor to use classes..."
+                    rows="8"
+                  ></textarea>
+                  <div class="create-tool-helper-text">
+                    Describe what changes you want to make to the existing code.
+                  </div>
+                </div>
+
+                <div class="create-tool-ai-field-right">
+                  <div class="create-tool-ai-field">
+                    <label class="create-tool-label" for="editLlmProvider">LLM Provider</label>
+                    <select
+                      id="editLlmProvider"
+                      class="create-tool-input"
+                      bind:value={selectedLLMProvider}
+                    >
+                      <option value={null}>-- Select LLM --</option>
+                      {#each llmProviders as provider}
+                        <option value={provider}>{provider.name}</option>
+                      {/each}
+                    </select>
+                    {#if llmProviders.length === 0}
+                      <div class="create-tool-helper-text" style="color: #f59e0b;">
+                        No LLM providers configured. Configure one in the sidebar's "Attach LLM" panel.
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="create-tool-ai-field">
+                    <Button
+                      onclick={handleEditWithAI}
+                      disabled={isEditingCode || !newToolCode.trim() || !editingInstructions.trim() || !selectedLLMProvider}
+                      class="bg-green-600 hover:bg-green-700"
+                    >
+                      {#snippet children()}
+                        {isEditingCode ? 'Editing...' : 'Edit with AI'}
+                      {/snippet}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
+        </div>
+
+        <div class="create-tool-footer">
+          <Button variant="outline" onclick={closeCreateToolModal}>
+            {#snippet children()}Cancel{/snippet}
+          </Button>
+          <Button onclick={handleCreateTool} disabled={isCreatingTool} class="bg-blue-600 hover:bg-blue-700">
+            {#snippet children()}{isCreatingTool ? 'Creating...' : 'Create Tool'}{/snippet}
+          </Button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -732,5 +1353,325 @@
     background-color: #f9fafb;
     border-bottom-left-radius: 8px;
     border-bottom-right-radius: 8px;
+  }
+
+  /* Tools Section */
+  .tools-section {
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #ccc;
+  }
+
+  /* Create Tool Modal - Dark theme like FullscreenNodeModal */
+  .create-tool-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    animation: fadeIn 0.2s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .create-tool-modal {
+    background: #1e1e1e;
+    border-radius: 8px;
+    width: 95vw;
+    height: 95vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    animation: slideUp 0.3s ease-out;
+  }
+
+  @keyframes slideUp {
+    from {
+      transform: translateY(50px);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  .create-tool-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 2px solid #2d2d30;
+    background: #252526;
+  }
+
+  .create-tool-title {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 600;
+    color: #cccccc;
+  }
+
+  .create-tool-close {
+    background: none;
+    border: none;
+    font-size: 36px;
+    color: #cccccc;
+    cursor: pointer;
+    padding: 0;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+
+  .create-tool-close:hover {
+    background-color: #3e3e42;
+    color: #ffffff;
+  }
+
+  .create-tool-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .create-tool-section {
+    padding: 20px;
+    background: #252526;
+    border-radius: 8px;
+    border: 1px solid #2d2d30;
+  }
+
+  .create-tool-section-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #007acc;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+
+  .create-tool-form-row {
+    margin-bottom: 16px;
+  }
+
+  .create-tool-form-row:last-child {
+    margin-bottom: 0;
+  }
+
+  .create-tool-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: #cccccc;
+    margin-bottom: 6px;
+  }
+
+  .create-tool-helper-text {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #f5f5f5;
+    opacity: 0.9;
+  }
+
+  .create-tool-input {
+    width: 100%;
+    background: #1e1e1e;
+    color: #d4d4d4;
+    border: 1px solid #2d2d30;
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .create-tool-input:focus {
+    border-color: #007acc;
+  }
+
+  .create-tool-input::placeholder {
+    color: #6e6e6e;
+  }
+
+  .create-tool-radio-group {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+  }
+
+  .create-tool-radio-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #cccccc;
+  }
+
+  .create-tool-radio-label input[type="radio"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: #007acc;
+  }
+
+  .create-tool-radio-label:hover {
+    color: #ffffff;
+  }
+
+  .create-tool-expand-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #2d2d30;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    padding: 10px 14px;
+    width: 100%;
+    color: #cccccc;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  .create-tool-expand-header:hover {
+    background: #3e3e42;
+    color: #ffffff;
+  }
+
+  .expand-icon {
+    font-size: 12px;
+    font-weight: bold;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+  }
+
+  .create-tool-ai-expanded {
+    margin-top: 12px;
+    padding: 16px;
+    background: #1e1e1e;
+    border: 1px solid #2d2d30;
+    border-radius: 4px;
+    display: flex;
+    flex-direction: row;
+    gap: 16px;
+  }
+
+  .create-tool-ai-field-left {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .create-tool-ai-field-right {
+    width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .create-tool-ai-field {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .create-tool-textarea {
+    width: 100%;
+    background: #2d2d30;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    outline: none;
+    transition: border-color 0.2s;
+    resize: vertical;
+  }
+
+  .create-tool-textarea-full {
+    flex: 1;
+    min-height: 150px;
+  }
+
+  .create-tool-textarea:focus {
+    border-color: #007acc;
+  }
+
+  .create-tool-textarea::placeholder {
+    color: #6e6e6e;
+  }
+
+  .create-tool-code-container {
+    background: #1e1e1e;
+    border-radius: 4px;
+    overflow: auto;
+    border: 1px solid #2d2d30;
+    max-height: 400px;
+  }
+
+  .create-tool-editor-container {
+    min-height: 300px;
+    font-size: 14px;
+  }
+
+  .create-tool-editor-container :global(.cm-editor) {
+    height: 100%;
+  }
+
+  .create-tool-editor-container :global(.cm-scroller) {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 14px;
+  }
+
+  .create-tool-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 16px 24px;
+    border-top: 2px solid #2d2d30;
+    background: #252526;
+  }
+
+  /* Custom scrollbar for create tool modal */
+  .create-tool-body::-webkit-scrollbar {
+    width: 12px;
+  }
+
+  .create-tool-body::-webkit-scrollbar-track {
+    background: #1e1e1e;
+  }
+
+  .create-tool-body::-webkit-scrollbar-thumb {
+    background: #424242;
+    border-radius: 6px;
+  }
+
+  .create-tool-body::-webkit-scrollbar-thumb:hover {
+    background: #4e4e4e;
   }
 </style>
