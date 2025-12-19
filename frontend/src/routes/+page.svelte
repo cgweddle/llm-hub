@@ -17,7 +17,7 @@
   import { python } from '@codemirror/lang-python';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { EditorState } from '@codemirror/state';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, setContext } from 'svelte';
 
   import ColorSelectorNode from './ColorSelectorNode.svelte';
   import ToolNode from './ToolNode.svelte';
@@ -71,6 +71,13 @@
   import type { LLMProvider } from '$lib/store';
   let selectedLLMProvider: LLMProvider | null = null;
   let llmProviders: LLMProvider[] = [];
+
+  // Make llmProviders available to child components (ToolNode) as a writable store
+  const llmProvidersStore = writable<LLMProvider[]>([]);
+  setContext('llmProviders', llmProvidersStore);
+
+  // Sync llmProviders array with the store
+  $: llmProvidersStore.set(llmProviders);
 
   // Create Tool modal state
   let showCreateToolModal = false;
@@ -203,7 +210,8 @@
         description: tool?.description || '',
         script_code: tool?.script_code || '',
         input_schema: tool?.input_schema || null,
-        output_schema: tool?.output_schema || null
+        output_schema: tool?.output_schema || null,
+        runtimeLLM: null  // No LLM attached by default
       },
       position,
       sourcePosition: Position.Right,
@@ -327,6 +335,13 @@
           const tool = data.tools.find((t: Tool) => t.id === nodeConfig.id);
 
           if (tool) {
+            // Restore LLM configuration by looking up the model name
+            let runtimeLLM = null;
+            if (nodeConfig.model_name) {
+              // Find the LLM provider by name from the loaded providers
+              runtimeLLM = llmProviders.find(p => p.name === nodeConfig.model_name) || null;
+            }
+
             const newNode: Node = {
               id: nodeId,
               type: 'toolNode',
@@ -338,7 +353,8 @@
                 description: tool.description,
                 script_code: tool.script_code,
                 input_schema: tool.input_schema,
-                output_schema: tool.output_schema
+                output_schema: tool.output_schema,
+                runtimeLLM: runtimeLLM
               },
               position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
               sourcePosition: Position.Right,

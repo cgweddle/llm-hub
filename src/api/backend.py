@@ -587,9 +587,15 @@ def get_conda_environments():
 # LLM Provider Config Endpoints
 @app.get("/llm-providers/config", response_model=LLMProvidersConfigResponse)
 def get_llm_providers_config():
-    """Load LLM provider configuration from ~/.llm_hub/config.yaml"""
+    """Load LLM provider configuration from ~/.llm_hub/config.yaml with masked credentials"""
     try:
+        from src.utils import mask_credentials
+
         config = load_llm_provider_config()
+
+        # Mask sensitive credentials before sending to frontend
+        config['models'] = mask_credentials(config.get('models', []))
+
         return config
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load LLM config: {str(e)}")
@@ -598,10 +604,17 @@ def get_llm_providers_config():
 def save_llm_providers_config(config: LLMProvidersConfigRequest):
     """Save LLM provider configuration to ~/.llm_hub/config.yaml"""
     try:
-        from src.utils import get_llm_hub_config_path
+        from src.utils import get_llm_hub_config_path, restore_masked_credentials
 
         # Convert Pydantic models to dictionaries
         models_list = [model.model_dump() for model in config.models]
+
+        # Load existing config to restore any masked credentials
+        existing_config = load_llm_provider_config()
+        existing_models = existing_config.get('models', [])
+
+        # Restore masked credentials (if any)
+        models_list = restore_masked_credentials(models_list, existing_models)
 
         # Save to config file
         save_llm_provider_config(models=models_list)

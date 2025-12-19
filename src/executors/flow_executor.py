@@ -11,6 +11,7 @@ from typing import Dict, Any, Callable, Optional, List
 from sqlalchemy.orm import Session
 from src.database.database_setup import Flow, Tool
 from src.executors.tool_executor import create_executable_function, create_conda_executable_function
+from src.utils import get_llm_config_by_name
 
 
 
@@ -51,31 +52,49 @@ class FlowExecutor:
         
         # Load / reload tools
         for node_name, node_info in nodes_config.items():
-            tool_id = node_info['tool_id']
+            # Support both 'id' and 'tool_id' keys for backwards compatibility
+            tool_id = node_info.get('id') or node_info.get('tool_id')
 
             # Skip if its not a node to reload
             if start_node and node_name not in nodes_to_reload:
                 continue
-            
+
             tool = self.session.query(Tool).filter(Tool.id == tool_id).first()
             if not tool:
                 raise ValueError(f"Tool with ID {tool_id} not found in database")
-            
+
             # If there is a conda environment associated with the flow, run with that
             if self.conda_env:
                 func = create_conda_executable_function(tool, self.conda_env)
             else:
                 func = create_executable_function(tool)
 
+            # Load LLM configuration if specified for this node
+            llm_config = None
+            model_name = node_info.get('model_name')
+            if model_name:
+                try:
+                    llm_config = get_llm_config_by_name(model_name)
+                    if llm_config:
+                        logger.info(f"Loaded LLM config '{model_name}' for node {node_name}")
+                    else:
+                        logger.warning(f"LLM config '{model_name}' not found in ~/.llm_hub/config.yaml for node {node_name}")
+                except Exception as e:
+                    logger.error(f"Failed to load LLM config '{model_name}': {e}")
+
             self.tools_cache[tool_id] = tool
             self.executable_functions[node_name] = {
                 "function": func,
                 "tool": tool,
                 "input_schema": tool.input_schema,
-                "output_schema": tool.output_schema
+                "output_schema": tool.output_schema,
+                "llm_config": llm_config  # Store LLM config for tools that need it
             }
 
-            logger.info(f"Prepared tool: {tool.name} for node {node_name}")
+            if llm_config:
+                logger.info(f"Prepared tool: {tool.name} for node {node_name} with LLM: {llm_config.get('name')}")
+            else:
+                logger.info(f"Prepared tool: {tool.name} for node {node_name}")
 
     def _get_downstream_nodes(self, start_node: str, edges_config: List[Dict]):
         downstream_nodes = set()

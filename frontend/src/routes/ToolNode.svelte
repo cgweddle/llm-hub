@@ -1,13 +1,20 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps, useUpdateNodeInternals } from '@xyflow/svelte';
   import { fullscreenNode } from '$lib/stores/fullscreenNode';
+  import type { LLMProvider } from '$lib/store';
+  import { getContext } from 'svelte';
+  import type { Writable } from 'svelte/store';
 
   type $$Props = Omit<NodeProps, 'id'>;
   export let data: $$Props['data'];
   export let isConnectable: $$Props['isConnectable'];
   export let id: string;
 
-  let { name, description, script_code, handles = ['a'], toolId, input_schema, output_schema } = data;
+  let { name, description, script_code, handles = ['a'], toolId, input_schema, output_schema, runtimeLLM } = data;
+
+  // Get LLM providers from parent context (passed from +page.svelte)
+  const llmProvidersStore = getContext<Writable<LLMProvider[]>>('llmProviders');
+  $: llmProviders = llmProvidersStore ? $llmProvidersStore : [];
 
   // Get the function to update node internals when handles change
   const updateNodeInternals = useUpdateNodeInternals();
@@ -98,20 +105,92 @@
     if (!text) return '';
     return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
   }
+
+  // LLM configuration
+  let showLLMDropdown = false;
+  let selectedLLM: LLMProvider | null = runtimeLLM || null;
+
+  function toggleLLMDropdown(event: Event) {
+    event.stopPropagation();
+    showLLMDropdown = !showLLMDropdown;
+  }
+
+  function selectLLM(provider: LLMProvider | null, event: Event) {
+    event.stopPropagation();
+    selectedLLM = provider;
+    data.runtimeLLM = provider;
+    showLLMDropdown = false;
+  }
+
+  function closeLLMDropdown() {
+    showLLMDropdown = false;
+  }
+
+  // Close dropdown when clicking outside
+  function handleOutsideClick(event: MouseEvent) {
+    if (showLLMDropdown) {
+      const target = event.target as HTMLElement;
+      if (!target.closest('.llm-config-container')) {
+        closeLLMDropdown();
+      }
+    }
+  }
 </script>
+
+<svelte:window on:click={handleOutsideClick} />
 
 <div class="toolNode">
   <div class="toolNodeBody">
     <div class="node-header">
       <span class="node-title">{name}</span>
-      <button
-        class="expand-button"
-        on:click={openFullscreen}
-        on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { openFullscreen(); } }}
-        aria-label="Expand node fullscreen"
-      >
-        +
-      </button>
+      <div class="node-actions">
+        <!-- LLM Configuration Button -->
+        <div class="llm-config-container">
+          <button
+            class="llm-button {selectedLLM ? 'has-llm' : ''}"
+            on:click={toggleLLMDropdown}
+            on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { toggleLLMDropdown(event); } }}
+            aria-label="Configure LLM"
+            title={selectedLLM ? `LLM: ${selectedLLM.name}` : 'Attach LLM'}
+          >
+            🤖
+          </button>
+
+          {#if showLLMDropdown}
+            <div class="llm-dropdown">
+              <div class="llm-dropdown-header">Attach LLM</div>
+              <button
+                class="llm-dropdown-item {!selectedLLM ? 'selected' : ''}"
+                on:click={(e) => selectLLM(null, e)}
+              >
+                <span class="llm-item-icon">⭘</span>
+                <span>None</span>
+              </button>
+              {#each llmProviders as provider}
+                <button
+                  class="llm-dropdown-item {selectedLLM?.name === provider.name ? 'selected' : ''}"
+                  on:click={(e) => selectLLM(provider, e)}
+                >
+                  <span class="llm-item-icon">🤖</span>
+                  <div class="llm-item-info">
+                    <span class="llm-item-name">{provider.name}</span>
+                    <span class="llm-item-model">{provider.model}</span>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <button
+          class="expand-button"
+          on:click={openFullscreen}
+          on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { openFullscreen(); } }}
+          aria-label="Expand node fullscreen"
+        >
+          +
+        </button>
+      </div>
     </div>
     <div class="node-content">
       <div class="collapsed-content">
@@ -235,7 +314,7 @@
     min-height: 100px;
     border: 3px solid #007acc;
     position: relative;
-    overflow: hidden;
+    overflow: visible;
     border-radius: 8px;
     background: #1e1e1e;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
@@ -244,7 +323,6 @@
 
   .toolNodeBody:hover {
     box-shadow: 0 6px 16px rgba(0, 122, 204, 0.4);
-    transform: translateY(-2px);
   }
 
   .node-header {
@@ -254,6 +332,7 @@
     padding: 12px 16px;
     border-bottom: 1px solid #2d2d30;
     background: #252526;
+    overflow: visible;
   }
 
   .node-title {
@@ -261,6 +340,154 @@
     color: #cccccc;
     font-size: 14px;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  .node-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* LLM Configuration Button */
+  .llm-config-container {
+    position: relative;
+  }
+
+  .llm-button {
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: #6b6b6b;
+    color: white;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    transition: all 0.2s ease;
+    line-height: 1;
+  }
+
+  .llm-button:hover {
+    background: #8b8b8b;
+    transform: scale(1.05);
+  }
+
+  .llm-button.has-llm {
+    background: #9333ea;
+    box-shadow: 0 0 8px rgba(147, 51, 234, 0.5);
+  }
+
+  .llm-button.has-llm:hover {
+    background: #7e22ce;
+  }
+
+  .llm-button:active {
+    transform: scale(0.95);
+  }
+
+  /* LLM Dropdown */
+  .llm-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: #2d2d30;
+    border: 1px solid #3e3e42;
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
+    min-width: 220px;
+    max-width: 280px;
+    z-index: 10000;
+    animation: slideDown 0.2s ease-out;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .llm-dropdown-header {
+    padding: 8px 12px;
+    background: #252526;
+    border-bottom: 1px solid #3e3e42;
+    font-size: 11px;
+    font-weight: 600;
+    color: #9333ea;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .llm-dropdown-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: transparent;
+    border: none;
+    color: #cccccc;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    text-align: left;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  .llm-dropdown-item:hover {
+    background: #3e3e42;
+  }
+
+  .llm-dropdown-item.selected {
+    background: #9333ea;
+    color: white;
+  }
+
+  .llm-dropdown-item.selected:hover {
+    background: #7e22ce;
+  }
+
+  .llm-item-icon {
+    font-size: 14px;
+    width: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .llm-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .llm-item-name {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .llm-item-model {
+    font-size: 11px;
+    color: #a0a0a0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .llm-dropdown-item.selected .llm-item-model {
+    color: #e0e0e0;
   }
 
   .expand-button {
