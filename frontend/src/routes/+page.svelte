@@ -161,31 +161,8 @@
 
   const connectionLineStyle = 'stroke: black; stroke-width: 3;';
 
-  // Simple working example
-  let nodes: Node[] = [
-    {
-      id: '1',
-      type: 'input',
-      data: { label: 'Input' },
-      position: { x: 100, y: 100 },
-      sourcePosition: Position.Right
-    },
-    {
-      id: '2',
-      type: 'selectorNode',
-      data: { color: writable('#ff0000'), handles: ['a', 'b'] },
-      position: { x: 400, y: 100 },
-      sourcePosition: Position.Right,
-      targetPosition: Position.Left
-    },
-    {
-      id: '3',
-      type: 'output',
-      data: { label: 'Output' },
-      position: { x: 700, y: 100 },
-      targetPosition: Position.Left
-    }
-  ];
+  // Start with an empty canvas
+  let nodes: Node[] = [];
 
   let edges: Edge[] = [];
 
