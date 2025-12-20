@@ -119,6 +119,11 @@ class FlowExecutor:
         node_info = self.executable_functions[node_name]
         func = node_info["function"]
 
+        ## Set llm config for the specific node
+        llm_config = node_info.get("llm_config")
+        if llm_config:
+            self._setup_llm_environment(llm_config=llm_config)
+
         logger.info(f"Executing node: {node_name}")
 
         try:
@@ -145,6 +150,38 @@ class FlowExecutor:
             })
             logger.error(f"Node {node_name} failed: {e}")
             raise
+
+    def _setup_llm_environment(self, llm_config: Dict) -> Dict[str, Optional[str]]:
+        """
+        Setup environment variables for calling the LLM from functions
+        """
+        provider = llm_config["provider"]
+        model = llm_config["model"]
+        api_key = llm_config.get("api_key")
+        base_url = llm_config.get("base_url")
+
+        os.environ["LLMHUB_MODEL_NAME"] = model
+        if provider == "anthropic":
+            if api_key:
+              os.environ["ANTHROPIC_API_KEY"] = api_key
+            if base_url:
+                os.environ["ANTHROPIC_BASE_URL"] = base_url
+        elif provider == "openai":
+            if api_key:
+              os.environ["OPENAI_API_KEY"] = api_key
+            if base_url:
+                os.environ["OPENAI_BASE_URL"] = base_url
+        elif provider == "llmstudio":
+            os.environ["OPENAI_API_KEY"] = api_key or "lm-studio"  # LM Studio needs a dummy key
+            if base_url:
+                os.environ["OPENAI_BASE_URL"] = base_url
+        elif provider=="azure":
+            if api_key:
+                os.environ["AZURE_API_KEY"] = api_key
+            if base_url:
+                os.environ["AZURE_API_BASE"] = base_url
+
+        
 
     def _find_next_node(self, current_node: str) -> List[str]:
         """Find the next nodes in the flow"""
