@@ -5,6 +5,7 @@ Validates if tools can work together in a workflow by checking type compatibilit
 
 import sys
 import os
+import logging
 from typing import Dict, Any, List
 
 # Add parent directory to path
@@ -12,6 +13,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from database.database import get_session
 from database.database_setup import Tool
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 
 def validate_tool_compatibility(tool_ids: List[int]) -> Dict[str, Any]:
@@ -130,6 +135,110 @@ def validate_two_tools(tool1_id: int, tool2_id: int) -> Dict[str, Any]:
             "input_schema": input_schema
         }
 
+    finally:
+        session.close()
+
+
+
+def validate_connection(
+        tool1_id: int,
+        tool2_id: int,
+        source_field: str,
+        target_field: str
+) -> Dict[str, Any]:
+    """
+    Validate specific connection between two tools
+
+    Args:
+        tool1_id: ID of source tool
+        tool2_id: ID of target tool
+        source_field: field name from source node
+        target_field: field name from target node
+
+    Returns:
+        Dict with:
+            - "compatible": bool
+            - source_field: output field being connected (None for whole output)
+            - target_field: input parameter being connected
+            - source_type: type of the source field
+            - target_type: type of the target field
+    """
+    logger.debug(f"validate_connection called: tool1_id={tool1_id}, tool2_id={tool2_id}, source_field='{source_field}', target_field='{target_field}'")
+    session = get_session()
+
+    try:
+        tool1 = session.query(Tool).filter(Tool.id == tool1_id).first()
+        tool2 = session.query(Tool).filter(Tool.id == tool2_id).first()
+
+        logger.debug(f"tool1: {tool1.name if tool1 else None}, tool2: {tool2.name if tool2 else None}")
+
+        if not tool1 or not tool2:
+            logger.error("Tool not found")
+            return {"compatible": False, "issues": ["Tool not found"]}
+    
+        output_schema = tool1.output_schema
+        input_schema = tool2.input_schema
+
+        logger.debug(f"output_schema: {output_schema}")
+        logger.debug(f"input_schema: {input_schema}")
+
+        ## If no source_field, get the type of the whole output
+        if source_field == "":
+            logger.debug("Using whole output (source_field is empty)")
+            source_type = output_schema.get("type") if output_schema else None
+            logger.debug(f"source_type from whole output: {source_type}")
+        else:
+            logger.debug(f"Using specific field: {source_field}")
+            if output_schema and output_schema.get("type") == "dict":
+                source_properties = output_schema.get("properties", {})
+                logger.debug(f"source_properties: {list(source_properties.keys())}")
+                if source_field in source_properties:
+                    source_type = source_properties[source_field].get("type")
+                    logger.debug(f"source_type: {source_type}")
+                else:
+                    logger.error(f"Field '{source_field}' not in source_properties")
+                    raise ValueError(f"No {source_field} in output schema properties")
+            else:
+                logger.error(f"Output schema type is {output_schema.get('type') if output_schema else None}, not dict")
+                raise ValueError(
+                    f"Cannot access field '{source_field}' on non-dict output"
+                )
+
+        ## Get target params
+        logger.debug(f"Getting target type for field: '{target_field}'")
+        # Input schema format: {"param_name": {"type": "str", "optional": false}}
+        # Parameters are at the top level, not under "properties"
+        if input_schema:
+            logger.debug(f"input_schema parameters: {list(input_schema.keys())}")
+        else:
+            logger.warning("input_schema is None")
+            input_schema = {}
+
+        if target_field in input_schema:
+            target_type = input_schema[target_field].get("type")
+            logger.debug(f"target_type: {target_type}")
+        else:
+            logger.error(f"Field '{target_field}' not in input_schema. Available: {list(input_schema.keys())}")
+            raise ValueError(f"Parameter '{target_field}' not found in input schema. Available: {list(input_schema.keys())}")
+
+        logger.debug(f"Comparing types: {source_type} == {target_type}")
+        if source_type == target_type:
+            compatible = True
+        else:
+            compatible = False
+
+        logger.debug(f"Validation result: compatible={compatible}")
+        return {
+            "compatible": compatible,
+            "source_field": source_field,
+            "target_field": target_field,
+            "source_type": source_type,
+            "target_type": target_type
+        }
+
+    except Exception as e:
+        logger.exception(f"Error in validate_connection: {e}")
+        raise
     finally:
         session.close()
 

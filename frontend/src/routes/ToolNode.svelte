@@ -10,7 +10,10 @@
   export let isConnectable: $$Props['isConnectable'];
   export let id: string;
 
-  let { name, description, script_code, handles = ['a'], toolId, input_schema, output_schema, runtimeLLM } = data;
+  // Reactive destructuring so variables update when data prop changes
+  let name: string, description: string, script_code: string, main_function: string;
+  let handles: string[], toolId: number, input_schema: any, output_schema: any, runtimeLLM: any;
+  $: ({ name, description, script_code, main_function, handles = ['a'], toolId, input_schema, output_schema, runtimeLLM } = data);
 
   // Get LLM providers from parent context (passed from +page.svelte)
   const llmProvidersStore = getContext<Writable<LLMProvider[]>>('llmProviders');
@@ -60,9 +63,14 @@
   }
 
   // Track custom parameter values
-  let parameterValues: { [key: string]: string } = {};
+  let parameterValues: { [key: string]: string } = data.parameterValues || {};
   let editingParameter: string | null = null;
   let tempValue: string = '';
+
+  // Update node data when parameterValues change
+  $: if (data) {
+    data.parameterValues = parameterValues;
+  }
 
   function handleParameterClick(paramName: string) {
     editingParameter = paramName;
@@ -92,6 +100,7 @@
         name,
         description,
         script_code,
+        main_function,
         toolId,
         input_schema,
         output_schema,
@@ -238,7 +247,7 @@
       <Handle
         type="target"
         position={Position.Left}
-        id={`input-${paramName}`}
+        id={paramName}
         style="background: #007acc; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
         {isConnectable}
       />
@@ -246,7 +255,7 @@
   {/each}
 {:else}
   <!-- Default single target handle if no input schema -->
-  <Handle type="target" position={Position.Left} style="background: #007acc; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;" {isConnectable} />
+  <Handle type="target" position={Position.Left} id="" style="background: #007acc; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;" {isConnectable} />
 {/if}
 
 <!-- Output Handles (Source) -->
@@ -264,7 +273,7 @@
     <Handle
       type="source"
       position={Position.Right}
-      id="output"
+      id=""
       style="background: #0e7a0d; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
       isConnectable={!outputExpanded && isConnectable}
     />
@@ -280,7 +289,7 @@
         <Handle
           type="source"
           position={Position.Right}
-          id={`output-${prop.key}`}
+          id={prop.key}
           style="background: #0e7a0d; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
           {isConnectable}
         />
@@ -294,7 +303,7 @@
     <Handle
       type="source"
       position={Position.Right}
-      id="output"
+      id=""
       style="background: #0e7a0d; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
       {isConnectable}
     />

@@ -9,6 +9,7 @@
   import type { LLMProvider } from '$lib/store';
 
   export let llmProviders: LLMProvider[] = [];
+  export let onToolUpdated: ((nodeId: string, updatedData: any) => void) | undefined = undefined;
 
   $: nodeData = $fullscreenNode;
 
@@ -28,10 +29,48 @@
   let isEditingWithAI = false;
   let selectedLLMProvider: LLMProvider | null = null;
 
-  // Initialize main function from node data
-  $: if (nodeData?.data.main_function) {
-    mainFunction = nodeData.data.main_function;
+  // Fetch fresh tool data from database (only called after save)
+  async function fetchFreshToolData(toolId: number) {
+    try {
+      const response = await fetch(`http://localhost:8000/tools/${toolId}`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch tool: ${response.statusText}`);
+      }
+
+      const freshTool = await response.json();
+
+      // Update local modal state
+      if (nodeData && nodeData.data) {
+        nodeData.data.script_code = freshTool.script_code;
+        nodeData.data.main_function = freshTool.main_function;
+        nodeData.data.description = freshTool.description;
+        nodeData.data.input_schema = freshTool.input_schema;
+        nodeData.data.output_schema = freshTool.output_schema;
+
+        mainFunction = freshTool.main_function || '';
+        editedCode = freshTool.script_code || '';
+      }
+
+      // Notify parent to update canvas node
+      if (onToolUpdated && nodeData?.nodeId) {
+        onToolUpdated(nodeData.nodeId, {
+          script_code: freshTool.script_code,
+          main_function: freshTool.main_function,
+          description: freshTool.description,
+          input_schema: freshTool.input_schema,
+          output_schema: freshTool.output_schema,
+        });
+      }
+
+      return freshTool;
+    } catch (error) {
+      console.error('Failed to fetch fresh tool data:', error);
+      throw error;
+    }
   }
+
+  // Initialize main function from node data
+  $: mainFunction = nodeData?.data?.main_function || '';
 
   // Watch for node data changes and initialize editor
   $: if (nodeData?.nodeType === 'tool' && editorContainer && nodeData.data.script_code) {
@@ -135,13 +174,8 @@
         throw new Error(errorData.detail || `Failed to update tool: ${response.statusText}`);
       }
 
-      // Update the node data
-      if (nodeData) {
-        nodeData.data.script_code = editedCode;
-        if (mainFunction) {
-          nodeData.data.main_function = mainFunction;
-        }
-      }
+      // Fetch fresh data after successful save
+      await fetchFreshToolData(nodeData.data.toolId);
 
       saveError = false;
       saveMessage = 'Saved successfully!';

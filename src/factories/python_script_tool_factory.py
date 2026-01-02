@@ -234,7 +234,7 @@ class PythonScriptToolFactory:
                     name=tool_name,
                     description=tool_description,
                     tool_type="python_script",
-                    function_name=main_func.name,
+                    main_function=main_func.name,
                     function_code=main_func.code,
                     script_code=script_code,
                     input_schema=input_schema,

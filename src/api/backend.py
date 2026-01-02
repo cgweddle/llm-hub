@@ -13,11 +13,11 @@ from src.database.database import (
     get_available_agents, get_available_tools, get_available_flows,
     get_public_agents, get_public_tools, get_public_flows,
     create_tool, get_user_tools, create_flow, get_user_flows,
-    get_tool_by_id, update_tool, get_flow_by_id, update_flow
+    get_tool_by_id, update_tool, get_flow_by_id, update_flow, delete_flow
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.database.database_setup import DatabaseManager
-from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility
+from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.executors.flow_executor import FlowExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from pydantic import BaseModel, EmailStr
@@ -109,6 +109,7 @@ class ToolResponse(BaseModel):
     is_public: bool
     created_at: datetime
     updated_at: datetime
+    main_function: Optional[str] = None
     script_code: Optional[str] = None
     input_schema: Optional[dict] = None
     output_schema: Optional[dict] = None
@@ -121,7 +122,7 @@ class ToolUpdate(BaseModel):
     description: Optional[str] = None
     script_code: Optional[str] = None
     tool_type: Optional[str] = None
-    function_name: Optional[str] = None
+    main_function: Optional[str] = None
     function_code: Optional[str] = None
     input_schema: Optional[dict] = None
     output_schema: Optional[dict] = None
@@ -145,9 +146,22 @@ class FlowResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class FlowUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    graph_config: Optional[dict] = None
+    is_public: Optional[bool] = None
+    conda_env: Optional[str] = None
+
 class ValidateTwoToolsRequest(BaseModel):
     tool1_id: int
     tool2_id: int
+
+class ValidateSpecificConnectionRequest(BaseModel):
+    tool1_id: int
+    tool2_id: int
+    source_field: str = ""
+    target_field: str = ""
 
 class ValidateToolChainRequest(BaseModel):
     tool_ids: List[int]
@@ -417,6 +431,14 @@ def get_user_tools_endpoint(user_id: int, db: Session = Depends(get_db)):
     """Get all tools for a specific user"""
     return get_user_tools(db, user_id)
 
+@app.get("/tools/{tool_id}", response_model=ToolResponse)
+def get_tool_endpoint(tool_id: int, db: Session = Depends(get_db)):
+    """Get a single tool by ID"""
+    tool = get_tool_by_id(db, tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail="Tool not found")
+    return tool
+
 @app.options("/tools/{tool_id}")
 async def options_update_tool(tool_id):
     """Handle CORS preflight for PATCH requests on /tools/{tool_id}"""
@@ -436,6 +458,25 @@ def update_tool_endpoint(tool_id: int, tool_update: ToolUpdate, db: Session = De
     update_data = tool_update.model_dump(exclude_unset=True)
     if not update_data:
         return tool
+
+    # If script_code or main_function changed, regenerate schemas
+    if 'script_code' in update_data or 'main_function' in update_data:
+        script_code = update_data.get('script_code', tool.script_code)
+        main_function = update_data.get('main_function', tool.main_function)
+
+        if script_code and main_function:
+            try:
+                # Regenerate schemas using the factory
+                factory = PythonScriptToolFactory()
+                analyzer = factory.analyzer
+                functions = analyzer.parse_script(script_code)
+
+                if main_function in functions:
+                    schema_gen = factory.schema_generator
+                    update_data['input_schema'] = schema_gen.generate_input_schema(functions[main_function])
+                    update_data['output_schema'] = schema_gen.generate_output_schema(functions[main_function])
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to parse script: {str(e)}")
 
     # Update the tool
     updated_tool = update_tool(db, tool_id, **update_data)
@@ -463,6 +504,35 @@ def validate_two_tools_endpoint(request: ValidateTwoToolsRequest):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Validation failed: {str(e)}")
+
+@app.post("/tools/validate-connection")
+def validate_connection_endpoint(request: ValidateSpecificConnectionRequest):
+    """
+    Validate a specific field-to-field connection between two tools
+
+    Returns:
+        - compatible: bool
+        - source_field: name of source field
+        - target_field: name of target field
+        - source_type: type of the source field
+        - target_type: type of the target field
+    """
+    try:
+        result = validate_connection(
+            request.tool1_id,
+            request.tool2_id,
+            request.source_field,
+            request.target_field
+        )
+        return {
+            "compatible": result["compatible"],
+            "source_field": result["source_field"],
+            "target_field": result["target_field"],
+            "source_type": result["source_type"],
+            "target_type": result["target_type"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Connection validation failed: {str(e)}")
 
 @app.post("/tools/validate-chain")
 def validate_tool_chain_endpoint(request: ValidateToolChainRequest):
@@ -555,6 +625,39 @@ def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Opti
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow resume failed: {str(e)}")
+
+@app.patch("/flows/{flow_id}", response_model=FlowResponse)
+def update_flow_endpoint(flow_id: int, flow_update: FlowUpdate, db: Session = Depends(get_db)):
+    """Update a flow's properties (name, description, graph_config, etc.)"""
+    # Get the existing flow
+    flow = get_flow_by_id(db, flow_id)
+    if not flow:
+        raise HTTPException(status_code=404, detail="Flow not found")
+
+    # Only update fields that were provided
+    update_data = flow_update.model_dump(exclude_unset=True)
+    if not update_data:
+        return flow
+
+    # Update the flow
+    updated_flow = update_flow(db, flow_id, **update_data)
+    if not updated_flow:
+        raise HTTPException(status_code=500, detail="Failed to update flow")
+
+    return updated_flow
+
+@app.delete("/flows/{flow_id}")
+def delete_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
+    """Delete a flow"""
+    try:
+        success = delete_flow(db, flow_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Flow not found")
+        return {"status": "success", "message": f"Flow {flow_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Flow deletion failed: {str(e)}")
 
 # Conda Environment Endpoint
 @app.get("/conda/environments", response_model=CondaEnvironmentResponse)

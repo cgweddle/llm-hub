@@ -68,7 +68,7 @@
 		"@lucia-auth/adapter-sqlite": "^3.0.2",
 		"@node-rs/argon2": "^2.0.2",
 		"@xyflow/svelte": "^1.2.4",
-		"better-sqlite3": "^11.10.0",
+		"better-sqlite3": "^12.5.0",
 		"bits-ui": "^2.14.4",
 		"codemirror": "^6.0.2",
 		"elkjs": "^0.11.0",

@@ -164,6 +164,15 @@ def update_flow(session: Any, flow_id: int, **kwargs) -> Optional[Flow]:
         session.commit()
     return flow
 
+def delete_flow(session: Any, flow_id: int) -> bool:
+    """Delete a flow"""
+    flow = get_flow_by_id(session, flow_id)
+    if flow:
+        session.delete(flow)
+        session.commit()
+        return True
+    return False
+
 def create_user(session: Any, username: str, email: str, password_hash: str, is_active: bool = True) -> User:
     """Create a new user"""
     logger.info(f"Creating new user: {username} ({email})")
@@ -181,7 +190,7 @@ def create_user(session: Any, username: str, email: str, password_hash: str, is_
 
 ## Tool database functions
 def create_tool(session: Any, user_id: int, name: str, description: str,
-                tool_type: str, function_name: str = None, function_code: str = None,
+                tool_type: str, main_function: str = None, function_code: str = None,
                 helper_functions: Dict = None, script_code: str = None, input_schema: Dict = None,
                 output_schema: Dict = None, api_config: Dict = None, is_public: bool = False) -> Tool:
     """Create a new tool with helper functions and type schemas"""
@@ -190,7 +199,7 @@ def create_tool(session: Any, user_id: int, name: str, description: str,
         name=name,
         description=description,
         tool_type=tool_type,
-        function_name=function_name,
+        main_function=main_function,
         function_code=function_code,
         script_code=script_code,
         input_schema=input_schema or {},

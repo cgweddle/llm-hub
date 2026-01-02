@@ -68,7 +68,7 @@ class Tool(Base):
     name = Column(String(100), nullable=False)
     description = Column(Text)
     tool_type = Column(String(50), nullable=False)  # 'function', 'custom'
-    function_name = Column(String(100))  # For function-based tools
+    main_function = Column(String(100))  # For function-based tools
     function_code = Column(Text)  # Store actual function code
     helper_functions = Column(JSON)  # Store helper functions as {"name": "code"}
     script_code = Column(Text)  # Store full original Python script text

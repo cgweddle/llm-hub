@@ -115,17 +115,68 @@ def create_conda_executable_function(tool, conda_env: str) -> Callable:
     """
     Create an executable function that runs a subprocess with a conda environment
     Args:
-        tool: Tool with function_code and function_name
+        tool: Tool with function_code and main_function
         conda_env: Path to the conda environment to use
 
-    Returns: 
+    Returns:
         Callable function that executes tool in subprocess
     """
 
     def subprocess_wrapper(**kwargs):
+        # Get environment variables from parent process
+        model_name = os.environ.get('LLMHUB_MODEL_NAME', '')
+        config_name = os.environ.get('LLMHUB_CONFIG_NAME', '')
+
         script_template = '''
 import pickle
 import sys
+import os
+
+# Set environment variables from parent process
+os.environ["LLMHUB_MODEL_NAME"] = {model_name_repr}
+os.environ["LLMHUB_CONFIG_NAME"] = {config_name_repr}
+
+# Load LLM config and set environment variables
+if os.environ.get("LLMHUB_CONFIG_NAME"):
+    try:
+        import yaml
+        from pathlib import Path
+
+        config_path = Path.home() / ".llm_hub" / "config.yaml"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+
+            # Find the model config by config name (not model name)
+            config_name = os.environ["LLMHUB_CONFIG_NAME"]
+            for model_config in config.get('models', []):
+                if model_config.get('name') == config_name:
+                    # Set environment variables based on provider
+                    provider = model_config.get('provider')
+                    if provider == 'anthropic':
+                        if model_config.get('api_key'):
+                            os.environ['ANTHROPIC_API_KEY'] = model_config['api_key']
+                        if model_config.get('base_url'):
+                            os.environ['ANTHROPIC_BASE_URL'] = model_config['base_url']
+                    elif provider in ['openai', 'lmstudio']:
+                        if model_config.get('api_key'):
+                            os.environ['OPENAI_API_KEY'] = model_config['api_key']
+                        elif provider == 'lmstudio':
+                            os.environ['OPENAI_API_KEY'] = 'lm-studio'
+                        if model_config.get('base_url'):
+                            os.environ['OPENAI_BASE_URL'] = model_config['base_url']
+                    elif provider == 'azure':
+                        if model_config.get('api_key'):
+                            os.environ['AZURE_API_KEY'] = model_config['api_key']
+                        if model_config.get('base_url'):
+                            os.environ['AZURE_API_BASE'] = model_config['base_url']
+                    break
+    except Exception as e:
+        pass  # Silently fail if config loading fails
+
+# Prevent __name__ == "__main__" blocks from executing
+__name__ = "__tool_execution__"
+
 input_data = pickle.loads(sys.stdin.buffer.read())
 
 {script_code}
@@ -140,7 +191,7 @@ except Exception as e:
         "status": "error",
         "error": str(e),
         "error_type": type(e).__name__,
-        "traceback": traceback.format_exc()    
+        "traceback": traceback.format_exc()
     }}
 
 # Output result as pickle to stdout
@@ -148,8 +199,10 @@ sys.stdout.buffer.write(pickle.dumps(output))
         '''
 
         script = script_template.format(
+            model_name_repr = repr(model_name),
+            config_name_repr = repr(config_name),
             script_code = tool.script_code,
-            function_name = tool.function_name
+            function_name = tool.main_function
         )
 
         # Write script to temporary file
@@ -160,16 +213,16 @@ sys.stdout.buffer.write(pickle.dumps(output))
             # Pickle the input arguments
             input_pickle = pickle.dumps(kwargs)
 
-            # Execute with conda environment 
-            cmd = ['conda', 'run', '-p', conda_env, 'python', script_path]
+            # Build conda run command
+            cmd = ['conda', 'run', '--no-capture-output', '-p', conda_env, 'python', script_path]
 
-            logger.info(f"Executing tool {tool.function_name} in conda env: {conda_env}")
+            logger.info(f"Executing tool {tool.main_function} in conda env: {conda_env}")
 
             result = subprocess.run(
                 cmd,
                 input=input_pickle,
                 capture_output=True,
-                timeout=300 # 5 minute timeout
+                timeout=300  # 5 minute timeout
             )
 
             # If the subprocess crashes
@@ -211,7 +264,7 @@ def create_executable_function(tool) -> Callable:
     Create an executable function from database tool
 
     Args:
-        tool: Database Tool object with function_code, function_name, and helper_functions
+        tool: Database Tool object with function_code, main_function, and helper_functions
 
     Returns:
         Callable function that can be invoked
@@ -240,12 +293,12 @@ def create_executable_function(tool) -> Callable:
     # Execute the main function code
     try:
         exec(tool.function_code, exec_globals)
-        main_function = exec_globals.get(tool.function_name)
+        main_function = exec_globals.get(tool.main_function)
 
         if not main_function:
-            raise ValueError(f"Main function '{tool.function_name}' not found after execution")
+            raise ValueError(f"Main function '{tool.main_function}' not found after execution")
 
-        logger.info(f"Successfully created executable function: {tool.function_name}")
+        logger.info(f"Successfully created executable function: {tool.main_function}")
         return main_function
 
     except Exception as e:
@@ -276,7 +329,7 @@ if __name__ == "__main__":
     # Mock tool for demonstration
     class MockTool:
         def __init__(self):
-            self.function_name = "add_numbers"
+            self.main_function = "add_numbers"
             self.function_code = """
 def add_numbers(a, b):
     '''Add two numbers together'''

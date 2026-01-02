@@ -30,16 +30,21 @@
   import { Label } from "$lib/components/ui/label";
   import {
     validateTwoTools,
+    validateConnection,
     createFlow,
+    updateFlow,
     executeFlow,
     getFlowDetails,
+    deleteFlow,
     createPythonScriptTool,
     generateToolCodeStream,
     editToolCodeStream,
     type ValidationResult,
+    type ConnectionValidationResult,
     type Tool,
     type Agent,
     type FlowCreateRequest,
+    type FlowUpdateRequest,
     type Flow as FlowType,
     type CodeGenerateRequest
   } from '../lib/api';
@@ -57,12 +62,25 @@
   let validationMessage = '';
   let showValidationToast = false;
   let validationSuccess = false;
+  let previousEdgeCount = 0;
+
+  // Watch for edge deletions and dismiss validation toast
+  $: {
+    if (edges.length < previousEdgeCount && showValidationToast && !validationSuccess) {
+      console.log('Edge was deleted, dismissing validation toast');
+      showValidationToast = false;
+    }
+    previousEdgeCount = edges.length;
+  }
 
   // Flow save state
   let flowName = '';
   let flowDescription = '';
   let showSaveDialog = false;
   let isSaving = false;
+
+  // Current flow tracking
+  let currentFlowId: number | null = null;
 
   // Conda environment state
   let selectedCondaEnv: string | null = null;
@@ -166,6 +184,22 @@
 
   let edges: Edge[] = [];
 
+  // Callback to update a node's data after tool is updated
+  function handleToolUpdated(nodeId: string, updatedData: any) {
+    const nodeIndex = nodes.findIndex(n => n.id === nodeId);
+    if (nodeIndex !== -1) {
+      nodes[nodeIndex] = {
+        ...nodes[nodeIndex],
+        data: {
+          ...nodes[nodeIndex].data,
+          ...updatedData
+        }
+      };
+      // Trigger reactivity by reassigning the array
+      nodes = [...nodes];
+    }
+  }
+
   // Use tools and agents from database instead of hardcoded nodes
   $: availableTools = data.tools.map(tool => tool.name);
   $: availableAgents = data.agents.map(agent => agent.name);
@@ -186,6 +220,7 @@
         name: tool?.name || nodeName,
         description: tool?.description || '',
         script_code: tool?.script_code || '',
+        main_function: tool?.main_function || '',
         input_schema: tool?.input_schema || null,
         output_schema: tool?.output_schema || null,
         runtimeLLM: null  // No LLM attached by default
@@ -194,6 +229,7 @@
       sourcePosition: Position.Right,
       targetPosition: Position.Left
     };
+
     nodes = [...nodes, newNode];
   }
 
@@ -207,25 +243,28 @@
 
       // If both nodes have tool IDs, validate compatibility
       if (sourceNode?.data?.toolId && targetNode?.data?.toolId) {
-        const validation = await validateTwoTools(
+        // Use granular field-level validation
+        const validation = await validateConnection(
           sourceNode.data.toolId,
-          targetNode.data.toolId
+          targetNode.data.toolId,
+          params.sourceHandle || "",  // Empty string for whole output
+          params.targetHandle || ""   // Empty string for whole input
         );
 
         if (!validation.compatible) {
-          // Show error toast
+          // Show error message with tool and field names
+          const sourceName = sourceNode.data.name;
+          const targetName = targetNode.data.name;
+          const sourceFieldDesc = validation.source_field || 'output';
+          const targetFieldDesc = validation.target_field || 'input';
+
           validationSuccess = false;
-          validationMessage = `Incompatible tools: ${validation.issues.join(', ')}`;
+          validationMessage = `Invalid connection: ${sourceName}.${sourceFieldDesc} (${validation.source_type}) → ${targetName}.${targetFieldDesc} (${validation.target_type})`;
           showValidationToast = true;
-          setTimeout(() => { showValidationToast = false; }, 5000);
+          // Don't auto-dismiss validation errors - stay visible until user acts
           return; // Don't create the connection
-        } else {
-          // Show success toast
-          validationSuccess = true;
-          validationMessage = 'Tools are compatible!';
-          showValidationToast = true;
-          setTimeout(() => { showValidationToast = false; }, 3000);
         }
+        // No message shown for valid connections
       }
 
       // Create the edge
@@ -250,29 +289,54 @@
       // Convert visual flow to graph_config
       const graphConfig = buildEnhancedGraphConfig(nodes, edges, data.tools);
 
-      // Create flow request
-      const flowData: FlowCreateRequest = {
-        name: flowName,
-        description: flowDescription,
-        graph_config: graphConfig,
-        is_public: false,
-        user_id: data.user?.id || 1,  // Use user ID or default to 1
-        conda_env: selectedCondaEnv || undefined  // Store conda env as separate field
-      };
+      if (currentFlowId) {
+        // Update existing flow - only update graph_config and conda_env
+        // Name and description are not changed unless specifically updated through dialog
+        const flowData: FlowUpdateRequest = {
+          graph_config: graphConfig,
+          conda_env: selectedCondaEnv || undefined
+        };
 
-      // Send to backend
-      const createdFlow = await createFlow(flowData);
+        const updatedFlow = await updateFlow(currentFlowId, flowData);
 
-      // Show success
-      validationSuccess = true;
-      validationMessage = `Flow "${createdFlow.name}" saved successfully!`;
-      showValidationToast = true;
-      setTimeout(() => { showValidationToast = false; }, 3000);
+        // Show success
+        validationSuccess = true;
+        validationMessage = `Flow "${updatedFlow.name}" updated successfully!`;
+        showValidationToast = true;
+        setTimeout(() => { showValidationToast = false; }, 3000);
 
-      // Reset and close dialog
-      showSaveDialog = false;
-      flowName = '';
-      flowDescription = '';
+        // Reset dialog state (if it was open)
+        showSaveDialog = false;
+        flowName = '';
+        flowDescription = '';
+
+      } else {
+        // Create new flow
+        const flowData: FlowCreateRequest = {
+          name: flowName,
+          description: flowDescription,
+          graph_config: graphConfig,
+          is_public: false,
+          user_id: data.user?.id || 1,  // Use user ID or default to 1
+          conda_env: selectedCondaEnv || undefined  // Store conda env as separate field
+        };
+
+        const createdFlow = await createFlow(flowData);
+
+        // Store the current flow ID
+        currentFlowId = createdFlow.id;
+
+        // Show success
+        validationSuccess = true;
+        validationMessage = `Flow "${createdFlow.name}" created successfully!`;
+        showValidationToast = true;
+        setTimeout(() => { showValidationToast = false; }, 3000);
+
+        // Reset and close dialog
+        showSaveDialog = false;
+        flowName = '';
+        flowDescription = '';
+      }
 
     } catch (error) {
       // Show error
@@ -329,9 +393,11 @@
                 name: tool.name,
                 description: tool.description,
                 script_code: tool.script_code,
+                main_function: tool.main_function || '',
                 input_schema: tool.input_schema,
                 output_schema: tool.output_schema,
-                runtimeLLM: runtimeLLM
+                runtimeLLM: runtimeLLM,
+                parameterValues: nodeConfig.input_values || {}
               },
               position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
               sourcePosition: Position.Right,
@@ -343,7 +409,7 @@
         // TODO: Add agent node support
       }
 
-      // Recreate edges from graph_config with handle information
+      // Recreate edges from graph_config
       const newEdges: Edge[] = [];
       for (const edgeConfig of graphConfig.edges) {
         if (nodeMap.has(edgeConfig.from_node) && nodeMap.has(edgeConfig.to_node)) {
@@ -354,14 +420,9 @@
             ...defaultEdgeOptions
           };
 
-          // Add sourceHandle and targetHandle if mapping exists
-          if (edgeConfig.mapping && Object.keys(edgeConfig.mapping).length > 0) {
-            // For now, use the first mapping entry
-            // TODO: Handle multiple output→input mappings (might need multiple edges)
-            const [outputField, inputParam] = Object.entries(edgeConfig.mapping)[0];
-            edge.sourceHandle = `output-${outputField}`;
-            edge.targetHandle = `input-${inputParam}`;
-          }
+          // Note: We don't restore sourceHandle/targetHandle here
+          // The mapping is stored in graph_config and used by the backend
+          // Visual edges don't need handle information when loading
 
           newEdges.push(edge);
         }
@@ -370,10 +431,24 @@
       // Auto-layout the nodes using ELK
       const layoutedNodes = await autoLayoutNodes(Array.from(nodeMap.values()), newEdges);
       nodes = layoutedNodes;
+
+      // Now restore sourceHandle/targetHandle from mappings (after layout to avoid ELK errors)
+      for (const edgeConfig of graphConfig.edges) {
+        const edge = newEdges.find(e => e.source === edgeConfig.from_node && e.target === edgeConfig.to_node);
+        if (edge && edgeConfig.mapping && Object.keys(edgeConfig.mapping).length > 0) {
+          const [outputField, inputParam] = Object.entries(edgeConfig.mapping)[0];
+          edge.sourceHandle = outputField;
+          edge.targetHandle = inputParam;
+        }
+      }
+
       edges = newEdges;
 
       // Set the conda environment from the loaded flow
       selectedCondaEnv = flow.conda_env;
+
+      // Store the current flow ID
+      currentFlowId = flowId;
 
       // Show success
       validationSuccess = true;
@@ -387,6 +462,21 @@
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
     }
+  }
+
+  /**
+   * Get initial input values from the entry point node
+   */
+  function getEntryPointInputValues(): Record<string, any> {
+    // Find the entry point node (node with no incoming edges)
+    const nodesWithIncoming = new Set(edges.map(e => e.target));
+    const entryNode = nodes.find(n => n.type === 'toolNode' && !nodesWithIncoming.has(n.id));
+
+    if (entryNode && entryNode.data.parameterValues) {
+      return entryNode.data.parameterValues;
+    }
+
+    return {};
   }
 
   /**
@@ -418,6 +508,45 @@
       console.error('Flow execution error:', error);
       validationSuccess = false;
       validationMessage = `Failed to execute flow: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
+  /**
+   * Delete a flow
+   */
+  async function handleDeleteFlow(flowId: number, flowName: string, event: Event) {
+    // Stop propagation so the click doesn't trigger loadFlow
+    event.stopPropagation();
+
+    // Confirm before deleting
+    if (!confirm(`Are you sure you want to delete "${flowName}"?`)) {
+      return;
+    }
+
+    try {
+      await deleteFlow(flowId);
+
+      // Remove from the available flows list
+      data.flows = data.flows.filter(f => f.id !== flowId);
+
+      // Clear the current flow if it's the one being deleted
+      if (currentFlowId === flowId) {
+        currentFlowId = null;
+        nodes = [];
+        edges = [];
+      }
+
+      // Show success
+      validationSuccess = true;
+      validationMessage = `Flow "${flowName}" deleted successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to delete flow: ${error}`;
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
     }
@@ -742,9 +871,8 @@
   <!-- Validation Toast -->
   {#if showValidationToast}
     <div class="validation-toast" class:success={validationSuccess} class:error={!validationSuccess}>
-      <span class="toast-icon">{validationSuccess ? '✓' : '✗'}</span>
       <span class="toast-message">{validationMessage}</span>
-      <button class="toast-close" on:click={() => showValidationToast = false}>×</button>
+      <button class="toast-close" onclick={() => showValidationToast = false}>×</button>
     </div>
   {/if}
 
@@ -778,15 +906,22 @@
 
     <div class="flows-section">
       <h4>Available Flows</h4>
-      <Button class="w-full mb-2" size="sm" on:click={() => showSaveDialog = true}>
+      <Button class="w-full mb-2" size="sm" onclick={() => showSaveDialog = true}>
         Create New Flow
       </Button>
       {#each availableFlows as flow}
         <div
           class="flow-item"
-          on:click={() => loadFlow(flow.id)}
+          onclick={() => loadFlow(flow.id)}
         >
-          {flow.name}
+          <span class="flow-item-name">{flow.name}</span>
+          <button
+            class="flow-item-delete"
+            onclick={(e) => handleDeleteFlow(flow.id, flow.name, e)}
+            title="Delete flow"
+          >
+            ×
+          </button>
         </div>
       {/each}
     </div>
@@ -802,7 +937,7 @@
         <div
           class="draggable-node"
           draggable="true"
-          on:dragstart={(event) => event.dataTransfer?.setData('text/plain', tool)}
+          ondragstart={(event) => event.dataTransfer?.setData('text/plain', tool)}
         >
           {tool}
         </div>
@@ -814,7 +949,7 @@
       <div
         class="draggable-node"
         draggable="true"
-        on:dragstart={(event) => event.dataTransfer?.setData('text/plain', agent)}
+        ondragstart={(event) => event.dataTransfer?.setData('text/plain', agent)}
       >
         {agent}
       </div>
@@ -824,8 +959,8 @@
   <div
     class="flow-container"
     role="application"
-    on:dragover={(event) => event.preventDefault()}
-    on:drop={(event) => {
+    ondragover={(event) => event.preventDefault()}
+    ondrop={(event) => {
       event.preventDefault();
       const nodeName = event.dataTransfer?.getData('text/plain');
       if (!nodeName) return;
@@ -845,8 +980,23 @@
   >
     <!-- Flow Controls -->
     <div class="flow-controls">
-      <Button on:click={() => showSaveDialog = true}>
-        Save Flow
+      <Button onclick={() => {
+        if (currentFlowId) {
+          // Update existing flow directly
+          saveFlow();
+        } else {
+          // Show dialog for new flow
+          showSaveDialog = true;
+        }
+      }}>
+        {currentFlowId ? 'Update Flow' : 'Save Flow'}
+      </Button>
+      <Button
+        onclick={() => currentFlowId && runFlow(currentFlowId, getEntryPointInputValues())}
+        disabled={!currentFlowId}
+        class="ml-2"
+      >
+        Run Flow
       </Button>
     </div>
 
@@ -861,7 +1011,7 @@
       style="background: #1A192B"
       fitView
       bind:viewport
-      on:connect={onConnect}
+      onconnect={onConnect}
     >
       <Background />
       <Controls />
@@ -871,11 +1021,11 @@
 
   <!-- Save Flow Dialog -->
   {#if showSaveDialog}
-    <div class="dialog-overlay" on:click={() => showSaveDialog = false}>
-      <div class="dialog-content" on:click={(e) => e.stopPropagation()}>
+    <div class="dialog-overlay" onclick={() => showSaveDialog = false}>
+      <div class="dialog-content" onclick={(e) => e.stopPropagation()}>
         <div class="dialog-header">
           <h3>Save Flow</h3>
-          <button class="dialog-close" on:click={() => showSaveDialog = false}>×</button>
+          <button class="dialog-close" onclick={() => showSaveDialog = false}>×</button>
         </div>
 
         <div class="dialog-body">
@@ -891,8 +1041,8 @@
         </div>
 
         <div class="dialog-footer">
-          <Button variant="outline" on:click={() => showSaveDialog = false}>Cancel</Button>
-          <Button on:click={saveFlow} disabled={isSaving || !flowName}>
+          <Button variant="outline" onclick={() => showSaveDialog = false}>Cancel</Button>
+          <Button onclick={saveFlow} disabled={isSaving || !flowName}>
             {isSaving ? 'Saving...' : 'Save'}
           </Button>
         </div>
@@ -901,15 +1051,15 @@
   {/if}
 
   <!-- Fullscreen Node Modal -->
-  <FullscreenNodeModal {llmProviders} />
+  <FullscreenNodeModal {llmProviders} onToolUpdated={handleToolUpdated} />
 
   <!-- Create Tool Modal -->
   {#if showCreateToolModal}
-    <div class="create-tool-overlay" on:click={closeCreateToolModal}>
-      <div class="create-tool-modal" on:click={(e) => e.stopPropagation()}>
+    <div class="create-tool-overlay" onclick={closeCreateToolModal}>
+      <div class="create-tool-modal" onclick={(e) => e.stopPropagation()}>
         <div class="create-tool-header">
           <h2 class="create-tool-title">Create New Tool</h2>
-          <button class="create-tool-close" on:click={closeCreateToolModal}>×</button>
+          <button class="create-tool-close" onclick={closeCreateToolModal}>×</button>
         </div>
 
         <div class="create-tool-body">
@@ -942,7 +1092,7 @@
                     name="toolPublic"
                     value={false}
                     checked={!newToolIsPublic}
-                    on:change={() => newToolIsPublic = false}
+                    onchange={() => newToolIsPublic = false}
                   />
                   <span>No</span>
                 </label>
@@ -952,7 +1102,7 @@
                     name="toolPublic"
                     value={true}
                     checked={newToolIsPublic}
-                    on:change={() => newToolIsPublic = true}
+                    onchange={() => newToolIsPublic = true}
                   />
                   <span>Yes</span>
                 </label>
@@ -962,7 +1112,7 @@
             <div class="create-tool-form-row">
               <button
                 class="create-tool-expand-header"
-                on:click={() => showWriteWithAI = !showWriteWithAI}
+                onclick={() => showWriteWithAI = !showWriteWithAI}
                 type="button"
               >
                 <span class="expand-icon">{showWriteWithAI ? '∨' : '→'}</span>
@@ -1042,7 +1192,7 @@
           <div class="create-tool-section">
             <button
               class="create-tool-expand-header"
-              on:click={() => showEditWithAI = !showEditWithAI}
+              onclick={() => showEditWithAI = !showEditWithAI}
               type="button"
             >
               <span class="expand-icon">{showEditWithAI ? '∨' : '→'}</span>
@@ -1160,16 +1310,49 @@
   }
 
   .flow-item {
-    padding: 5px;
+    padding: 5px 8px;
     margin: 5px 0;
     background: white;
     border: 1px solid #ccc;
     cursor: pointer;
     transition: background-color 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
   .flow-item:hover {
     background: #e8f4f8;
+  }
+
+  .flow-item-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .flow-item-delete {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .flow-item-delete:hover {
+    background: #ff4444;
+    color: white;
   }
 
   .draggable-node {
@@ -1277,7 +1460,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1001;
+    z-index: 10000;
   }
 
   .dialog-content {
