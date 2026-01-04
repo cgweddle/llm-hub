@@ -119,6 +119,9 @@
   let showLLMDropdown = false;
   let selectedLLM: LLMProvider | null = runtimeLLM || null;
 
+  // Keep selectedLLM in sync with runtimeLLM (when flow is loaded)
+  $: selectedLLM = runtimeLLM || null;
+
   function toggleLLMDropdown(event: Event) {
     event.stopPropagation();
     showLLMDropdown = !showLLMDropdown;

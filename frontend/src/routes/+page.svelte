@@ -994,9 +994,9 @@
       <Button
         onclick={() => currentFlowId && runFlow(currentFlowId, getEntryPointInputValues())}
         disabled={!currentFlowId}
-        class="ml-2"
+        class="ml-2 bg-green-600 hover:bg-green-700 text-white"
       >
-        Run Flow
+        ▶ Run
       </Button>
     </div>
 
@@ -1270,6 +1270,7 @@
     display: flex;
     height: 100vh;
     position: relative;
+    overflow: hidden;
   }
 
   .node-window {
@@ -1277,6 +1278,8 @@
     background: #f0f0f0;
     padding: 10px;
     border-right: 1px solid #ccc;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .user-section {
@@ -1367,6 +1370,7 @@
     flex-grow: 1;
     position: relative;
     padding: 20px;
+    overflow: hidden;
   }
 
   /* Validation Toast */
@@ -1849,5 +1853,23 @@
 
   .create-tool-body::-webkit-scrollbar-thumb:hover {
     background: #4e4e4e;
+  }
+
+  /* Custom scrollbar for node window */
+  .node-window::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .node-window::-webkit-scrollbar-track {
+    background: #e0e0e0;
+  }
+
+  .node-window::-webkit-scrollbar-thumb {
+    background: #a0a0a0;
+    border-radius: 4px;
+  }
+
+  .node-window::-webkit-scrollbar-thumb:hover {
+    background: #888888;
   }
 </style>
