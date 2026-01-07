@@ -1,6 +1,8 @@
 # Database
 database/
 
+.DS_Store
+
 !/src/database/
 # Byte-compiled / optimized / DLL files
 __pycache__/
