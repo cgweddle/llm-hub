@@ -84,9 +84,10 @@ def get_session():
 
 ## Agent database
 
-def create_agent(session: Any, user_id: int, name: str, description: str, 
+def create_agent(session: Any, user_id: int, name: str, description: str,
                     agent_type: str, system_prompt: str, llm_config: Dict,
-                    tools_config: Dict, metadata: Dict = None) -> Agent:
+                    tools_config: Dict, agent_metadata: Dict = None,
+                    output_schema: Dict = None) -> Agent:
     """Create a new agent"""
     agent = Agent(
         user_id=user_id,
@@ -96,7 +97,8 @@ def create_agent(session: Any, user_id: int, name: str, description: str,
         system_prompt=system_prompt,
         llm_config=llm_config,
         tools_config=tools_config,
-        metadata=metadata or {}
+        agent_metadata=agent_metadata or {},
+        output_schema=output_schema
     )
     session.add(agent)
     session.commit()
@@ -112,11 +114,12 @@ def get_agent_by_id(session: Any, agent_id: int) -> Optional[Agent]:
 
 def update_agent(session: Any, agent_id: int, **kwargs) -> Optional[Agent]:
     """Update an agent"""
-    agent = get_agent_by_id(agent_id)
+    agent = get_agent_by_id(session, agent_id)
     if agent:
         for key, value in kwargs.items():
             setattr(agent, key, value)
         session.commit()
+        session.refresh(agent)
     return agent
 
 def delete_agent(session: Any, agent_id: int) -> bool:

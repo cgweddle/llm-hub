@@ -2,7 +2,7 @@ import { writable } from 'svelte/store';
 
 export interface FullscreenNodeData {
   nodeId: string;
-  nodeType: 'tool' | 'expandable' | 'colorSelector';
+  nodeType: 'tool' | 'agent' | 'expandable' | 'colorSelector';
   data: any;
 }
 

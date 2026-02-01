@@ -6,9 +6,13 @@ export interface Agent {
   name: string;
   description: string;
   agent_type: string;
+  system_prompt?: string;
+  llm_config?: Record<string, any>;
+  tools_config?: Record<string, any>;
+  output_schema?: Record<string, any>;
   is_public: boolean;
   created_at: string;
-  updated_at: string;
+  updated_at?: string;
 }
 
 export interface Tool {
@@ -714,6 +718,146 @@ export async function editToolCodeStream(
     }
   } catch (error) {
     console.error('Error editing code:', error);
+    onError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+// Agent creation
+export interface AgentCreateData {
+  name: string;
+  description: string;
+  agent_type: string;       // "pydanticai"
+  system_prompt: string;
+  llm_config: Record<string, any>;   // { model_name: string }
+  tools_config: Record<string, any>; // { tool_ids: number[] }
+}
+
+export async function createAgent(userId: number, agentData: AgentCreateData): Promise<Agent> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/agents/?user_id=${userId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(agentData)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Failed to create agent: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error creating agent:', error);
+    throw error;
+  }
+}
+
+export interface AgentUpdateData {
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  llm_config?: Record<string, any>;
+  tools_config?: Record<string, any>;
+}
+
+export async function updateAgent(agentId: number, updateData: AgentUpdateData): Promise<Agent> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/agents/${agentId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updateData)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Failed to update agent: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error updating agent:', error);
+    throw error;
+  }
+}
+
+// System prompt generation interfaces
+export interface SystemPromptGenerateRequest {
+  agent_name: string;
+  agent_description: string;
+  tool_names: string[];
+  provider: string;
+  model: string;
+  api_key?: string;
+  base_url?: string;
+  additional_instructions?: string;
+}
+
+// System prompt generation with streaming
+export async function generateSystemPromptStream(
+  request: SystemPromptGenerateRequest,
+  onChunk: (chunk: string) => void,
+  onDone: (systemPrompt: string) => void,
+  onError: (error: string) => void
+): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/agents/generate-system-prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Failed to generate system prompt: ${response.statusText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('Response body is not readable');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+
+      // Keep the last incomplete line in the buffer
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const data = JSON.parse(line);
+
+            if (data.error) {
+              onError(data.error);
+              return;
+            } else if (data.chunk) {
+              onChunk(data.chunk);
+            } else if (data.done) {
+              onDone(data.system_prompt);
+              return;
+            }
+          } catch (e) {
+            console.error('Failed to parse streaming response:', line, e);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error generating system prompt:', error);
     onError(error instanceof Error ? error.message : String(error));
   }
 }

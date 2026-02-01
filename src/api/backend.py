@@ -13,12 +13,14 @@ from src.database.database import (
     get_available_agents, get_available_tools, get_available_flows,
     get_public_agents, get_public_tools, get_public_flows,
     create_tool, get_user_tools, create_flow, get_user_flows,
-    get_tool_by_id, update_tool, get_flow_by_id, update_flow, delete_flow
+    get_tool_by_id, update_tool, get_flow_by_id, update_flow, delete_flow,
+    get_agent_by_id, update_agent
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.executors.flow_executor import FlowExecutor
+from src.executors.agent_executor import AgentExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional, Dict, Any
@@ -62,16 +64,44 @@ class AgentCreate(BaseModel):
     llm_config: dict
     tools_config: dict
     agent_metadata: Optional[dict] = None
+    output_schema: Optional[dict] = None  # JSON schema for structured output validation
 
 class AgentResponse(BaseModel):
     id: int
     name: str
     description: str
     agent_type: str
+    system_prompt: Optional[str] = None
+    llm_config: Optional[dict] = None
+    tools_config: Optional[dict] = None
+    output_schema: Optional[dict] = None
+    is_public: bool = False
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+class AgentUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    system_prompt: Optional[str] = None
+    llm_config: Optional[dict] = None
+    tools_config: Optional[dict] = None
+    agent_metadata: Optional[dict] = None
+    output_schema: Optional[dict] = None
+
+class AgentExecuteRequest(BaseModel):
+    user_id: int
+    input_data: str
+    stream: bool = False
+
+class AgentExecuteResponse(BaseModel):
+    execution_id: int
+    status: str
+    result: Any
+    messages: List[Dict[str, Any]]
+    cost: Optional[Dict[str, Any]] = None
+    agent_type: str
 
 class UserCreate(BaseModel):
     username: str
@@ -186,6 +216,16 @@ class PythonScriptToolCreate(BaseModel):
     main_function: str
     is_public: bool = False
 
+class SystemPromptGenerateRequest(BaseModel):
+    agent_name: str
+    agent_description: str
+    tool_names: List[str] = []
+    provider: str
+    model: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    additional_instructions: Optional[str] = None
+
 class CodeGenerateRequest(BaseModel):
     tool_name: str
     tool_description: str
@@ -236,7 +276,8 @@ def create_agent_endpoint(agent_data: AgentCreate, user_id: int, db: Session = D
             system_prompt=agent_data.system_prompt,
             llm_config=agent_data.llm_config,
             tools_config=agent_data.tools_config,
-            agent_metadata=agent_data.agent_metadata
+            agent_metadata=agent_data.agent_metadata,
+            output_schema=agent_data.output_schema
         )
         return agent
     except Exception as e:
@@ -250,14 +291,198 @@ def get_user_agents_endpoint(user_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user agents: {str(e)}")
 
-@app.post("/agents/{agent_id}/execute")
-def execute_agent(agent_id: int, user_id: int, input_data: str, db: Session = Depends(get_db)):
-    """Execute an agent"""
-    agent_service = AgentService(db)
-    # You'll need to get the LLM instance here
-    llm = get_llm_instance()  # Implement this based on your LLM setup
-    result = agent_service.execute_agent(user_id, agent_id, input_data, llm)
-    return {"result": result}
+@app.post("/agents/{agent_id}/execute", response_model=AgentExecuteResponse)
+async def execute_agent_endpoint(
+    agent_id: int,
+    request: AgentExecuteRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Execute an agent (supports both Google ADK ReAct and PydanticAI agents).
+
+    This endpoint automatically detects the agent type and routes to the appropriate
+    executor. Supports both standard and streaming execution modes.
+
+    Args:
+        agent_id: ID of the agent to execute
+        request: AgentExecuteRequest with user_id, input_data, and optional stream flag
+        db: Database session (injected)
+
+    Returns:
+        AgentExecuteResponse with execution results
+
+    Example:
+        POST /agents/5/execute
+        {
+            "user_id": 1,
+            "input_data": "What is 2+2?",
+            "stream": false
+        }
+    """
+    try:
+        executor = AgentExecutor(db)
+
+        # Handle streaming requests
+        if request.stream:
+            async def stream_generator():
+                try:
+                    result = await executor.execute_agent(
+                        agent_id=agent_id,
+                        user_id=request.user_id,
+                        input_data=request.input_data,
+                        stream=True
+                    )
+
+                    # result is an async generator for streaming
+                    if hasattr(result, '__aiter__'):
+                        async for chunk in result:
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                    else:
+                        # Fallback if not streaming (shouldn't happen but handle it)
+                        yield f"data: {json.dumps(result)}\n\n"
+
+                except Exception as e:
+                    error_chunk = {
+                        "type": "error",
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+
+            return StreamingResponse(
+                stream_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                }
+            )
+
+        # Standard (non-streaming) execution
+        else:
+            result = await executor.execute_agent(
+                agent_id=agent_id,
+                user_id=request.user_id,
+                input_data=request.input_data,
+                stream=False
+            )
+            return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+@app.post("/agents/pydanticai/create", response_model=AgentResponse)
+def create_pydanticai_agent_endpoint(
+    agent_data: AgentCreate,
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new PydanticAI agent with optional structured output schema.
+
+    This endpoint creates an agent with agent_type='pydanticai' and allows you to
+    specify an output_schema for structured outputs using Pydantic validation.
+
+    Args:
+        agent_data: AgentCreate with agent configuration (includes optional output_schema)
+        user_id: ID of the user creating the agent
+        db: Database session (injected)
+
+    Returns:
+        AgentResponse with created agent details
+
+    Example:
+        POST /agents/pydanticai/create?user_id=1
+        {
+            "name": "Research Assistant",
+            "description": "Helps with research tasks",
+            "agent_type": "pydanticai",
+            "system_prompt": "You are a helpful research assistant.",
+            "llm_config": {"model_name": "My Anthropic Config"},
+            "tools_config": {"tool_ids": [1, 2, 3]},
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "answer": {"type": "string"},
+                    "confidence": {"type": "number"}
+                },
+                "required": ["answer"]
+            }
+        }
+    """
+    try:
+        agent = create_agent(
+            session=db,
+            user_id=user_id,
+            name=agent_data.name,
+            description=agent_data.description,
+            agent_type="pydanticai",
+            system_prompt=agent_data.system_prompt,
+            llm_config=agent_data.llm_config,
+            tools_config=agent_data.tools_config,
+            agent_metadata=agent_data.agent_metadata,
+            output_schema=agent_data.output_schema
+        )
+
+        return agent
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create PydanticAI agent: {str(e)}")
+
+@app.patch("/agents/{agent_id}", response_model=AgentResponse)
+def update_agent_endpoint(agent_id: int, agent_update: AgentUpdate, db: Session = Depends(get_db)):
+    """Update an agent's properties"""
+    agent = get_agent_by_id(db, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    update_data = agent_update.model_dump(exclude_unset=True)
+    if not update_data:
+        return agent
+
+    try:
+        updated_agent = update_agent(db, agent_id, **update_data)
+        return updated_agent
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
+
+@app.post("/agents/generate-system-prompt")
+def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest):
+    """Generate a system prompt for an agent using AI with streaming"""
+    try:
+        from src.ai_integrations.generate_system_prompt import generate_system_prompt_stream
+
+        def stream_generator():
+            try:
+                for chunk in generate_system_prompt_stream(
+                    agent_name=request.agent_name,
+                    agent_description=request.agent_description,
+                    tool_names=request.tool_names,
+                    provider=request.provider,
+                    model=request.model,
+                    api_key=request.api_key,
+                    base_url=request.base_url,
+                    additional_instructions=request.additional_instructions
+                ):
+                    yield chunk
+            except Exception as e:
+                yield json.dumps({"error": f"Streaming error: {str(e)}"}) + "\n"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"System prompt generation failed: {str(e)}")
 
 @app.post("/users/", response_model=UserResponse)
 def create_user_endpoint(user_data: UserCreate, db: Session = Depends(get_db)):

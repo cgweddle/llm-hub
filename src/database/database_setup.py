@@ -50,6 +50,7 @@ class Agent(Base):
     llm_config = Column(JSON)  # Store LLM configuration as JSON
     tools_config = Column(JSON)  # Store tool configurations
     agent_metadata = Column(JSON)  # Additional agent metadata
+    output_schema = Column(JSON)  # JSON schema for structured output validation
     is_public = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

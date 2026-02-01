@@ -25,6 +25,7 @@
   import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
   import LLMProvidersPanel from './LLMProvidersPanel.svelte';
   import FullscreenNodeModal from './FullscreenNodeModal.svelte';
+  import { fullscreenNode } from '$lib/stores/fullscreenNode';
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
@@ -39,6 +40,8 @@
     createPythonScriptTool,
     generateToolCodeStream,
     editToolCodeStream,
+    createAgent,
+    generateSystemPromptStream,
     type ValidationResult,
     type ConnectionValidationResult,
     type Tool,
@@ -46,7 +49,9 @@
     type FlowCreateRequest,
     type FlowUpdateRequest,
     type Flow as FlowType,
-    type CodeGenerateRequest
+    type CodeGenerateRequest,
+    type AgentCreateData,
+    type SystemPromptGenerateRequest
   } from '../lib/api';
   import { buildEnhancedGraphConfig } from '$lib/flowBuilder';
   import { autoLayoutNodes } from '$lib/elkLayout';
@@ -111,6 +116,18 @@
   let isCreatingTool = false;
   let isGeneratingCode = false;
   let isEditingCode = false;
+
+  // Create Agent modal state
+  let showCreateAgentModal = false;
+  let newAgentName = '';
+  let newAgentDescription = '';
+  let newAgentSystemPrompt = '';
+  let newAgentSelectedTools: number[] = [];
+  let newAgentLLMProvider = '';
+  let isCreatingAgent = false;
+  let showGeneratePromptAI = false;
+  let promptAdditionalInstructions = '';
+  let isGeneratingPrompt = false;
 
   // CodeMirror editor for Create Tool modal
   let createToolEditorContainer: HTMLDivElement;
@@ -200,12 +217,65 @@
     }
   }
 
+  function handleAgentUpdated(agentId: number, updatedAgent: Agent) {
+    // Update sidebar data
+    data.agents = data.agents.map(a => a.id === agentId ? { ...a, ...updatedAgent } : a);
+
+    // Update any canvas nodes for this agent
+    nodes = nodes.map(n => {
+      if (n.data?.isAgent && n.data?.agentId === agentId) {
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            name: updatedAgent.name,
+            description: updatedAgent.description || '',
+            system_prompt: updatedAgent.system_prompt || '',
+            llm_config: updatedAgent.llm_config || {},
+            tools_config: updatedAgent.tools_config || {},
+          }
+        };
+      }
+      return n;
+    });
+  }
+
   // Use tools and agents from database instead of hardcoded nodes
   $: availableTools = data.tools.map(tool => tool.name);
   $: availableAgents = data.agents.map(agent => agent.name);
   $: availableFlows = data.flows;
 
   function addNode(nodeName: string, position: { x: number; y: number }) {
+    // Check if it's an agent
+    const agent = data.agents.find((a: Agent) => a.name === nodeName);
+    if (agent) {
+      const newNode: Node = {
+        id: String(Date.now()),
+        type: 'toolNode',
+        data: {
+          label: nodeName,
+          handles: ['a'],
+          isAgent: true,
+          agentId: agent.id,
+          name: agent.name,
+          description: agent.description || '',
+          system_prompt: agent.system_prompt || '',
+          llm_config: agent.llm_config || {},
+          tools_config: agent.tools_config || {},
+          script_code: '',
+          main_function: '',
+          input_schema: null,
+          output_schema: agent.output_schema || null,
+          runtimeLLM: null
+        },
+        position,
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left
+      };
+      nodes = [...nodes, newNode];
+      return;
+    }
+
     // Find the tool from the database
     const tool = data.tools.find((t: Tool) => t.name === nodeName);
 
@@ -865,6 +935,176 @@
     destroyCreateToolEditor();
     showCreateToolModal = false;
   }
+
+  /**
+   * Create a new agent
+   */
+  async function handleCreateAgent() {
+    if (!newAgentName.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter an agent name';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    if (!newAgentSystemPrompt.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter a system prompt for the agent';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    try {
+      isCreatingAgent = true;
+
+      const userId = data.user?.id || 1;
+      const agentData: AgentCreateData = {
+        name: newAgentName.trim(),
+        description: newAgentDescription.trim(),
+        agent_type: 'pydanticai',
+        system_prompt: newAgentSystemPrompt.trim(),
+        llm_config: { model_name: newAgentLLMProvider || '' },
+        tools_config: { tool_ids: newAgentSelectedTools }
+      };
+
+      const createdAgent = await createAgent(userId, agentData);
+
+      // Add the new agent to the available agents list
+      data.agents = [...data.agents, createdAgent];
+
+      // Show success
+      validationSuccess = true;
+      validationMessage = `Agent "${createdAgent.name}" created successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+
+      // Reset and close modal
+      closeCreateAgentModal();
+
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to create agent: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    } finally {
+      isCreatingAgent = false;
+    }
+  }
+
+  /**
+   * Generate system prompt using AI with streaming
+   */
+  async function handleGeneratePrompt() {
+    if (!newAgentName.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter an agent name before generating a prompt';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+    if (!newAgentDescription.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter an agent description before generating a prompt';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+    if (!selectedLLMProvider) {
+      validationSuccess = false;
+      validationMessage = 'Please select an LLM provider';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
+
+    try {
+      isGeneratingPrompt = true;
+      newAgentSystemPrompt = '';
+
+      // Get selected tool names
+      const selectedToolNames = data.tools
+        .filter((t: Tool) => newAgentSelectedTools.includes(t.id))
+        .map((t: Tool) => t.name);
+
+      await generateSystemPromptStream(
+        {
+          agent_name: newAgentName.trim(),
+          agent_description: newAgentDescription.trim(),
+          tool_names: selectedToolNames,
+          provider: selectedLLMProvider.provider,
+          model: selectedLLMProvider.model,
+          api_key: selectedLLMProvider.apiKey,
+          base_url: selectedLLMProvider.baseUrl,
+          additional_instructions: promptAdditionalInstructions.trim() || undefined
+        },
+        // onChunk
+        (chunk: string) => {
+          newAgentSystemPrompt += chunk;
+        },
+        // onDone
+        (systemPrompt: string) => {
+          newAgentSystemPrompt = systemPrompt;
+          validationSuccess = true;
+          validationMessage = 'System prompt generated successfully!';
+          showValidationToast = true;
+          setTimeout(() => { showValidationToast = false; }, 3000);
+          isGeneratingPrompt = false;
+        },
+        // onError
+        (error: string) => {
+          validationSuccess = false;
+          validationMessage = `Failed to generate prompt: ${error}`;
+          showValidationToast = true;
+          setTimeout(() => { showValidationToast = false; }, 5000);
+          isGeneratingPrompt = false;
+        }
+      );
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to generate prompt: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      isGeneratingPrompt = false;
+    }
+  }
+
+  function toggleToolSelection(toolId: number) {
+    if (newAgentSelectedTools.includes(toolId)) {
+      newAgentSelectedTools = newAgentSelectedTools.filter(id => id !== toolId);
+    } else {
+      newAgentSelectedTools = [...newAgentSelectedTools, toolId];
+    }
+  }
+
+  function openAgentDetails(agent: Agent) {
+    fullscreenNode.open({
+      nodeId: `sidebar-agent-${agent.id}`,
+      nodeType: 'agent',
+      data: {
+        name: agent.name,
+        description: agent.description || '',
+        agentId: agent.id,
+        system_prompt: agent.system_prompt || '',
+        llm_config: agent.llm_config || {},
+        tools_config: agent.tools_config || {},
+        output_schema: agent.output_schema || null
+      }
+    });
+  }
+
+  function closeCreateAgentModal() {
+    showCreateAgentModal = false;
+    newAgentName = '';
+    newAgentDescription = '';
+    newAgentSystemPrompt = '';
+    newAgentSelectedTools = [];
+    newAgentLLMProvider = '';
+    showGeneratePromptAI = false;
+    promptAdditionalInstructions = '';
+    isGeneratingPrompt = false;
+  }
 </script>
 
 <div class="app-container">
@@ -944,16 +1184,25 @@
       {/each}
     </div>
 
-    <h4>Available Agents</h4>
-    {#each availableAgents as agent}
-      <div
-        class="draggable-node"
-        draggable="true"
-        ondragstart={(event) => event.dataTransfer?.setData('text/plain', agent)}
-      >
-        {agent}
-      </div>
-    {/each}
+    <div class="agents-section">
+      <h4>Available Agents</h4>
+      <Button size="sm" onclick={() => showCreateAgentModal = true} class="w-full mb-2 bg-green-600 hover:bg-green-700">
+        {#snippet children()}
+          Create New Agent
+        {/snippet}
+      </Button>
+      {#each data.agents as agent}
+        <div
+          class="draggable-node"
+          draggable="true"
+          ondragstart={(event) => event.dataTransfer?.setData('text/plain', agent.name)}
+          onclick={() => openAgentDetails(agent)}
+          title="Click to view details, drag to add to canvas"
+        >
+          {agent.name}
+        </div>
+      {/each}
+    </div>
   </div>
 
   <div
@@ -1051,7 +1300,7 @@
   {/if}
 
   <!-- Fullscreen Node Modal -->
-  <FullscreenNodeModal {llmProviders} onToolUpdated={handleToolUpdated} />
+  <FullscreenNodeModal {llmProviders} allTools={data.tools} onToolUpdated={handleToolUpdated} onAgentUpdated={handleAgentUpdated} />
 
   <!-- Create Tool Modal -->
   {#if showCreateToolModal}
@@ -1258,6 +1507,172 @@
           </Button>
           <Button onclick={handleCreateTool} disabled={isCreatingTool} class="bg-blue-600 hover:bg-blue-700">
             {#snippet children()}{isCreatingTool ? 'Creating...' : 'Create Tool'}{/snippet}
+          </Button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Create Agent Modal -->
+  {#if showCreateAgentModal}
+    <div class="create-tool-overlay" onclick={closeCreateAgentModal}>
+      <div class="create-tool-modal" onclick={(e) => e.stopPropagation()}>
+        <div class="create-tool-header">
+          <h2 class="create-tool-title">Create New Agent</h2>
+          <button class="create-tool-close" onclick={closeCreateAgentModal}>×</button>
+        </div>
+
+        <div class="create-tool-body">
+          <!-- Agent Details Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Agent Details</div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="agentName">Name</label>
+              <input
+                id="agentName"
+                class="create-tool-input"
+                bind:value={newAgentName}
+                placeholder="Agent Name"
+              />
+            </div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="agentDesc">Description</label>
+              <input
+                id="agentDesc"
+                class="create-tool-input"
+                bind:value={newAgentDescription}
+                placeholder="Describe what this agent does..."
+              />
+            </div>
+          </div>
+
+          <!-- System Prompt Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">System Prompt</div>
+            <textarea
+              class="create-tool-textarea"
+              bind:value={newAgentSystemPrompt}
+              placeholder="Enter the system prompt for this agent..."
+              rows="10"
+              style="min-height: 200px;"
+            ></textarea>
+          </div>
+
+          <!-- Generate with AI Section -->
+          <div class="create-tool-section">
+            <button
+              class="create-tool-expand-header"
+              onclick={() => showGeneratePromptAI = !showGeneratePromptAI}
+              type="button"
+            >
+              <span class="expand-icon">{showGeneratePromptAI ? '∨' : '→'}</span>
+              <span>Generate with AI</span>
+            </button>
+
+            {#if showGeneratePromptAI}
+              <div class="create-tool-ai-expanded">
+                <div class="create-tool-ai-field-left">
+                  <label class="create-tool-label" for="promptInstructions">Additional Instructions (optional)</label>
+                  <textarea
+                    id="promptInstructions"
+                    class="create-tool-textarea create-tool-textarea-full"
+                    bind:value={promptAdditionalInstructions}
+                    placeholder="Any additional requirements for the system prompt..."
+                    rows="8"
+                  ></textarea>
+                </div>
+
+                <div class="create-tool-ai-field-right">
+                  <div class="create-tool-ai-field">
+                    <label class="create-tool-label" for="promptLlmProvider">LLM Provider</label>
+                    <select
+                      id="promptLlmProvider"
+                      class="create-tool-input"
+                      bind:value={selectedLLMProvider}
+                    >
+                      <option value={null}>-- Select LLM --</option>
+                      {#each llmProviders as provider}
+                        <option value={provider}>{provider.name}</option>
+                      {/each}
+                    </select>
+                    {#if llmProviders.length === 0}
+                      <div class="create-tool-helper-text" style="color: #f59e0b;">
+                        No LLM providers configured. Configure one in the sidebar's "Attach LLM" panel.
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="create-tool-ai-field">
+                    <Button
+                      onclick={handleGeneratePrompt}
+                      disabled={isGeneratingPrompt || !newAgentName.trim() || !newAgentDescription.trim() || !selectedLLMProvider}
+                      class="bg-purple-600 hover:bg-purple-700"
+                    >
+                      {#snippet children()}
+                        {isGeneratingPrompt ? 'Generating...' : 'Generate with AI'}
+                      {/snippet}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <!-- LLM Provider Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">LLM Provider</div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="agentLlmProvider">Select which LLM this agent uses</label>
+              <select
+                id="agentLlmProvider"
+                class="create-tool-input"
+                bind:value={newAgentLLMProvider}
+              >
+                <option value="">-- Select LLM --</option>
+                {#each llmProviders as provider}
+                  <option value={provider.name}>{provider.name}</option>
+                {/each}
+              </select>
+              <div class="create-tool-helper-text">
+                This determines which LLM the agent will use when executing tasks.
+              </div>
+            </div>
+          </div>
+
+          <!-- Select Tools Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Select Tools</div>
+            <div class="create-tool-helper-text" style="margin-bottom: 12px;">
+              Choose which tools this agent can use.
+            </div>
+            {#if data.tools.length === 0}
+              <div class="create-tool-helper-text" style="color: #f59e0b;">
+                No tools available. Create some tools first.
+              </div>
+            {:else}
+              {#each data.tools as tool}
+                <label class="tool-checkbox-item">
+                  <input
+                    type="checkbox"
+                    checked={newAgentSelectedTools.includes(tool.id)}
+                    onchange={() => toggleToolSelection(tool.id)}
+                  />
+                  <span class="tool-checkbox-name">{tool.name}</span>
+                  {#if tool.description}
+                    <span class="tool-checkbox-desc">{tool.description}</span>
+                  {/if}
+                </label>
+              {/each}
+            {/if}
+          </div>
+        </div>
+
+        <div class="create-tool-footer">
+          <Button variant="outline" onclick={closeCreateAgentModal}>
+            {#snippet children()}Cancel{/snippet}
+          </Button>
+          <Button onclick={handleCreateAgent} disabled={isCreatingAgent} class="bg-green-600 hover:bg-green-700">
+            {#snippet children()}{isCreatingAgent ? 'Creating...' : 'Create Agent'}{/snippet}
           </Button>
         </div>
       </div>
@@ -1871,5 +2286,54 @@
 
   .node-window::-webkit-scrollbar-thumb:hover {
     background: #888888;
+  }
+
+  /* Agents Section */
+  .agents-section {
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+  }
+
+  /* Tool Checkbox Items (for agent tool selection) */
+  .tool-checkbox-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    background: #2d2d30;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .tool-checkbox-item:hover {
+    background: #3e3e42;
+  }
+
+  .tool-checkbox-item input[type="checkbox"] {
+    margin-top: 2px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: #007acc;
+    flex-shrink: 0;
+  }
+
+  .tool-checkbox-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #cccccc;
+    white-space: nowrap;
+  }
+
+  .tool-checkbox-desc {
+    font-size: 12px;
+    color: #888888;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

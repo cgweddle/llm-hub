@@ -93,20 +93,37 @@
   }
 
   function openFullscreen() {
-    fullscreenNode.open({
-      nodeId: id,
-      nodeType: 'tool',
-      data: {
-        name,
-        description,
-        script_code,
-        main_function,
-        toolId,
-        input_schema,
-        output_schema,
-        id
-      }
-    });
+    if (data.isAgent) {
+      fullscreenNode.open({
+        nodeId: id,
+        nodeType: 'agent',
+        data: {
+          name,
+          description,
+          agentId: data.agentId,
+          system_prompt: data.system_prompt || '',
+          llm_config: data.llm_config || {},
+          tools_config: data.tools_config || {},
+          output_schema,
+          id
+        }
+      });
+    } else {
+      fullscreenNode.open({
+        nodeId: id,
+        nodeType: 'tool',
+        data: {
+          name,
+          description,
+          script_code,
+          main_function,
+          toolId,
+          input_schema,
+          output_schema,
+          id
+        }
+      });
+    }
   }
 
   // Truncate description for collapsed view

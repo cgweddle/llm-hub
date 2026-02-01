@@ -5,13 +5,103 @@
   import { oneDark } from '@codemirror/theme-one-dark';
   import { EditorState } from '@codemirror/state';
   import { onDestroy } from 'svelte';
-  import { editToolCodeStream } from '$lib/api';
+  import { editToolCodeStream, updateAgent } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
+  import type { Tool } from '$lib/api';
 
   export let llmProviders: LLMProvider[] = [];
+  export let allTools: Tool[] = [];
   export let onToolUpdated: ((nodeId: string, updatedData: any) => void) | undefined = undefined;
+  export let onAgentUpdated: ((agentId: number, updatedData: any) => void) | undefined = undefined;
+
+  // Resolve tool IDs to tool objects for agent display
+  function getToolsByIds(toolIds: number[]): Tool[] {
+    return toolIds
+      .map(id => allTools.find(t => t.id === id))
+      .filter((t): t is Tool => t !== undefined);
+  }
 
   $: nodeData = $fullscreenNode;
+
+  // Agent editing state
+  let isEditingAgent = false;
+  let isSavingAgent = false;
+  let agentSaveMessage = '';
+  let agentSaveError = false;
+  let editedAgentName = '';
+  let editedAgentDescription = '';
+  let editedAgentSystemPrompt = '';
+  let editedAgentLLMConfig = '';
+  let editedAgentToolIds: number[] = [];
+
+  // Initialize agent edit state when entering edit mode
+  function startEditingAgent() {
+    if (!nodeData) return;
+    editedAgentName = nodeData.data.name || '';
+    editedAgentDescription = nodeData.data.description || '';
+    editedAgentSystemPrompt = nodeData.data.system_prompt || '';
+    editedAgentLLMConfig = nodeData.data.llm_config?.model_name || '';
+    editedAgentToolIds = [...(nodeData.data.tools_config?.tool_ids || [])];
+    isEditingAgent = true;
+  }
+
+  function cancelEditingAgent() {
+    isEditingAgent = false;
+    agentSaveMessage = '';
+  }
+
+  function toggleAgentTool(toolId: number) {
+    if (editedAgentToolIds.includes(toolId)) {
+      editedAgentToolIds = editedAgentToolIds.filter(id => id !== toolId);
+    } else {
+      editedAgentToolIds = [...editedAgentToolIds, toolId];
+    }
+  }
+
+  async function handleSaveAgent() {
+    if (!nodeData?.data.agentId) {
+      agentSaveError = true;
+      agentSaveMessage = 'Cannot save: Agent ID not found';
+      setTimeout(() => { agentSaveMessage = ''; }, 3000);
+      return;
+    }
+
+    isSavingAgent = true;
+    agentSaveError = false;
+
+    try {
+      const updatedAgent = await updateAgent(nodeData.data.agentId, {
+        name: editedAgentName,
+        description: editedAgentDescription,
+        system_prompt: editedAgentSystemPrompt,
+        llm_config: { model_name: editedAgentLLMConfig },
+        tools_config: { tool_ids: editedAgentToolIds }
+      });
+
+      // Update modal's live data
+      nodeData.data.name = updatedAgent.name;
+      nodeData.data.description = updatedAgent.description || '';
+      nodeData.data.system_prompt = updatedAgent.system_prompt || '';
+      nodeData.data.llm_config = updatedAgent.llm_config || {};
+      nodeData.data.tools_config = updatedAgent.tools_config || {};
+
+      // Notify parent to update sidebar + canvas
+      if (onAgentUpdated) {
+        onAgentUpdated(nodeData.data.agentId, updatedAgent);
+      }
+
+      agentSaveError = false;
+      agentSaveMessage = 'Agent saved successfully!';
+      isEditingAgent = false;
+      setTimeout(() => { agentSaveMessage = ''; }, 3000);
+    } catch (error) {
+      agentSaveError = true;
+      agentSaveMessage = `Error: ${error}`;
+      setTimeout(() => { agentSaveMessage = ''; }, 5000);
+    } finally {
+      isSavingAgent = false;
+    }
+  }
 
   // Tool node state
   let isEditing = false;
@@ -355,6 +445,8 @@
         <h2 class="modal-title">
           {#if nodeData.nodeType === 'tool'}
             {nodeData.data.name}
+          {:else if nodeData.nodeType === 'agent'}
+            {nodeData.data.name}
           {:else if nodeData.nodeType === 'expandable'}
             {nodeData.data.label}
           {:else if nodeData.nodeType === 'colorSelector'}
@@ -477,6 +569,124 @@
               <div class="no-code">No script code available</div>
             </div>
           {/if}
+        {:else if nodeData.nodeType === 'agent'}
+          <!-- Agent Node Content -->
+          <div class="section">
+            <div class="section-header">
+              <div class="section-label" style="margin-bottom: 0;">Agent Details</div>
+              <div class="action-buttons">
+                {#if !isEditingAgent}
+                  <button class="edit-button" on:click={startEditingAgent}>Edit</button>
+                {:else}
+                  <button class="save-button" on:click={handleSaveAgent} disabled={isSavingAgent}>
+                    {isSavingAgent ? 'Saving...' : 'Save'}
+                  </button>
+                  <button class="cancel-button" on:click={cancelEditingAgent} disabled={isSavingAgent}>
+                    Cancel
+                  </button>
+                {/if}
+              </div>
+            </div>
+
+            {#if agentSaveMessage}
+              <div class="save-message" class:error={agentSaveError} class:success={!agentSaveError}>
+                {agentSaveMessage}
+              </div>
+            {/if}
+          </div>
+
+          <!-- Name -->
+          <div class="section">
+            <div class="section-label">Name</div>
+            {#if isEditingAgent}
+              <input type="text" class="main-function-input" bind:value={editedAgentName} placeholder="Agent name" />
+            {:else}
+              <p class="description-text">{nodeData.data.name}</p>
+            {/if}
+          </div>
+
+          <!-- Description -->
+          <div class="section">
+            <div class="section-label">Description</div>
+            {#if isEditingAgent}
+              <input type="text" class="main-function-input" bind:value={editedAgentDescription} placeholder="Agent description" />
+            {:else}
+              <p class="description-text">{nodeData.data.description || 'No description available'}</p>
+            {/if}
+          </div>
+
+          <!-- System Prompt -->
+          <div class="section">
+            <div class="section-label">System Prompt</div>
+            {#if isEditingAgent}
+              <textarea
+                class="agent-edit-textarea"
+                bind:value={editedAgentSystemPrompt}
+                placeholder="Enter the system prompt..."
+                rows="12"
+              ></textarea>
+            {:else}
+              <pre class="system-prompt-text">{nodeData.data.system_prompt || 'No system prompt configured'}</pre>
+            {/if}
+          </div>
+
+          <!-- LLM Configuration -->
+          <div class="section">
+            <div class="section-label">LLM Configuration</div>
+            {#if isEditingAgent}
+              <select class="main-function-input" bind:value={editedAgentLLMConfig}>
+                <option value="">-- Select LLM --</option>
+                {#each llmProviders as provider}
+                  <option value={provider.name}>{provider.name}</option>
+                {/each}
+              </select>
+            {:else if nodeData.data.llm_config && nodeData.data.llm_config.model_name}
+              <p class="description-text">Model: <strong>{nodeData.data.llm_config.model_name}</strong></p>
+            {:else}
+              <p class="description-text no-data">No LLM configured</p>
+            {/if}
+          </div>
+
+          <!-- Assigned Tools -->
+          <div class="section">
+            <div class="section-label">Assigned Tools</div>
+            {#if isEditingAgent}
+              {#if allTools.length === 0}
+                <p class="description-text no-data">No tools available</p>
+              {:else}
+                <div class="agent-tools-list">
+                  {#each allTools as tool}
+                    <label class="agent-tool-item agent-tool-editable">
+                      <input
+                        type="checkbox"
+                        checked={editedAgentToolIds.includes(tool.id)}
+                        on:change={() => toggleAgentTool(tool.id)}
+                      />
+                      <span class="agent-tool-name">{tool.name}</span>
+                      {#if tool.description}
+                        <span class="agent-tool-desc">{tool.description}</span>
+                      {/if}
+                    </label>
+                  {/each}
+                </div>
+              {/if}
+            {:else if nodeData.data.tools_config?.tool_ids?.length > 0}
+              {@const resolvedTools = getToolsByIds(nodeData.data.tools_config.tool_ids)}
+              <div class="agent-tools-list">
+                {#each resolvedTools as tool}
+                  <div class="agent-tool-item">
+                    <span class="agent-tool-name">{tool.name}</span>
+                    {#if tool.description}
+                      <span class="agent-tool-desc">{tool.description}</span>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="description-text no-data">No tools assigned</p>
+            {/if}
+          </div>
+
         {:else if nodeData.nodeType === 'expandable'}
           <!-- Expandable Node Content -->
           <div class="section">
@@ -992,5 +1202,91 @@
   .edit-ai-button:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  /* Agent-specific styles */
+  .system-prompt-text {
+    font-size: 14px;
+    color: #cccccc;
+    line-height: 1.6;
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: 'Consolas', 'Courier New', monospace;
+    background: #1e1e1e;
+    padding: 16px;
+    border-radius: 4px;
+    border: 1px solid #2d2d30;
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+
+  .no-data {
+    color: #858585;
+    font-style: italic;
+  }
+
+  .agent-tools-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .agent-tool-item {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 10px 14px;
+    background: #1e1e1e;
+    border: 1px solid #2d2d30;
+    border-radius: 4px;
+  }
+
+  .agent-tool-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: #cccccc;
+    white-space: nowrap;
+  }
+
+  .agent-tool-desc {
+    font-size: 13px;
+    color: #858585;
+  }
+
+  .agent-tool-editable {
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .agent-tool-editable:hover {
+    background: #2d2d30;
+  }
+
+  .agent-tool-editable input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: #007acc;
+    flex-shrink: 0;
+  }
+
+  .agent-edit-textarea {
+    width: 100%;
+    min-height: 200px;
+    padding: 16px;
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    color: #cccccc;
+    font-size: 14px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    line-height: 1.6;
+    resize: vertical;
+  }
+
+  .agent-edit-textarea:focus {
+    outline: none;
+    border-color: #007acc;
   }
 </style>
