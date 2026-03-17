@@ -102,8 +102,9 @@
           description,
           agentId: data.agentId,
           system_prompt: data.system_prompt || '',
-          llm_config: data.llm_config || {},
-          tools_config: data.tools_config || {},
+          llm_provider: data.llm_provider || '',
+          tool_ids: data.tool_ids || [],
+          graph_config: data.graph_config || {},
           output_schema,
           id
         }

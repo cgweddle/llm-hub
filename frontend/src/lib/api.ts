@@ -5,10 +5,7 @@ export interface Agent {
   id: number;
   name: string;
   description: string;
-  agent_type: string;
-  system_prompt?: string;
-  llm_config?: Record<string, any>;
-  tools_config?: Record<string, any>;
+  graph_config: AgentGraphConfig;   // Required — unified agent graph
   output_schema?: Record<string, any>;
   is_public: boolean;
   created_at: string;
@@ -722,14 +719,37 @@ export async function editToolCodeStream(
   }
 }
 
+// Agent graph types (used by both simple and composed agents)
+export interface SubAgentNodeConfig {
+  agent_type: string;          // "pydanticai", "react", etc.
+  name: string;
+  system_prompt: string;
+  user_prompt?: string;        // Design-time task instruction, prepended to runtime input
+  llm_provider: string;        // Name from config.yaml
+  tool_ids: number[];
+}
+
+export interface AgentEdgeConfig {
+  from_node: string;
+  to_node: string;
+  is_loop: boolean;
+}
+
+export interface AgentGraphConfig {
+  nodes: Record<string, SubAgentNodeConfig>;
+  edges: AgentEdgeConfig[];
+  entry_point: string;
+  exit_points: string[];
+  max_loop_iterations?: number;
+}
+
 // Agent creation
 export interface AgentCreateData {
   name: string;
   description: string;
-  agent_type: string;       // "pydanticai"
-  system_prompt: string;
-  llm_config: Record<string, any>;   // { model_name: string }
-  tools_config: Record<string, any>; // { tool_ids: number[] }
+  graph_config: AgentGraphConfig;       // Required — unified agent graph
+  output_schema?: Record<string, any>;
+  is_public?: boolean;
 }
 
 export async function createAgent(userId: number, agentData: AgentCreateData): Promise<Agent> {
@@ -757,9 +777,8 @@ export async function createAgent(userId: number, agentData: AgentCreateData): P
 export interface AgentUpdateData {
   name?: string;
   description?: string;
-  system_prompt?: string;
-  llm_config?: Record<string, any>;
-  tools_config?: Record<string, any>;
+  graph_config?: AgentGraphConfig;
+  output_schema?: Record<string, any>;
 }
 
 export async function updateAgent(agentId: number, updateData: AgentUpdateData): Promise<Agent> {
@@ -789,10 +808,7 @@ export interface SystemPromptGenerateRequest {
   agent_name: string;
   agent_description: string;
   tool_names: string[];
-  provider: string;
   model: string;
-  api_key?: string;
-  base_url?: string;
   additional_instructions?: string;
 }
 
@@ -858,6 +874,71 @@ export async function generateSystemPromptStream(
     }
   } catch (error) {
     console.error('Error generating system prompt:', error);
+    onError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+// User prompt generation with streaming
+export async function generateUserPromptStream(
+  request: SystemPromptGenerateRequest,
+  onChunk: (chunk: string) => void,
+  onDone: (userPrompt: string) => void,
+  onError: (error: string) => void
+): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/agents/generate-user-prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Failed to generate user prompt: ${response.statusText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('Response body is not readable');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const data = JSON.parse(line);
+
+            if (data.error) {
+              onError(data.error);
+              return;
+            } else if (data.chunk) {
+              onChunk(data.chunk);
+            } else if (data.done) {
+              onDone(data.user_prompt);
+              return;
+            }
+          } catch (e) {
+            console.error('Failed to parse streaming response:', line, e);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error generating user prompt:', error);
     onError(error instanceof Error ? error.message : String(error));
   }
 }

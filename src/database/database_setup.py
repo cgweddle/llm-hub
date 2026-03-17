@@ -40,16 +40,12 @@ class User(Base):
 
 class Agent(Base):
     __tablename__ = 'agents'
-    
+
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     name = Column(String(100), nullable=False)
     description = Column(Text)
-    agent_type = Column(String(50), nullable=False)  # 'react', 'tool_calling', etc.
-    system_prompt = Column(Text)
-    llm_config = Column(JSON)  # Store LLM configuration as JSON
-    tools_config = Column(JSON)  # Store tool configurations
-    agent_metadata = Column(JSON)  # Additional agent metadata
+    graph_config = Column(JSON, nullable=False)  # Unified agent workflow graph
     output_schema = Column(JSON)  # JSON schema for structured output validation
     is_public = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())

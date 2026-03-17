@@ -1,11 +1,12 @@
 """
 Flow Executor
-Executes database flows
+Executes database flows (DAGs of tool and agent nodes)
 """
 
 import sys
 import os
 import json
+import asyncio
 import logging
 from typing import Dict, Any, Callable, Optional, List
 from sqlalchemy.orm import Session
@@ -52,6 +53,10 @@ class FlowExecutor:
         
         # Load / reload tools
         for node_name, node_info in nodes_config.items():
+            # Skip agent nodes — they delegate to AgentExecutor at runtime
+            if node_info.get('node_type') == 'agent':
+                continue
+
             # Support both 'id' and 'tool_id' keys for backwards compatibility
             tool_id = node_info.get('id') or node_info.get('tool_id')
 
@@ -237,9 +242,70 @@ class FlowExecutor:
 
         return result
     
+    def _execute_agent_node(self, node_name: str, input_data: Any) -> str:
+        """
+        Execute an agent node by delegating to AgentExecutor.
+
+        Agent nodes receive text input and produce text output.
+        If input_data is a dict, it's serialized to a string for the agent.
+        """
+        from src.executors.agent_executor import AgentExecutor
+
+        node_config = self.graph_config["nodes"][node_name]
+        agent_id = node_config["id"]
+
+        # Convert dict input to text for agent consumption
+        if isinstance(input_data, dict):
+            input_text = json.dumps(input_data, indent=2)
+        else:
+            input_text = str(input_data)
+
+        logger.info(f"Executing agent node: {node_name} (agent_id={agent_id})")
+
+        try:
+            executor = AgentExecutor(self.session)
+            # Run the async method synchronously
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        future = pool.submit(asyncio.run, executor.execute_agent_node(agent_id, input_text, self.session))
+                        result = future.result()
+                else:
+                    result = loop.run_until_complete(executor.execute_agent_node(agent_id, input_text, self.session))
+            except RuntimeError:
+                result = asyncio.run(executor.execute_agent_node(agent_id, input_text, self.session))
+
+            self.execution_trace.append({
+                "node": node_name,
+                "input": input_data,
+                "output": result,
+                "status": "success"
+            })
+            logger.info(f"Agent node {node_name} completed successfully")
+            return result
+
+        except Exception as e:
+            self.execution_trace.append({
+                "node": node_name,
+                "input": input_data,
+                "output": None,
+                "status": "failed",
+                "error": str(e)
+            })
+            logger.error(f"Agent node {node_name} failed: {e}")
+            raise
+
+    def _is_agent_node(self, node_name: str) -> bool:
+        """Check if a node is an agent node."""
+        node_config = self.graph_config["nodes"].get(node_name, {})
+        return node_config.get("node_type") == "agent"
+
     def _execute_from_node(self, start_node: str, initial_input: Any) -> Any:
         """
-        Execute flow from a specific node
+        Execute flow from a specific node.
+        Supports both tool nodes and agent nodes.
 
         Args:
             start_node: Node name to start from
@@ -251,41 +317,83 @@ class FlowExecutor:
         current_input = initial_input
 
         while True:
-            #Execute node
-            output = self._execute_node(current_node, current_input)
+            # Execute node — dispatch based on node type
+            if self._is_agent_node(current_node):
+                output = self._execute_agent_node(current_node, current_input)
+            else:
+                output = self._execute_node(current_node, current_input)
 
-            #Find next nodes
+            # Find next nodes
             next_nodes = self._find_next_node(current_node)
 
-            #If there's not a next node, exit and return
+            # If there's not a next node, exit and return
             if not next_nodes:
                 logger.info(f"Reached exit at node: {current_node}")
                 return output
 
-            #Just for sequential nodes
-            #Implement parallelism for parallel processes
+            # Just for sequential nodes
             next_node = next_nodes[0]
             if len(next_nodes) > 1:
                 logger.warning(f"Multiple next nodes, just using first: {next_node}")
-            
-            #Find edge between current and next node
-            edge_mapping = None
-            for edge in self.graph_config['edges']:
-                if edge['from_node'] == current_node and edge['to_node'] == next_node:
-                    edge_mapping = edge.get('mapping')
-                    break
 
-            target_node_info = self.executable_functions[next_node]
-            target_input_schema = target_node_info.get("input_schema", {})
+            # Prepare input for next node based on node types
+            current_is_agent = self._is_agent_node(current_node)
+            next_is_agent = self._is_agent_node(next_node)
 
-            # Get base input values from the next node config (user-entered values)
-            next_node_config = self.graph_config['nodes'].get(next_node, {})
-            base_input_values = next_node_config.get('input_values', {})
+            if current_is_agent and next_is_agent:
+                # Agent→Agent: text passthrough
+                current_input = output
+            elif current_is_agent and not next_is_agent:
+                # Agent→Tool: assign agent text output to mapped input parameters
+                edge_mapping = None
+                for edge in self.graph_config['edges']:
+                    if edge['from_node'] == current_node and edge['to_node'] == next_node:
+                        edge_mapping = edge.get('mapping')
+                        break
 
-            #Apply mapping (merges base values with edge-connected values)
-            current_input = self._apply_mapping(output, edge_mapping, target_input_schema, base_input_values)
+                next_node_config = self.graph_config['nodes'].get(next_node, {})
+                base_input_values = next_node_config.get('input_values', {})
+                target_node_info = self.executable_functions.get(next_node, {})
+                target_input_schema = target_node_info.get("input_schema", {})
 
-            #Move to the next node
+                if edge_mapping:
+                    # Use mapping: agent output is text, map it to specified param(s)
+                    result = base_input_values.copy() if base_input_values else {}
+                    for output_field, input_param in edge_mapping.items():
+                        result[input_param] = output
+                    current_input = result
+                elif target_input_schema:
+                    # Auto-detect: assign to first string parameter
+                    result = base_input_values.copy() if base_input_values else {}
+                    props = target_input_schema.get("properties", target_input_schema)
+                    for param_name, param_info in props.items():
+                        if param_name not in result:
+                            result[param_name] = output
+                            break
+                    current_input = result
+                else:
+                    current_input = {"input": output}
+            elif not current_is_agent and next_is_agent:
+                # Tool→Agent: serialize tool output dict to text for agent
+                # Mapping is ignored — agent gets text
+                current_input = output
+            else:
+                # Tool→Tool: standard field-level mapping
+                edge_mapping = None
+                for edge in self.graph_config['edges']:
+                    if edge['from_node'] == current_node and edge['to_node'] == next_node:
+                        edge_mapping = edge.get('mapping')
+                        break
+
+                target_node_info = self.executable_functions[next_node]
+                target_input_schema = target_node_info.get("input_schema", {})
+
+                next_node_config = self.graph_config['nodes'].get(next_node, {})
+                base_input_values = next_node_config.get('input_values', {})
+
+                current_input = self._apply_mapping(output, edge_mapping, target_input_schema, base_input_values)
+
+            # Move to the next node
             current_node = next_node
 
     def _generate_combined_flow_script(self, initial_input: Any) -> str:

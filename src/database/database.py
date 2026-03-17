@@ -85,19 +85,18 @@ def get_session():
 ## Agent database
 
 def create_agent(session: Any, user_id: int, name: str, description: str,
-                    agent_type: str, system_prompt: str, llm_config: Dict,
-                    tools_config: Dict, agent_metadata: Dict = None,
-                    output_schema: Dict = None) -> Agent:
-    """Create a new agent"""
+                    graph_config: Dict, output_schema: Dict = None) -> Agent:
+    """Create a new agent with a unified graph_config.
+
+    graph_config contains nodes, edges, entry_point, exit_points, and
+    optionally max_loop_iterations. Every agent — simple or complex —
+    is represented as a graph.
+    """
     agent = Agent(
         user_id=user_id,
         name=name,
         description=description,
-        agent_type=agent_type,
-        system_prompt=system_prompt,
-        llm_config=llm_config,
-        tools_config=tools_config,
-        agent_metadata=agent_metadata or {},
+        graph_config=graph_config,
         output_schema=output_schema
     )
     session.add(agent)

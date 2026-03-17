@@ -1,6 +1,6 @@
 """
 Custom ReAct Agent Factory using Google ADK
-Creates ReAct-style agents from database configurations using Google's Agent Development Kit.
+Creates ReAct-style agents from database configurations or node config dicts.
 LLM configuration is loaded by model_name from ~/.llm_hub/config.yaml
 """
 
@@ -55,7 +55,6 @@ class AgentConfig:
     user_id: int = 1
     is_public: bool = False
     max_iterations: int = 10
-    agent_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 def setup_llm_environment(llm_config: Dict) -> str:
@@ -391,8 +390,7 @@ Begin!"""
 
 class ReactAgentFactory:
     """
-    Factory for creating ReAct agents from database configurations using Google ADK.
-    Handles loading agent configs, tools, and constructing the agent.
+    Factory for creating ReAct agents from database configurations or node configs.
     """
 
     def __init__(self, session=None):
@@ -401,12 +399,6 @@ class ReactAgentFactory:
     def create_from_config(self, config: AgentConfig) -> ReActAgent:
         """
         Create a ReAct agent from an AgentConfig object.
-
-        Args:
-            config: AgentConfig with agent settings
-
-        Returns:
-            Configured ReActAgent instance
         """
         if not config.model_name:
             raise ValueError(
@@ -448,59 +440,50 @@ class ReactAgentFactory:
             verbose=True
         )
 
+    def create_from_node_config(self, node_config: Dict[str, Any]) -> ReActAgent:
+        """
+        Create a ReAct agent from a graph_config node dict.
+
+        Args:
+            node_config: Node config with keys: name, system_prompt, llm_provider, tool_ids
+        """
+        config = AgentConfig(
+            name=node_config.get("name", "Agent"),
+            description=node_config.get("system_prompt", ""),
+            model_name=node_config.get("llm_provider"),
+            system_prompt=node_config.get("system_prompt"),
+            tool_ids=node_config.get("tool_ids", []),
+        )
+        return self.create_from_config(config)
+
     def create_from_database(self, agent_id: int) -> ReActAgent:
         """
         Create a ReAct agent from a database record.
-
-        Args:
-            agent_id: ID of the agent in the database
-
-        Returns:
-            Configured ReActAgent instance
+        Reads config from graph_config.nodes[entry_point].
         """
         agent_record = get_agent_by_id(self.session, agent_id)
         if not agent_record:
             raise ValueError(f"Agent with ID {agent_id} not found")
 
-        if agent_record.agent_type != "react":
-            raise ValueError(f"Agent {agent_id} is not a ReAct agent (type: {agent_record.agent_type})")
+        graph_config = agent_record.graph_config
+        if not graph_config:
+            raise ValueError(f"Agent {agent_id} has no graph_config")
 
-        # Extract tool IDs from the agent's tools relationship
-        tool_ids = [tool.id for tool in agent_record.tools]
+        entry_point = graph_config.get("entry_point")
+        nodes = graph_config.get("nodes", {})
+        node_config = nodes.get(entry_point) if entry_point else None
 
-        # Also check tools_config for additional tool IDs
-        tools_config = agent_record.tools_config or {}
-        if "tool_ids" in tools_config:
-            tool_ids.extend(tools_config["tool_ids"])
-            tool_ids = list(set(tool_ids))  # Remove duplicates
-
-        # Get model_name from llm_config
-        llm_config = agent_record.llm_config or {}
-        model_name = llm_config.get("model_name")
-
-        if not model_name:
+        if not node_config:
             raise ValueError(
-                f"Agent {agent_id} does not have a model_name configured. "
-                "Please set an LLM configuration for this agent."
+                f"Agent {agent_id} graph_config has no valid entry_point node. "
+                f"entry_point='{entry_point}', available nodes: {list(nodes.keys())}"
             )
 
-        config = AgentConfig(
-            name=agent_record.name,
-            description=agent_record.description or "",
-            model_name=model_name,
-            system_prompt=agent_record.system_prompt,
-            tool_ids=tool_ids,
-            user_id=agent_record.user_id,
-            is_public=agent_record.is_public,
-            max_iterations=agent_record.agent_metadata.get("max_iterations", 10) if agent_record.agent_metadata else 10,
-            agent_metadata=agent_record.agent_metadata or {}
-        )
-
-        return self.create_from_config(config)
+        return self.create_from_node_config(node_config)
 
     def save_agent_to_database(self, config: AgentConfig) -> int:
         """
-        Save an agent configuration to the database.
+        Save an agent configuration to the database as a single-node graph.
 
         Args:
             config: AgentConfig to save
@@ -508,26 +491,29 @@ class ReactAgentFactory:
         Returns:
             The ID of the created agent
         """
-        # Store model_name in llm_config (following the pattern)
-        llm_config = {"model_name": config.model_name}
-
-        # Prepare tools_config with tool IDs
-        tools_config = {"tool_ids": config.tool_ids or []}
-
-        # Prepare metadata
-        metadata = config.agent_metadata.copy()
-        metadata["max_iterations"] = config.max_iterations
+        # Build graph_config from the flat config
+        graph_config = {
+            "nodes": {
+                "main": {
+                    "agent_type": "react",
+                    "name": config.name,
+                    "system_prompt": config.system_prompt or config.description,
+                    "llm_provider": config.model_name,
+                    "tool_ids": config.tool_ids or []
+                }
+            },
+            "edges": [],
+            "entry_point": "main",
+            "exit_points": ["main"],
+            "max_loop_iterations": config.max_iterations
+        }
 
         agent = db_create_agent(
             session=self.session,
             user_id=config.user_id,
             name=config.name,
             description=config.description,
-            agent_type="react",
-            system_prompt=config.system_prompt or config.description,
-            llm_config=llm_config,
-            tools_config=tools_config,
-            metadata=metadata
+            graph_config=graph_config,
         )
 
         return agent.id
@@ -544,26 +530,6 @@ def create_react_agent(
 ) -> ReActAgent:
     """
     Convenience function to quickly create a ReAct agent using Google ADK.
-
-    Args:
-        name: Agent name
-        description: Agent description/system prompt
-        model_name: Name of LLM config from ~/.llm_hub/config.yaml (e.g., "My Gemini Config")
-        tool_ids: List of database tool IDs to load
-        max_iterations: Maximum iterations for reasoning
-        **kwargs: Additional agent metadata options
-
-    Returns:
-        Configured ReActAgent instance
-
-    Example:
-        >>> agent = create_react_agent(
-        ...     name="Research Assistant",
-        ...     description="You help users research topics",
-        ...     model_name="My Gemini Config",  # Must exist in ~/.llm_hub/config.yaml
-        ...     tool_ids=[1, 2, 3]
-        ... )
-        >>> result = agent.run("What is the capital of France?")
     """
     config = AgentConfig(
         name=name,
@@ -571,7 +537,6 @@ def create_react_agent(
         model_name=model_name,
         tool_ids=tool_ids,
         max_iterations=max_iterations,
-        agent_metadata=kwargs
     )
 
     factory = ReactAgentFactory()

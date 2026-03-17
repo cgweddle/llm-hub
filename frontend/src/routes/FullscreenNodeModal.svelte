@@ -40,8 +40,8 @@
     editedAgentName = nodeData.data.name || '';
     editedAgentDescription = nodeData.data.description || '';
     editedAgentSystemPrompt = nodeData.data.system_prompt || '';
-    editedAgentLLMConfig = nodeData.data.llm_config?.model_name || '';
-    editedAgentToolIds = [...(nodeData.data.tools_config?.tool_ids || [])];
+    editedAgentLLMConfig = nodeData.data.llm_provider || '';
+    editedAgentToolIds = [...(nodeData.data.tool_ids || [])];
     isEditingAgent = true;
   }
 
@@ -70,20 +70,40 @@
     agentSaveError = false;
 
     try {
+      // Rebuild graph_config from edited fields
+      const entryPoint = nodeData.data.graph_config?.entry_point || 'main';
+      const existingGraphConfig = nodeData.data.graph_config || {
+        nodes: {}, edges: [], entry_point: entryPoint, exit_points: [entryPoint]
+      };
+      const updatedGraphConfig = {
+        ...existingGraphConfig,
+        nodes: {
+          ...existingGraphConfig.nodes,
+          [entryPoint]: {
+            ...(existingGraphConfig.nodes?.[entryPoint] || {}),
+            name: editedAgentName,
+            system_prompt: editedAgentSystemPrompt,
+            llm_provider: editedAgentLLMConfig,
+            tool_ids: editedAgentToolIds
+          }
+        }
+      };
+
       const updatedAgent = await updateAgent(nodeData.data.agentId, {
         name: editedAgentName,
         description: editedAgentDescription,
-        system_prompt: editedAgentSystemPrompt,
-        llm_config: { model_name: editedAgentLLMConfig },
-        tools_config: { tool_ids: editedAgentToolIds }
+        graph_config: updatedGraphConfig
       });
 
-      // Update modal's live data
+      // Update modal's live data from graph_config
+      const updatedEntryPoint = updatedAgent.graph_config?.entry_point || 'main';
+      const updatedEntryNode = updatedAgent.graph_config?.nodes?.[updatedEntryPoint] || {};
       nodeData.data.name = updatedAgent.name;
       nodeData.data.description = updatedAgent.description || '';
-      nodeData.data.system_prompt = updatedAgent.system_prompt || '';
-      nodeData.data.llm_config = updatedAgent.llm_config || {};
-      nodeData.data.tools_config = updatedAgent.tools_config || {};
+      nodeData.data.system_prompt = updatedEntryNode.system_prompt || '';
+      nodeData.data.llm_provider = updatedEntryNode.llm_provider || '';
+      nodeData.data.tool_ids = updatedEntryNode.tool_ids || [];
+      nodeData.data.graph_config = updatedAgent.graph_config;
 
       // Notify parent to update sidebar + canvas
       if (onAgentUpdated) {
@@ -640,8 +660,8 @@
                   <option value={provider.name}>{provider.name}</option>
                 {/each}
               </select>
-            {:else if nodeData.data.llm_config && nodeData.data.llm_config.model_name}
-              <p class="description-text">Model: <strong>{nodeData.data.llm_config.model_name}</strong></p>
+            {:else if nodeData.data.llm_provider}
+              <p class="description-text">Model: <strong>{nodeData.data.llm_provider}</strong></p>
             {:else}
               <p class="description-text no-data">No LLM configured</p>
             {/if}
@@ -670,8 +690,8 @@
                   {/each}
                 </div>
               {/if}
-            {:else if nodeData.data.tools_config?.tool_ids?.length > 0}
-              {@const resolvedTools = getToolsByIds(nodeData.data.tools_config.tool_ids)}
+            {:else if nodeData.data.tool_ids?.length > 0}
+              {@const resolvedTools = getToolsByIds(nodeData.data.tool_ids)}
               <div class="agent-tools-list">
                 {#each resolvedTools as tool}
                   <div class="agent-tool-item">

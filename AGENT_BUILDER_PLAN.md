@@ -5,8 +5,8 @@
 Replace the simple "Create Agent" modal with a full visual SvelteFlow-based agent builder. Users will drag-and-drop agent type nodes (Planning, React, Reflection) onto a canvas, connect them into workflows, assign tools, and save the result as a composed agent.
 
 **Key architectural decisions**:
-- Add a **mode toggle** to the existing page rather than a new route. This reuses the SvelteFlow canvas, sidebar, and controls infrastructure already in `+page.svelte`.
-- **Both creation paths coexist**: The simple "Create New Agent" modal remains for quick single agents. A new "Compose Agent" button switches to the visual builder for multi-agent workflows.
+- **Two distinct buttons** in the agents sidebar section: "Create Simple Agent" (opens existing modal) and "Create Complex Agent" (switches page to agent builder SvelteFlow canvas).
+- When "Create Complex Agent" is clicked, the entire page transforms into the agent builder view with its own sidebar and canvas — not a toggle, but a dedicated agent-building mode.
 - Composed agents are saved to the existing Agent table using the `agent_metadata` JSON field to store the graph config.
 
 ---
@@ -15,7 +15,7 @@ Replace the simple "Create Agent" modal with a full visual SvelteFlow-based agen
 
 | # | File | Purpose |
 |---|------|---------|
-| 1 | `frontend/src/lib/stores/builderMode.ts` | Svelte store for `'flow' \| 'agent'` mode toggle |
+| 1 | `frontend/src/lib/stores/builderMode.ts` | Svelte store for `'flow' \| 'agent'` page mode |
 | 2 | `frontend/src/lib/agentTemplates.ts` | Agent type definitions (Planning/React/Reflection) with colors, icons, default system prompts |
 | 3 | `frontend/src/routes/AgentBuilderNode.svelte` | New SvelteFlow node component with type-based theming (blue/green/purple), tool assignment display, and config button |
 | 4 | `frontend/src/routes/AgentConfigModal.svelte` | Per-node config modal: name, system prompt, tool checkboxes, LLM provider |
@@ -26,7 +26,7 @@ Replace the simple "Create Agent" modal with a full visual SvelteFlow-based agen
 
 | # | File | Changes |
 |---|------|---------|
-| 1 | `frontend/src/routes/+page.svelte` | Mode toggle button, conditional sidebar (agent types vs tools/flows), separate `agentNodes`/`agentEdges` state, agent drop handler, save composed agent dialog, register `agentBuilderNode` + `loopEdge` types |
+| 1 | `frontend/src/routes/+page.svelte` | Two agent creation buttons ("Create Simple Agent" / "Create Complex Agent"), conditional page rendering (flow builder vs agent builder), separate `agentNodes`/`agentEdges` state, agent-builder sidebar, agent drop handler, save composed agent dialog, register `agentBuilderNode` + `loopEdge` types |
 | 2 | `frontend/src/lib/api.ts` | Add `ComposedAgentMetadata` interface, update `AgentCreateData` to support `agent_type: 'composed'` + `agent_metadata` |
 | 3 | `src/executors/agent_executor.py` | Add `execute_composed_agent()` method that orchestrates sub-agents following the graph config |
 | 4 | `src/api/backend.py` | Ensure `agent_metadata` is accepted and stored on agent creation |
@@ -35,9 +35,12 @@ Replace the simple "Create Agent" modal with a full visual SvelteFlow-based agen
 
 ## Implementation Steps
 
-### Step 1 — Mode toggle infrastructure
+### Step 1 — Page mode infrastructure
 - Create `builderMode.ts` store (`'flow' | 'agent'`)
-- In `+page.svelte`: import store, add toggle button in the flow controls bar
+- In `+page.svelte`:
+  - Replace single "Create New Agent" button with two buttons: **"Create Simple Agent"** (opens existing modal) and **"Create Complex Agent"** (sets mode to `'agent'`)
+  - When mode is `'agent'`, render the agent builder page (different sidebar + canvas)
+  - Add a "Back to Flow Builder" button in agent mode to return to flow mode
 - Add separate state arrays: `agentNodes`/`agentEdges` alongside existing `nodes`/`edges`
 - Use reactive bindings to swap which arrays the SvelteFlow canvas uses based on mode
 
@@ -58,13 +61,15 @@ Replace the simple "Create Agent" modal with a full visual SvelteFlow-based agen
 - Register as `agentBuilderNode` in `nodeTypes` map in `+page.svelte`
 
 ### Step 4 — Sidebar conditional rendering
-- When mode is `'agent'`:
+- When mode is `'agent'` (agent builder page):
+  - Show **"Back to Flow Builder"** button at the top
   - Show **"Agent Types"** section with three draggable items (Planning, React, Reflection) styled with colored left borders
   - Show **"Available Tools"** section (read-only list for reference — tools are assigned per-node via config modal)
-  - Show **"Save Agent"** button instead of flow save controls
-  - Hide flows section and tool creation
-  - Keep "Create New Agent" button for simple agents; add "Compose Agent" button to enter agent builder mode
-- When mode is `'flow'`: show existing sidebar (unchanged, including simple agent creation modal)
+  - Show **"Save Complex Agent"** button
+  - Hide all flow-related sections (flows, tools, simple agents)
+- When mode is `'flow'` (default page):
+  - Show existing sidebar unchanged
+  - In the agents section, show two buttons: "Create Simple Agent" and "Create Complex Agent"
 
 ### Step 5 — Canvas drop handler for agent types
 - Modify the `ondrop` handler to check `builderMode`:
@@ -108,7 +113,7 @@ Replace the simple "Create Agent" modal with a full visual SvelteFlow-based agen
 
 ## Verification
 
-1. **Frontend mode toggle**: Click mode toggle → sidebar switches between flow/agent views, canvas clears to the other mode's state
+1. **Page mode switching**: Click "Create Complex Agent" → entire page switches to agent builder view with agent-specific sidebar. Click "Back to Flow Builder" → returns to flow mode with original state preserved.
 2. **Drag & drop**: Drag each agent type → colored node appears on canvas with correct theming
 3. **Node configuration**: Click configure → modal opens → edit name/prompt/tools/LLM → save reflects on node
 4. **Edge connections**: Connect Planning→React→Reflection → edges render with arrows. Connect Reflection→React backward → loop edge renders with animation

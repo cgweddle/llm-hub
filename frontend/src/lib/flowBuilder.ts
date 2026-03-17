@@ -19,8 +19,15 @@ export function buildEnhancedGraphConfig(
   const nodesConfig: Record<string, NodeConfig> = {};
 
   nodes.forEach(node => {
-    // Only include tool/agent nodes (skip visual-only nodes like START/END if any)
-    if (node.type === 'toolNode' && node.data.toolId) {
+    if (node.type === 'toolNode' && node.data.isAgent && node.data.agentId) {
+      // Agent node — delegates to AgentExecutor at runtime
+      nodesConfig[node.id] = {
+        node_type: 'agent',
+        id: node.data.agentId,
+        name: node.data.name
+      };
+    } else if (node.type === 'toolNode' && node.data.toolId) {
+      // Tool node — standard executable function
       const nodeConfig: NodeConfig = {
         node_type: 'tool',
         id: node.data.toolId,
@@ -39,14 +46,6 @@ export function buildEnhancedGraphConfig(
 
       nodesConfig[node.id] = nodeConfig;
     }
-    // TODO: Add agent node support when needed
-    // else if (node.type === 'agentNode' && node.data.agentId) {
-    //   nodesConfig[node.id] = {
-    //     node_type: 'agent',
-    //     id: node.data.agentId,
-    //     name: node.data.name
-    //   };
-    // }
   });
 
   // Build edges with mapping
@@ -65,8 +64,9 @@ export function buildEnhancedGraphConfig(
   });
 
   // Find entry point (node with no incoming edges)
+  // Include both tool and agent nodes (both use type 'toolNode')
   const nodesWithIncoming = new Set(edges.map(e => e.target));
-  const toolNodes = nodes.filter(n => n.type === 'toolNode');
+  const toolNodes = nodes.filter(n => n.type === 'toolNode' && (n.data.toolId || n.data.agentId));
   const entryNodes = toolNodes.filter(n => !nodesWithIncoming.has(n.id));
 
   if (entryNodes.length === 0) {
