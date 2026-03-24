@@ -193,7 +193,7 @@ class PydanticAIAgentFactory:
                     logger.warning(f"Tool with ID {tool_id} not found, skipping")
                     continue
                 tool_func, _, _ = self.tool_converter.convert_tool(tool_record)
-                agent.tool(tool_func)
+                agent.tool_plain(tool_func)
                 logger.debug(f"Registered tool: {tool_record.name}")
             except Exception as e:
                 logger.error(f"Failed to register tool {tool_id}: {e}")

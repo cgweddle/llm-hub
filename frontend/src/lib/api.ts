@@ -56,10 +56,11 @@ export interface CondaEnvironmentsResponse {
 
 // Flow-related interfaces
 export interface NodeConfig {
-  node_type: string;  // "tool", "agent", etc.
+  node_type: string;  // "tool", "agent", "trigger"
   id: number;
   name: string;
   model_name?: string;  // Reference to LLM config name from ~/.llm_hub/config.yaml
+  input_value?: string;  // For trigger nodes — the user's text input
 }
 
 export interface EdgeMapping {
@@ -94,6 +95,7 @@ export interface FlowUpdateRequest {
 
 export interface FlowExecutionResult {
   flow_id: number;
+  execution_id: number | null;
   status: "completed" | "failed";
   final_output: any;
   execution_trace: Array<{
@@ -104,6 +106,57 @@ export interface FlowExecutionResult {
     error?: string;
   }>;
   error?: string;
+}
+
+export interface ExecutionDetail {
+  id: number;
+  parent_id: number | null;
+  execution_type: string;
+  node_id: string | null;
+  name: string | null;
+  sequence: number | null;
+  input_data: any;
+  output_data: any;
+  status: string;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  execution_metadata: Record<string, any> | null;
+  langfuse_trace_id: string | null;
+  children: ExecutionDetail[];
+}
+
+export interface TraceObservation {
+  id: string;
+  name: string | null;
+  type: string | null;
+  input: any;
+  output: any;
+  model: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  usage: { input: number | null; output: number | null; total: number | null } | null;
+  level: string | null;
+  status_message: string | null;
+}
+
+export interface TraceDetail {
+  trace_id: string;
+  name: string | null;
+  input: any;
+  output: any;
+  observations: TraceObservation[];
+}
+
+export interface ExecutionListItem {
+  id: number;
+  execution_type: string;
+  name: string | null;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  flow_id: number | null;
+  agent_id: number | null;
 }
 
 // API functions - using the new FastAPI endpoints
@@ -439,7 +492,7 @@ export async function updateFlow(flowId: number, flowData: FlowUpdateRequest): P
   }
 }
 
-export async function executeFlow(flowId: number, initialInput: Record<string, any>, condaEnv?: string | null): Promise<FlowExecutionResult> {
+export async function executeFlow(flowId: number, initialInput: Record<string, any>, condaEnv?: string | null, userId: number = 1): Promise<FlowExecutionResult> {
   try {
     const response = await fetch(`${API_BASE_URL}/flows/${flowId}/execute`, {
       method: 'POST',
@@ -447,6 +500,7 @@ export async function executeFlow(flowId: number, initialInput: Record<string, a
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
+        user_id: userId,
         initial_input: initialInput,
         conda_env: condaEnv
       })
@@ -998,5 +1052,47 @@ export async function saveLLMProvidersConfig(config: LLMProvidersConfigRequest):
   } catch (error) {
     console.error('Error saving LLM providers config:', error);
     throw error;
+  }
+}
+
+// ─── Execution API functions ───
+
+export async function fetchExecutions(userId: number, limit: number = 50, offset: number = 0): Promise<ExecutionListItem[]> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/executions?user_id=${userId}&limit=${limit}&offset=${offset}`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch executions: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching executions:', error);
+    return [];
+  }
+}
+
+export async function fetchExecution(executionId: number): Promise<ExecutionDetail | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/executions/${executionId}`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch execution: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching execution:', error);
+    return null;
+  }
+}
+
+export async function fetchExecutionTrace(executionId: number): Promise<TraceDetail | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/executions/${executionId}/trace`);
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      throw new Error(`Failed to fetch trace: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching execution trace:', error);
+    return null;
   }
 }

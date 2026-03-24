@@ -4,7 +4,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 import os
 import logging
-from .database_setup import User, Agent, Tool, Flow, Execution, Message, Prompts
+from .database_setup import User, Agent, Tool, Flow, Execution, Prompts
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -302,3 +302,39 @@ def get_available_flows(session: Any, user_id: int) -> List[Flow]:
 def get_prompt_by_name(session: Any, prompt_name: str) -> Optional[Prompts]:
     """Get prompt by name from Prompts table"""
     return session.query(Prompts).filter(Prompts.prompt_name == prompt_name).first()
+
+
+## Execution database functions
+
+def create_execution(session: Any, **kwargs) -> Execution:
+    """Create an execution record. Accepts any Execution column as a kwarg."""
+    execution = Execution(**kwargs)
+    session.add(execution)
+    session.commit()
+    session.refresh(execution)
+    return execution
+
+def get_execution_by_id(session: Any, execution_id: int) -> Optional[Execution]:
+    """Get a single execution by ID (children are lazy-loaded via relationship)."""
+    return session.query(Execution).filter(Execution.id == execution_id).first()
+
+def get_user_executions(session: Any, user_id: int, limit: int = 50, offset: int = 0) -> List[Execution]:
+    """Get top-level executions for a user (parent_id is NULL), newest first."""
+    return (
+        session.query(Execution)
+        .filter(Execution.user_id == user_id, Execution.parent_id.is_(None))
+        .order_by(Execution.started_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+def update_execution(session: Any, execution_id: int, **kwargs) -> Optional[Execution]:
+    """Update an execution record."""
+    execution = get_execution_by_id(session, execution_id)
+    if execution:
+        for key, value in kwargs.items():
+            setattr(execution, key, value)
+        session.commit()
+        session.refresh(execution)
+    return execution

@@ -17,6 +17,13 @@ from google.adk.tools import FunctionTool
 from google.adk.runners import Runner
 from google.genai import types
 
+# Initialize LangFuse instrumentation for Google ADK agents
+try:
+    from openinference.instrumentation.google_adk import GoogleADKInstrumentor
+    GoogleADKInstrumentor().instrument()
+except ImportError:
+    pass  # LangFuse ADK instrumentation not available
+
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 

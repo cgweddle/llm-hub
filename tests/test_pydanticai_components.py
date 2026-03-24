@@ -653,45 +653,6 @@ class TestPydanticAIAgentFactory:
 class TestAgentExecutor:
     """Tests for unified agent executor"""
 
-    def test_create_execution_record(self):
-        """Test execution record creation"""
-        session = MockSession()
-        executor = AgentExecutor(session)
-
-        execution = executor._create_execution(
-            agent_id=1,
-            user_id=1,
-            input_data="Test query"
-        )
-
-        assert execution.status == "running"
-        assert len(session.added) == 1
-
-    def test_complete_execution(self):
-        """Test marking execution as completed"""
-        session = MockSession()
-        executor = AgentExecutor(session)
-
-        execution = MockExecution(id=1)
-        result = {"result": "Test result", "model": "gpt-4"}
-
-        executor._complete_execution(execution, result)
-
-        assert execution.status == "completed"
-        assert execution.completed_at is not None
-
-    def test_fail_execution(self):
-        """Test marking execution as failed"""
-        session = MockSession()
-        executor = AgentExecutor(session)
-
-        execution = MockExecution(id=1)
-
-        executor._fail_execution(execution, "Test error message")
-
-        assert execution.status == "failed"
-        assert execution.error_message == "Test error message"
-
     @pytest.mark.asyncio
     @patch('executors.agent_executor.get_agent_by_id')
     async def test_execute_agent_not_found(self, mock_get_agent):
@@ -704,23 +665,6 @@ class TestAgentExecutor:
         with pytest.raises(ValueError, match="not found"):
             await executor.execute_agent(
                 agent_id=999,
-                user_id=1,
-                input_data="Test"
-            )
-
-    @pytest.mark.asyncio
-    @patch('executors.agent_executor.get_agent_by_id')
-    async def test_execute_agent_unknown_type(self, mock_get_agent):
-        """Test execution fails for unknown agent type"""
-        mock_agent = MockAgent(agent_type="unknown_type")
-        mock_get_agent.return_value = mock_agent
-
-        session = MockSession()
-        executor = AgentExecutor(session)
-
-        with pytest.raises(RuntimeError, match="Unknown agent type"):
-            await executor.execute_agent(
-                agent_id=1,
                 user_id=1,
                 input_data="Test"
             )
@@ -755,20 +699,6 @@ class TestAgentExecutor:
 
         assert cost is None
 
-    def test_store_messages(self):
-        """Test message storage"""
-        session = MockSession()
-        executor = AgentExecutor(session)
-
-        messages = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there!"}
-        ]
-
-        executor._store_messages(execution_id=1, messages=messages)
-
-        assert len(session.added) == 2
-        assert session.committed is True
 
 
 # ============================================================================

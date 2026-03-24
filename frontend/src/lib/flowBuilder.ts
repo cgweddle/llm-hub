@@ -19,7 +19,15 @@ export function buildEnhancedGraphConfig(
   const nodesConfig: Record<string, NodeConfig> = {};
 
   nodes.forEach(node => {
-    if (node.type === 'toolNode' && node.data.isAgent && node.data.agentId) {
+    if (node.type === 'triggerNode') {
+      // Trigger node — entry point with user-provided text
+      nodesConfig[node.id] = {
+        node_type: 'trigger',
+        id: 0,
+        name: node.data.name || 'Text Input',
+        input_value: node.data.triggerValue || ''
+      };
+    } else if (node.type === 'toolNode' && node.data.isAgent && node.data.agentId) {
       // Agent node — delegates to AgentExecutor at runtime
       nodesConfig[node.id] = {
         node_type: 'agent',
@@ -64,10 +72,13 @@ export function buildEnhancedGraphConfig(
   });
 
   // Find entry point (node with no incoming edges)
-  // Include both tool and agent nodes (both use type 'toolNode')
+  // Include tool, agent, and trigger nodes
   const nodesWithIncoming = new Set(edges.map(e => e.target));
-  const toolNodes = nodes.filter(n => n.type === 'toolNode' && (n.data.toolId || n.data.agentId));
-  const entryNodes = toolNodes.filter(n => !nodesWithIncoming.has(n.id));
+  const allFlowNodes = nodes.filter(n =>
+    (n.type === 'toolNode' && (n.data.toolId || n.data.agentId)) ||
+    n.type === 'triggerNode'
+  );
+  const entryNodes = allFlowNodes.filter(n => !nodesWithIncoming.has(n.id));
 
   if (entryNodes.length === 0) {
     throw new Error('No entry point found in flow - all nodes have incoming edges');
@@ -78,9 +89,10 @@ export function buildEnhancedGraphConfig(
 
   const entryPoint = entryNodes[0].id;
 
-  // Find exit points (nodes with no outgoing edges)
+  // Find exit points (nodes with no outgoing edges, excluding triggers)
   const nodesWithOutgoing = new Set(edges.map(e => e.source));
-  const exitPoints = toolNodes
+  const exitPoints = allFlowNodes
+    .filter(n => n.type !== 'triggerNode')
     .filter(n => !nodesWithOutgoing.has(n.id))
     .map(n => n.id);
 

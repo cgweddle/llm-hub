@@ -10,6 +10,7 @@ Supports two schema formats:
    {"type": "object", "properties": {"arg_name": {"type": "array", "items": {"type": "integer"}}}}
 """
 
+import inspect
 import json
 import logging
 import os
@@ -317,17 +318,8 @@ class PydanticAIToolConverter:
             'sys': sys,
         }
 
-        if hasattr(tool, 'helper_functions') and tool.helper_functions:
-            for helper_name, helper_code in tool.helper_functions.items():
-                try:
-                    exec(helper_code, exec_globals)
-                    logger.debug(f"Loaded helper function: {helper_name}")
-                except Exception as e:
-                    logger.error(f"Failed to execute helper function '{helper_name}': {e}")
-                    raise ValueError(f"Helper function '{helper_name}' compilation failed: {e}")
-
         try:
-            exec(tool.function_code, exec_globals)
+            exec(tool.script_code, exec_globals)
             main_function = exec_globals.get(tool.main_function)
 
             if not main_function:
@@ -377,6 +369,43 @@ class PydanticAIToolConverter:
             logger.warning(f"Tool '{tool_name}' output validation failed: {e}. Returning raw result.")
             return result
 
+    def _build_signature(self, input_model: Type[BaseModel]) -> inspect.Signature:
+        """
+        Build an inspect.Signature from a Pydantic input model so that
+        PydanticAI can introspect the wrapper's typed parameters.
+        """
+        params = []
+        for field_name, field_info in input_model.model_fields.items():
+            default = (
+                field_info.default
+                if field_info.is_required() is False
+                else inspect.Parameter.empty
+            )
+            params.append(inspect.Parameter(
+                field_name,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                default=default,
+                annotation=field_info.annotation,
+            ))
+        return inspect.Signature(params, return_annotation=Any)
+
+    def _apply_signature(
+        self,
+        func: Callable,
+        input_model: Type[BaseModel],
+        tool_name: str,
+        tool_description: str,
+    ) -> None:
+        """Apply name, docstring, signature, and annotations to a wrapper."""
+        func.__name__ = tool_name.replace(" ", "_").replace("-", "_")
+        func.__doc__ = tool_description or f"Execute {tool_name}"
+        func.__signature__ = self._build_signature(input_model)
+        func.__annotations__ = {
+            name: info.annotation
+            for name, info in input_model.model_fields.items()
+        }
+        func.__annotations__["return"] = Any
+
     def _create_sync_wrapper(
         self,
         executable_func: Callable,
@@ -402,8 +431,7 @@ class PydanticAIToolConverter:
                 logger.error(f"Tool '{tool_name}' execution failed: {e}")
                 raise
 
-        tool_wrapper.__name__ = tool_name.replace(" ", "_").replace("-", "_")
-        tool_wrapper.__doc__ = tool_description or f"Execute {tool_name}"
+        self._apply_signature(tool_wrapper, input_model, tool_name, tool_description)
 
         return tool_wrapper
 
@@ -432,8 +460,7 @@ class PydanticAIToolConverter:
                 logger.error(f"Tool '{tool_name}' execution failed: {e}")
                 raise
 
-        tool_wrapper.__name__ = tool_name.replace(" ", "_").replace("-", "_")
-        tool_wrapper.__doc__ = tool_description or f"Execute {tool_name}"
+        self._apply_signature(tool_wrapper, input_model, tool_name, tool_description)
 
         return tool_wrapper
 

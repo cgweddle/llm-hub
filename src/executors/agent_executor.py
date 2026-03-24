@@ -6,27 +6,32 @@ Every agent — simple or complex — is represented as a graph_config with
 nodes, edges, entry_point, and exit_points. A simple agent is just a
 single-node graph.
 
+Records execution trees in the database:
+- Standalone agent runs create a top-level Execution(type='agent')
+- Agent nodes within flows receive a parent_execution from FlowExecutor
+- Internal tool call tracing is handled by LangFuse (automatic instrumentation)
+
 Features:
 - Unified graph-based execution (no agent_type routing)
-- Execution record management
-- Message history storage
+- Execution record management via self-referencing execution tree
+- LangFuse integration for internal agent telemetry
 - Streaming support for PydanticAI
 - Automatic retry with exponential backoff for transient failures
 - Error handling and logging
 """
 
 import logging
-import json
 from datetime import datetime
 from typing import Dict, Any, AsyncGenerator, Optional
+
 from sqlalchemy.orm import Session
 
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from database.database import get_agent_by_id, get_tool_by_id
-from database.database_setup import Execution, Message
+from database.database import get_agent_by_id, get_tool_by_id, create_execution, update_execution
+from database.database_setup import Execution
 
 # Import retry utilities
 try:
@@ -41,7 +46,27 @@ except ImportError:
     RetryConfig = None
     DEFAULT_LLM_RETRY_CONFIG = None
 
+# Load .env before initializing LangFuse (needs LANGFUSE_* env vars)
+from dotenv import load_dotenv
+load_dotenv()
+
+# Initialize LangFuse for automatic PydanticAI tracing
+try:
+    from langfuse import get_client as get_langfuse_client, observe as langfuse_observe
+    langfuse_client = get_langfuse_client()
+    # Instrument all PydanticAI agents — captures tool calls, LLM I/O, costs automatically
+    from pydantic_ai import Agent as _PydanticAIAgent
+    _PydanticAIAgent.instrument_all()
+    LANGFUSE_AVAILABLE = True
+    logger_init_msg = "LangFuse instrumentation enabled for PydanticAI agents"
+except Exception:
+    LANGFUSE_AVAILABLE = False
+    langfuse_client = None
+    langfuse_observe = None
+    logger_init_msg = "LangFuse not available — internal agent tracing disabled"
+
 logger = logging.getLogger(__name__)
+logger.info(logger_init_msg)
 
 
 class AgentExecutor:
@@ -54,6 +79,11 @@ class AgentExecutor:
     exit_points.
 
     For single-node agents, BFS naturally runs one node and returns.
+
+    Internal tool call tracing is handled by LangFuse — every PydanticAI
+    agent.run() call is automatically instrumented. The execution tree in
+    the database records structural hierarchy (which agents/tools ran),
+    while LangFuse records the detailed internal conversation.
     """
 
     def __init__(
@@ -85,16 +115,9 @@ class AgentExecutor:
         stream: bool = False
     ) -> Dict[str, Any]:
         """
-        Execute an agent and store results in the database.
-
-        Args:
-            agent_id: ID of the agent to execute
-            user_id: ID of the user executing the agent
-            input_data: User input/query for the agent
-            stream: Whether to stream responses (only for single-node PydanticAI)
-
-        Returns:
-            Dict with execution results
+        Execute a standalone agent and store results in the database.
+        Creates a top-level Execution(type='agent'). Internal tool call
+        tracing is handled automatically by LangFuse.
         """
         agent_record = get_agent_by_id(self.session, agent_id)
         if not agent_record:
@@ -109,8 +132,17 @@ class AgentExecutor:
             f"(nodes: {len(graph_config.get('nodes', {}))}, user: {user_id}, stream: {stream})"
         )
 
-        # Create execution record
-        execution = self._create_execution(agent_id, user_id, input_data)
+        # Create top-level execution record
+        execution = create_execution(
+            self.session,
+            user_id=user_id,
+            agent_id=agent_id,
+            execution_type='agent',
+            name=agent_record.name,
+            input_data={"input": input_data},
+            status='running',
+            started_at=datetime.now()
+        )
 
         try:
             # Handle streaming for single-node agents
@@ -126,12 +158,24 @@ class AgentExecutor:
             # Unified graph execution
             result = await self._execute_graph(graph_config, input_data, execution)
 
-            self._complete_execution(execution, result)
+            update_execution(self.session, execution.id,
+                status='completed',
+                output_data={
+                    "result": result.get("result", ""),
+                    "model": result.get("model", ""),
+                    "cost": result.get("cost")
+                },
+                completed_at=datetime.now()
+            )
             logger.info(f"Agent execution completed: {execution.id}")
             return result
 
         except Exception as e:
-            self._fail_execution(execution, str(e))
+            update_execution(self.session, execution.id,
+                status='failed',
+                error_message=str(e),
+                completed_at=datetime.now()
+            )
             logger.error(f"Agent execution failed: {e}")
             raise RuntimeError(f"Agent execution failed: {e}")
 
@@ -139,16 +183,19 @@ class AgentExecutor:
         self,
         agent_id: int,
         input_text: str,
-        session: Session
+        session: Session,
+        parent_execution: Optional[Execution] = None
     ) -> str:
         """
         Execute an agent and return its text output.
-        Lightweight entry point for flow executor — no Execution record created.
+        Entry point for FlowExecutor — records structural node under parent_execution.
+        Internal tracing is handled by LangFuse automatically.
 
         Args:
             agent_id: Agent ID
             input_text: Input text
             session: Database session
+            parent_execution: Parent Execution record from FlowExecutor
 
         Returns:
             Agent text output as string
@@ -161,7 +208,7 @@ class AgentExecutor:
         if not graph_config:
             raise ValueError(f"Agent {agent_id} has no graph_config")
 
-        result = await self._execute_graph(graph_config, input_text, execution=None)
+        result = await self._execute_graph(graph_config, input_text, execution=parent_execution)
         return str(result.get("result", ""))
 
     async def _execute_graph(
@@ -173,8 +220,8 @@ class AgentExecutor:
     ) -> Dict[str, Any]:
         """
         Execute an agent graph via BFS traversal with cycle support.
-
-        Works identically for single-node and multi-node graphs.
+        Records sub-agent nodes as child Execution rows for structural tracking.
+        Internal tool call details are captured by LangFuse.
         """
         nodes_config = graph_config.get("nodes", {})
         edges_config = graph_config.get("edges", [])
@@ -208,6 +255,7 @@ class AgentExecutor:
         execution_trace = []
         node_outputs: Dict[str, Any] = {}
         loop_counts: Dict[tuple, int] = {}
+        step_sequence = 0
 
         # BFS traversal
         current_nodes = [entry_point]
@@ -226,7 +274,23 @@ class AgentExecutor:
 
                 # Execute the sub-agent node
                 try:
-                    output = await self._run_sub_agent(node_id, nodes_config[node_id], node_input)
+                    trace_id = None
+                    if LANGFUSE_AVAILABLE and langfuse_observe:
+                        # Capture trace ID even if the agent fails
+                        _captured_trace_id = None
+
+                        @langfuse_observe(name=nodes_config[node_id].get("name", node_id))
+                        async def _observed_run():
+                            nonlocal _captured_trace_id
+                            _captured_trace_id = langfuse_client.get_current_trace_id()
+                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input)
+                            return result
+
+                        output = await _observed_run()
+                        trace_id = _captured_trace_id
+                        langfuse_client.flush()
+                    else:
+                        output = await self._run_sub_agent(node_id, nodes_config[node_id], node_input)
                     node_outputs[node_id] = output
 
                     execution_trace.append({
@@ -238,22 +302,44 @@ class AgentExecutor:
                         "status": "completed"
                     })
 
-                    # Store message if execution record exists
-                    if execution:
-                        self._store_node_message(execution.id, node_id, nodes_config[node_id], node_input, output)
+                    # Record structural node execution for multi-node agents only.
+                    # Single-node agents already have a parent execution representing them.
+                    is_multi_node = len(nodes_config) > 1
+                    if execution and is_multi_node:
+                        create_execution(
+                            self.session,
+                            parent_id=execution.id,
+                            user_id=execution.user_id,
+                            execution_type='agent',
+                            node_id=node_id,
+                            name=nodes_config[node_id].get("name", node_id),
+                            sequence=step_sequence,
+                            input_data={"input": str(node_input)[:2000]},
+                            output_data={"result": str(output)[:2000]},
+                            status='completed',
+                            started_at=datetime.now(),
+                            completed_at=datetime.now(),
+                            execution_metadata={
+                                "agent_type": nodes_config[node_id].get("agent_type"),
+                            },
+                            langfuse_trace_id=trace_id
+                        )
+                        step_sequence += 1
+                    elif execution and trace_id:
+                        update_execution(self.session, execution.id, langfuse_trace_id=trace_id)
 
                     logger.debug(f"Sub-agent {node_id} completed")
 
                 except Exception as e:
+                    # Store trace ID even on failure so the LangFuse trace is accessible
+                    if execution and _captured_trace_id:
+                        langfuse_client.flush()
+                        update_execution(self.session, execution.id, langfuse_trace_id=_captured_trace_id)
+
                     logger.error(f"Sub-agent {node_id} failed: {e}")
-                    execution_trace.append({
-                        "node": node_id,
-                        "name": nodes_config[node_id].get("name", node_id),
-                        "input": str(node_input)[:200],
-                        "error": str(e),
-                        "status": "failed"
-                    })
-                    continue
+                    raise RuntimeError(
+                        f"Agent node '{nodes_config[node_id].get('name', node_id)}' failed: {e}"
+                    ) from e
 
                 # Skip successor traversal if this is an exit point
                 if node_id in exit_points:
@@ -301,6 +387,7 @@ class AgentExecutor:
     async def _run_sub_agent(self, node_id: str, node_config: Dict, node_input: str) -> str:
         """
         Create and run a sub-agent for a single graph node.
+        Returns the agent's text output. Internal tracing is handled by LangFuse.
         """
         logger.debug(
             f"Running sub-agent: {node_config.get('name', node_id)} "
@@ -323,7 +410,7 @@ class AgentExecutor:
         return node_input
 
     async def _run_pydanticai_node(self, node_config: Dict, node_input: str) -> str:
-        """Run a PydanticAI sub-agent from node config."""
+        """Run a PydanticAI sub-agent. LangFuse auto-captures internal tool calls and LLM I/O."""
         from pydantic_ai import Agent
 
         node_input = self._apply_user_prompt(node_config, node_input)
@@ -352,14 +439,14 @@ class AgentExecutor:
         else:
             result = await run()
 
-        result_data = result.data
+        result_data = result.output
         if hasattr(result_data, 'model_dump'):
             result_data = result_data.model_dump()
 
         return str(result_data) if result_data else ""
 
     async def _run_react_node(self, node_config: Dict, node_input: str) -> str:
-        """Run a React (Google ADK) sub-agent from node config."""
+        """Run a React (Google ADK) sub-agent. LangFuse auto-captures via ADK instrumentation."""
         from factories.agent_factory import ReactAgentFactory, AgentConfig, setup_llm_environment, DatabaseToolLoader
         from utils import get_llm_config_by_name
 
@@ -404,7 +491,7 @@ class AgentExecutor:
                         logger.warning(f"Tool {tool_id} not found, skipping")
                         continue
                     tool_func, _, _ = converter.convert_tool(tool_record)
-                    agent.tool(tool_func)
+                    agent.tool_plain(tool_func)
                     logger.debug(f"Registered tool: {tool_record.name}")
                 except Exception as e:
                     logger.error(f"Failed to register tool {tool_id}: {e}")
@@ -419,6 +506,7 @@ class AgentExecutor:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream execution for single-node PydanticAI agents.
+        LangFuse captures the full trace automatically.
         """
         nodes_config = graph_config.get("nodes", {})
         entry_point = graph_config.get("entry_point")
@@ -451,24 +539,31 @@ class AgentExecutor:
 
             result = await stream.result()
 
-            result_data = result.data
+            result_data = result.output
             if hasattr(result_data, 'model_dump'):
                 result_data = result_data.model_dump()
 
-            self._complete_execution(execution, {
-                "result": result_data,
-                "cost": self._extract_cost(result)
-            })
+            cost = self._extract_cost(result)
+
+            update_execution(self.session, execution.id,
+                status='completed',
+                output_data={
+                    "result": result_data,
+                    "cost": cost
+                },
+                completed_at=datetime.now()
+            )
 
             yield {
                 "type": "complete",
                 "result": result_data,
-                "cost": self._extract_cost(result),
+                "cost": cost,
                 "execution_id": execution.id
             }
 
     def _resolve_model_name(self, llm_provider: str) -> str:
-        """Resolve an LLM provider name to a model string for PydanticAI."""
+        """Resolve an LLM provider name to a model string for PydanticAI.
+        Also sets api_key/base_url as env vars so PydanticAI can pick them up."""
         try:
             import yaml
             config_path = os.path.expanduser("~/.llm_hub/config.yaml")
@@ -479,65 +574,29 @@ class AgentExecutor:
                 models = config.get("models", [])
                 for model_config in models:
                     if model_config.get("name") == llm_provider:
-                        provider = model_config.get("provider", "openai")
-                        model = model_config.get("model", "gpt-4")
+                        provider = model_config.get("provider")
+                        model = model_config.get("model")
+                        api_key = model_config.get("api_key")
+                        base_url = model_config.get("base_url")
+
+                        if provider == "lmstudio":
+                            api_key = api_key or "lm-studio"
+                            base_url = base_url or "http://localhost:1234/v1"
+                            provider = "openai"
+
+                        if api_key:
+                            if provider == "anthropic":
+                                os.environ["ANTHROPIC_API_KEY"] = api_key
+                            else:
+                                os.environ["OPENAI_API_KEY"] = api_key
+                        if base_url:
+                            os.environ["OPENAI_BASE_URL"] = base_url
+
                         return f"{provider}:{model}"
         except Exception as e:
             logger.warning(f"Could not load LLM config: {e}")
 
-        return "openai:gpt-4"
-
-    def _create_execution(self, agent_id: int, user_id: int, input_data: str) -> Execution:
-        """Create an Execution record in the database."""
-        execution = Execution(
-            user_id=user_id,
-            agent_id=agent_id,
-            execution_type='agent',
-            input_data={"input": input_data},
-            status='running',
-            started_at=datetime.now()
-        )
-        self.session.add(execution)
-        self.session.commit()
-        self.session.refresh(execution)
-        logger.debug(f"Created execution record: {execution.id}")
-        return execution
-
-    def _complete_execution(self, execution: Execution, result: Dict[str, Any]):
-        """Mark execution as completed and store results."""
-        execution.status = 'completed'
-        execution.completed_at = datetime.now()
-        execution.output_data = {
-            "result": result.get("result", ""),
-            "model": result.get("model", ""),
-            "cost": result.get("cost")
-        }
-        self.session.commit()
-        logger.debug(f"Execution {execution.id} marked as completed")
-
-    def _fail_execution(self, execution: Execution, error_message: str):
-        """Mark execution as failed and store error."""
-        execution.status = 'failed'
-        execution.completed_at = datetime.now()
-        execution.error_message = error_message
-        self.session.commit()
-        logger.debug(f"Execution {execution.id} marked as failed")
-
-    def _store_node_message(self, execution_id: int, node_id: str, node_config: Dict, input_text: str, output_text: str):
-        """Store a message for a graph node execution."""
-        message = Message(
-            execution_id=execution_id,
-            role="assistant",
-            content=str(output_text),
-            sender=node_config.get("name", node_id),
-            message_metadata={
-                "node_id": node_id,
-                "agent_type": node_config.get("agent_type"),
-                "input_preview": str(input_text)[:200]
-            }
-        )
-        self.session.add(message)
-        self.session.commit()
+        raise ValueError(f"LLM provider '{llm_provider}' not found in ~/.llm_hub/config.yaml")
 
     def _extract_cost(self, result) -> Optional[Dict[str, Any]]:
         """Extract cost/token usage from PydanticAI result."""

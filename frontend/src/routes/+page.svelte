@@ -21,11 +21,13 @@
 
   import ColorSelectorNode from './ColorSelectorNode.svelte';
   import ToolNode from './ToolNode.svelte';
+  import TriggerNode from './TriggerNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
   import AgentBuilder from './AgentBuilder.svelte';
   import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
   import LLMProvidersPanel from './LLMProvidersPanel.svelte';
   import FullscreenNodeModal from './FullscreenNodeModal.svelte';
+  import InfoPanel from './InfoPanel.svelte';
   import { fullscreenNode } from '$lib/stores/fullscreenNode';
   import { builderMode, type BuilderMode } from '$lib/stores/builderMode';
   import { Button } from "$lib/components/ui/button";
@@ -88,6 +90,10 @@
 
   // Current flow tracking
   let currentFlowId: number | null = null;
+
+  // Info panel state
+  let showInfoPanel = false;
+  let lastExecutionId: number | null = null;
 
   // Conda environment state
   let selectedCondaEnv: string | null = null;
@@ -184,7 +190,8 @@
 
   const nodeTypes = {
     selectorNode: ColorSelectorNode,
-    toolNode: ToolNode
+    toolNode: ToolNode,
+    triggerNode: TriggerNode
   };
 
   const edgeTypes = {
@@ -316,6 +323,33 @@
       targetPosition: Position.Left
     };
 
+    nodes = [...nodes, newNode];
+  }
+
+  function addTriggerNode(triggerType: string, position: { x: number; y: number }) {
+    // Only allow one trigger node per flow
+    const existingTrigger = nodes.find(n => n.type === 'triggerNode');
+    if (existingTrigger) {
+      validationSuccess = false;
+      validationMessage = 'Only one trigger node allowed per flow.';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    const newNode: Node = {
+      id: String(Date.now()),
+      type: 'triggerNode',
+      data: {
+        label: 'Text Input',
+        name: 'Text Input',
+        triggerType: triggerType,
+        triggerValue: ''
+      },
+      position,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left
+    };
     nodes = [...nodes, newNode];
   }
 
@@ -517,7 +551,9 @@
                 main_function: '',
                 input_schema: null,
                 output_schema: agent.output_schema || null,
-                runtimeLLM: null
+                runtimeLLM: entryNodeConfig.llm_provider
+                  ? llmProviders.find(p => p.name === entryNodeConfig.llm_provider) || null
+                  : null
               },
               position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
               sourcePosition: Position.Right,
@@ -525,6 +561,21 @@
             };
             nodeMap.set(nodeId, newNode);
           }
+        } else if (nodeConfig.node_type === 'trigger') {
+          const newNode: Node = {
+            id: nodeId,
+            type: 'triggerNode',
+            data: {
+              label: 'Text Input',
+              name: 'Text Input',
+              triggerType: 'text_input',
+              triggerValue: nodeConfig.input_value || ''
+            },
+            position: { x: 50, y: 200 },
+            sourcePosition: Position.Right,
+            targetPosition: Position.Left
+          };
+          nodeMap.set(nodeId, newNode);
         }
       }
 
@@ -587,7 +638,13 @@
    * Get initial input values from the entry point node
    */
   function getEntryPointInputValues(): Record<string, any> {
-    // Find the entry point node (node with no incoming edges)
+    // If there's a trigger node, use its text value as input
+    const triggerNode = nodes.find(n => n.type === 'triggerNode');
+    if (triggerNode && triggerNode.data.triggerValue) {
+      return { text: triggerNode.data.triggerValue };
+    }
+
+    // Fallback: find the entry point node (node with no incoming edges)
     const nodesWithIncoming = new Set(edges.map(e => e.target));
     const entryNode = nodes.find(n => n.type === 'toolNode' && !nodesWithIncoming.has(n.id));
 
@@ -604,6 +661,12 @@
   async function runFlow(flowId: number, initialInput: Record<string, any>) {
     try {
       const result = await executeFlow(flowId, initialInput, selectedCondaEnv);
+
+      // Capture execution ID and open info panel
+      if (result.execution_id) {
+        lastExecutionId = result.execution_id;
+        showInfoPanel = true;
+      }
 
       if (result.status === 'completed') {
         console.log('✓ Flow completed successfully');
@@ -1219,6 +1282,20 @@
 
       <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
 
+      <div class="triggers-section">
+        <h4>Triggers</h4>
+        <div
+          class="draggable-node trigger-draggable"
+          draggable="true"
+          ondragstart={(event) => {
+            event.dataTransfer?.setData('application/json', JSON.stringify({ itemType: 'trigger', triggerType: 'text_input' }));
+            event.dataTransfer?.setData('text/plain', '__trigger__text_input');
+          }}
+        >
+          Text Input
+        </div>
+      </div>
+
       <div class="flows-section">
         <h4>Available Flows</h4>
         <Button class="w-full mb-2" size="sm" onclick={() => showSaveDialog = true}>
@@ -1300,8 +1377,6 @@
       ondragover={(event) => event.preventDefault()}
       ondrop={(event) => {
         event.preventDefault();
-        const nodeName = event.dataTransfer?.getData('text/plain');
-        if (!nodeName) return;
 
         // Get the flow container bounds
         const flowContainer = event.currentTarget;
@@ -1313,6 +1388,20 @@
           y: (event.clientY - rect.top - viewport.y) / viewport.zoom
         };
 
+        // Check for trigger node drop (uses application/json payload)
+        const jsonData = event.dataTransfer?.getData('application/json');
+        if (jsonData) {
+          try {
+            const parsed = JSON.parse(jsonData);
+            if (parsed.itemType === 'trigger') {
+              addTriggerNode(parsed.triggerType, position);
+              return;
+            }
+          } catch (e) { /* not JSON, fall through */ }
+        }
+
+        const nodeName = event.dataTransfer?.getData('text/plain');
+        if (!nodeName) return;
         addNode(nodeName, position);
       }}
     >
@@ -1338,23 +1427,44 @@
         </Button>
       </div>
 
-      <SvelteFlow
-        bind:nodes
-        {nodeTypes}
-        bind:edges
-        {edgeTypes}
-        {defaultEdgeOptions}
-        connectionLineType={ConnectionLineType.Straight}
-        {connectionLineStyle}
-        style="background: #1A192B"
-        fitView
-        bind:viewport
-        onconnect={onConnect}
-      >
-        <Background />
-        <Controls />
-        <MiniMap />
-      </SvelteFlow>
+      <div class="canvas-area">
+        <SvelteFlow
+          bind:nodes
+          {nodeTypes}
+          bind:edges
+          {edgeTypes}
+          {defaultEdgeOptions}
+          connectionLineType={ConnectionLineType.Straight}
+          {connectionLineStyle}
+          style="background: #1A192B"
+          fitView
+          bind:viewport
+          onconnect={onConnect}
+        >
+          <Background />
+          <Controls />
+          <MiniMap />
+        </SvelteFlow>
+
+        <!-- Info panel toggle button (only shown when panel is closed) -->
+        {#if !showInfoPanel}
+          <button
+            class="info-toggle-btn"
+            onclick={() => showInfoPanel = true}
+            title="Show Info Panel"
+          >
+            &#9432; Info
+          </button>
+        {/if}
+      </div>
+
+      {#if showInfoPanel}
+        <InfoPanel
+          executionId={lastExecutionId}
+          flowName={flowName}
+          onclose={() => showInfoPanel = false}
+        />
+      {/if}
     </div>
 
   {:else}
@@ -1821,6 +1931,16 @@
     color: #666;
   }
 
+  .triggers-section {
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #ccc;
+  }
+
+  .trigger-draggable {
+    border-left: 3px solid #e67e22;
+  }
+
   .flows-section {
     margin-bottom: 15px;
     padding-bottom: 10px;
@@ -1883,9 +2003,38 @@
 
   .flow-container {
     flex-grow: 1;
+    display: flex;
+    flex-direction: column;
     position: relative;
     padding: 20px;
+    padding-bottom: 0;
     overflow: hidden;
+  }
+
+  .canvas-area {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+  }
+
+  .info-toggle-btn {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    z-index: 10;
+    background: oklch(0.2 0.005 260);
+    color: oklch(0.7 0 0);
+    border: 1px solid oklch(0.7 0 0 / 0.25);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .info-toggle-btn:hover {
+    background: oklch(0.25 0.005 260);
+    color: oklch(0.9 0 0);
   }
 
   /* Validation Toast */

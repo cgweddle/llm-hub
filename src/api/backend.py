@@ -14,7 +14,8 @@ from src.database.database import (
     get_public_agents, get_public_tools, get_public_flows,
     create_tool, get_user_tools, create_flow, get_user_flows,
     get_tool_by_id, update_tool, get_flow_by_id, update_flow, delete_flow,
-    get_agent_by_id, update_agent
+    get_agent_by_id, update_agent,
+    get_execution_by_id, get_user_executions
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.database.database_setup import DatabaseManager
@@ -196,8 +197,46 @@ class CondaEnvironmentResponse(BaseModel):
     environments: List[CondaEnvironment]
 
 class FlowExecuteRequest(BaseModel):
+    user_id: int
     initial_input: dict
     conda_env: Optional[str] = None
+
+class ExecutionResponse(BaseModel):
+    """Recursive execution tree node."""
+    id: int
+    parent_id: Optional[int] = None
+    execution_type: str
+    node_id: Optional[str] = None
+    name: Optional[str] = None
+    sequence: Optional[int] = None
+    input_data: Optional[Any] = None
+    output_data: Optional[Any] = None
+    status: str
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    execution_metadata: Optional[Dict[str, Any]] = None
+    children: List["ExecutionResponse"] = []
+
+    class Config:
+        from_attributes = True
+
+# Needed for the self-referencing model
+ExecutionResponse.model_rebuild()
+
+class ExecutionListItem(BaseModel):
+    """Lightweight execution summary for list endpoints."""
+    id: int
+    execution_type: str
+    name: Optional[str] = None
+    status: str
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    flow_id: Optional[int] = None
+    agent_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
 
 class PythonScriptToolCreate(BaseModel):
     name: str
@@ -786,7 +825,7 @@ def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
 def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session = Depends(get_db)):
     """Execute a flow"""
     try:
-        executor = FlowExecutor(db, flow_id)
+        executor = FlowExecutor(db, flow_id, user_id=request.user_id)
         result = executor.execute_flow(request.initial_input, request.conda_env)
 
         # Update the flow's conda_env if provided
@@ -798,11 +837,11 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
         raise HTTPException(status_code=500, detail=f"Flow execution failed: {str(e)}")
 
 @app.post("/flows/{flow_id}/resume")
-def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, db: Session = Depends(get_db)):
+def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, user_id: int = 1, db: Session = Depends(get_db)):
     """Resume a failed flow"""
     try:
-        executor = FlowExecutor(db, flow_id)
-        result = executor.resume_flow(execution_trace, resume_input)
+        executor = FlowExecutor(db, flow_id, user_id=user_id)
+        result = executor.resume_flow(flow_id, execution_trace, resume_input)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow resume failed: {str(e)}")
@@ -839,6 +878,92 @@ def delete_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow deletion failed: {str(e)}")
+
+# ─── Execution Endpoints ───
+
+def _execution_to_tree(execution) -> dict:
+    """Recursively convert an Execution ORM object to a dict tree."""
+    return {
+        "id": execution.id,
+        "parent_id": execution.parent_id,
+        "execution_type": execution.execution_type,
+        "node_id": execution.node_id,
+        "name": execution.name,
+        "sequence": execution.sequence,
+        "input_data": execution.input_data,
+        "output_data": execution.output_data,
+        "status": execution.status,
+        "error_message": execution.error_message,
+        "started_at": execution.started_at,
+        "completed_at": execution.completed_at,
+        "execution_metadata": execution.execution_metadata,
+        "langfuse_trace_id": execution.langfuse_trace_id,
+        "children": [_execution_to_tree(child) for child in execution.children]
+    }
+
+@app.get("/executions", response_model=List[ExecutionListItem])
+def list_executions_endpoint(user_id: int, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+    """List top-level executions for a user, newest first."""
+    executions = get_user_executions(db, user_id, limit=limit, offset=offset)
+    return executions
+
+@app.get("/executions/{execution_id}")
+def get_execution_endpoint(execution_id: int, db: Session = Depends(get_db)):
+    """Get a full execution tree by ID (recursively includes all children)."""
+    execution = get_execution_by_id(db, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return _execution_to_tree(execution)
+
+@app.get("/executions/{execution_id}/trace")
+def get_execution_trace_endpoint(execution_id: int, db: Session = Depends(get_db)):
+    """Fetch the LangFuse trace for an execution's agent call."""
+    execution = get_execution_by_id(db, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if not execution.langfuse_trace_id:
+        raise HTTPException(status_code=404, detail="No LangFuse trace for this execution")
+
+    try:
+        from src.executors.agent_executor import langfuse_client, LANGFUSE_AVAILABLE
+        if not LANGFUSE_AVAILABLE or not langfuse_client:
+            raise HTTPException(status_code=503, detail="LangFuse not configured")
+
+        trace = langfuse_client.api.trace.get(execution.langfuse_trace_id)
+
+        # Convert observations to serializable dicts
+        observations = []
+        for obs in (trace.observations or []):
+            observations.append({
+                "id": obs.id,
+                "name": obs.name,
+                "type": obs.type,
+                "input": obs.input,
+                "output": obs.output,
+                "model": getattr(obs, 'model', None),
+                "start_time": str(obs.start_time) if obs.start_time else None,
+                "end_time": str(obs.end_time) if obs.end_time else None,
+                "usage": {
+                    "input": obs.usage.input if obs.usage else None,
+                    "output": obs.usage.output if obs.usage else None,
+                    "total": obs.usage.total if obs.usage else None,
+                } if obs.usage else None,
+                "level": getattr(obs, 'level', None),
+                "status_message": getattr(obs, 'status_message', None),
+            })
+
+        return {
+            "trace_id": trace.id,
+            "name": trace.name,
+            "input": trace.input,
+            "output": trace.output,
+            "observations": observations,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch LangFuse trace: {str(e)}")
 
 # Conda Environment Endpoint
 @app.get("/conda/environments", response_model=CondaEnvironmentResponse)
