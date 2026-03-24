@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, setContext } from 'svelte';
+  import { writable } from 'svelte/store';
   import {
     SvelteFlow,
     Background,
@@ -15,8 +16,7 @@
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
 
-  import AgentBuilderNode from './AgentBuilderNode.svelte';
-  import AgentConfigModal from './AgentConfigModal.svelte';
+  import ToolNode from './ToolNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
   import LLMProvidersPanel from './LLMProvidersPanel.svelte';
 
@@ -33,11 +33,27 @@
 
   // Props
   export let tools: Tool[] = [];
+  export let agents: Agent[] = [];
   export let userId: number = 1;
+
+  // Sidebar section collapse state
+  let sectionsExpanded = {
+    newAgent: false,
+    availableAgents: false,
+    availableTools: false
+  };
+
+  function toggleSection(section: keyof typeof sectionsExpanded) {
+    sectionsExpanded[section] = !sectionsExpanded[section];
+  }
+
+  // Provide llmProviders context for ToolNode
+  const llmProvidersStore = writable<LLMProvider[]>([]);
+  setContext('llmProviders', llmProvidersStore);
 
   // Node and edge types for SvelteFlow
   const nodeTypes = {
-    agentBuilderNode: AgentBuilderNode
+    toolNode: ToolNode
   };
 
   const edgeTypes = {
@@ -53,21 +69,15 @@
   let selectedLLMProvider: LLMProvider | null = null;
   let llmProviders: LLMProvider[] = [];
 
+  // Sync llmProviders into the context store for ToolNode
+  $: llmProvidersStore.set(llmProviders);
+
   // Save dialog state
   let showSaveAgentDialog = false;
   let composedAgentName = '';
   let composedAgentDescription = '';
   let isSavingAgent = false;
 
-  // Agent Config Modal state
-  let showAgentConfigModal = false;
-  let configNodeId = '';
-  let configAgentType: AgentTypeKey = 'react';
-  let configNodeName = '';
-  let configNodePrompt = '';
-  let configNodeTools: number[] = [];
-  let configNodeLLM = '';
-  let configNodeUserPrompt = '';
 
   // Toast state
   let showToast = false;
@@ -82,47 +92,144 @@
   }
 
   /**
-   * Add an agent node to the canvas
+   * Add an agent node to the canvas from a template type
    */
   function addAgentNode(agentType: AgentTypeKey, position: { x: number; y: number }) {
     const template = getAgentTemplate(agentType);
 
     const newNode: Node = {
       id: String(Date.now()),
-      type: 'agentBuilderNode',
+      type: 'toolNode',
       data: {
+        label: template.name,
+        handles: ['a'],
+        isAgent: true,
         agentType,
         name: template.name,
-        systemPrompt: template.defaultSystemPrompt,
-        userPrompt: '',
-        assignedTools: [],
-        llmProvider: ''
+        description: template.description,
+        system_prompt: template.defaultSystemPrompt,
+        llm_provider: '',
+        tool_ids: [],
+        graph_config: {},
+        script_code: '',
+        main_function: '',
+        input_schema: null,
+        output_schema: null,
+        runtimeLLM: null
       },
       position,
-      sourcePosition: Position.Bottom,
-      targetPosition: Position.Top
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left
     };
 
     agentNodes = [...agentNodes, newNode];
   }
 
   /**
-   * Handle drop on canvas
+   * Add a node from an existing agent's configuration
    */
-  function handleCanvasDrop(event: DragEvent) {
-    event.preventDefault();
-    const agentType = event.dataTransfer?.getData('agent-type');
-    if (!agentType) return;
+  function addExistingAgentNode(agentId: number, position: { x: number; y: number }) {
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) return;
 
+    const entryKey = agent.graph_config.entry_point || Object.keys(agent.graph_config.nodes)[0];
+    const nodeConfig = agent.graph_config.nodes[entryKey];
+
+    const newNode: Node = {
+      id: String(Date.now()),
+      type: 'toolNode',
+      data: {
+        label: agent.name,
+        handles: ['a'],
+        isAgent: true,
+        agentId: agent.id,
+        name: agent.name,
+        description: agent.description || '',
+        system_prompt: nodeConfig?.system_prompt || '',
+        llm_provider: nodeConfig?.llm_provider || '',
+        tool_ids: nodeConfig?.tool_ids || [],
+        graph_config: agent.graph_config,
+        script_code: '',
+        main_function: '',
+        input_schema: null,
+        output_schema: agent.output_schema || null,
+        runtimeLLM: null
+      },
+      position,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left
+    };
+
+    agentNodes = [...agentNodes, newNode];
+  }
+
+  /**
+   * Add a custom agent node pre-assigned with a tool
+   */
+  function addToolNode(toolId: number, position: { x: number; y: number }) {
+    const tool = tools.find(t => t.id === toolId);
+    if (!tool) return;
+
+    const newNode: Node = {
+      id: String(Date.now()),
+      type: 'toolNode',
+      data: {
+        label: tool.name,
+        handles: ['a'],
+        isAgent: false,
+        toolId: tool.id,
+        name: tool.name,
+        description: tool.description || '',
+        script_code: tool.script_code || '',
+        main_function: tool.main_function || '',
+        input_schema: tool.input_schema || null,
+        output_schema: tool.output_schema || null,
+        runtimeLLM: null
+      },
+      position,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left
+    };
+
+    agentNodes = [...agentNodes, newNode];
+  }
+
+  /**
+   * Compute drop position from a drag event
+   */
+  function getDropPosition(event: DragEvent): { x: number; y: number } {
     const container = event.currentTarget as HTMLElement;
     const rect = container.getBoundingClientRect();
-
-    const position = {
+    return {
       x: (event.clientX - rect.left - agentViewport.x) / agentViewport.zoom,
       y: (event.clientY - rect.top - agentViewport.y) / agentViewport.zoom
     };
+  }
 
-    addAgentNode(agentType as AgentTypeKey, position);
+  /**
+   * Handle drop on canvas — supports agent templates, existing agents, and tools
+   */
+  function handleCanvasDrop(event: DragEvent) {
+    event.preventDefault();
+    const position = getDropPosition(event);
+
+    const agentType = event.dataTransfer?.getData('agent-type');
+    if (agentType) {
+      addAgentNode(agentType as AgentTypeKey, position);
+      return;
+    }
+
+    const existingAgentId = event.dataTransfer?.getData('existing-agent-id');
+    if (existingAgentId) {
+      addExistingAgentNode(Number(existingAgentId), position);
+      return;
+    }
+
+    const toolId = event.dataTransfer?.getData('tool-id');
+    if (toolId) {
+      addToolNode(Number(toolId), position);
+      return;
+    }
   }
 
   /**
@@ -143,62 +250,6 @@
     agentEdges = [...agentEdges, newEdge];
   }
 
-  /**
-   * Open config modal for an agent node
-   */
-  function openAgentNodeConfig(nodeId: string) {
-    const node = agentNodes.find(n => n.id === nodeId);
-    if (!node) return;
-
-    configNodeId = nodeId;
-    configAgentType = node.data.agentType || 'react';
-    configNodeName = node.data.name || '';
-    configNodePrompt = node.data.systemPrompt || '';
-    configNodeUserPrompt = node.data.userPrompt || '';
-    configNodeTools = node.data.assignedTools || [];
-    configNodeLLM = node.data.llmProvider || '';
-    showAgentConfigModal = true;
-  }
-
-  /**
-   * Save agent node config from modal
-   */
-  function handleAgentConfigSave(event: CustomEvent<{
-    nodeId: string;
-    name: string;
-    systemPrompt: string;
-    userPrompt: string;
-    assignedTools: number[];
-    llmProvider: string;
-  }>) {
-    const { nodeId, name, systemPrompt, userPrompt, assignedTools, llmProvider } = event.detail;
-
-    agentNodes = agentNodes.map(node => {
-      if (node.id === nodeId) {
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            name,
-            systemPrompt,
-            userPrompt,
-            assignedTools,
-            llmProvider
-          }
-        };
-      }
-      return node;
-    });
-
-    showAgentConfigModal = false;
-  }
-
-  /**
-   * Handle configure event from AgentBuilderNode
-   */
-  function handleConfigureAgentEvent(event: CustomEvent<{ nodeId: string; data: any }>) {
-    openAgentNodeConfig(event.detail.nodeId);
-  }
 
   /**
    * Save the composed agent
@@ -284,33 +335,89 @@
       <h3 class="sidebar-title">Agent Builder</h3>
     </div>
 
-    <div class="agent-types-section">
-      <h4>Agent Types</h4>
-      <div class="hint">Drag to canvas</div>
-      {#each getAgentTemplatesList() as template}
-        <div
-          class="agent-type-item"
-          draggable="true"
-          ondragstart={(event) => event.dataTransfer?.setData('agent-type', template.type)}
-          style="border-left-color: {template.color};"
-        >
-          <span class="agent-type-icon">{template.icon}</span>
-          <div class="agent-type-info">
-            <span class="agent-type-name">{template.name}</span>
-            <span class="agent-type-desc">{template.description}</span>
-          </div>
+    <!-- New Agent Section -->
+    <div class="sidebar-section">
+      <button class="section-header" onclick={() => toggleSection('newAgent')}>
+        <span class="section-chevron" class:expanded={sectionsExpanded.newAgent}>&#9656;</span>
+        <h4>New Agent</h4>
+        <span class="section-count">{getAgentTemplatesList().length}</span>
+      </button>
+      {#if sectionsExpanded.newAgent}
+        <div class="section-content">
+          <div class="hint">Drag to canvas</div>
+          {#each getAgentTemplatesList() as template}
+            <div
+              class="agent-type-item"
+              draggable="true"
+              ondragstart={(event) => event.dataTransfer?.setData('agent-type', template.type)}
+              style="border-left-color: {template.color};"
+            >
+              <span class="agent-type-icon">{template.icon}</span>
+              <div class="agent-type-info">
+                <span class="agent-type-name">{template.name}</span>
+                <span class="agent-type-desc">{template.description}</span>
+              </div>
+            </div>
+          {/each}
         </div>
-      {/each}
+      {/if}
     </div>
 
-    <div class="tools-section">
-      <h4>Available Tools</h4>
-      <div class="hint">Assign tools via node config</div>
-      {#each tools as tool}
-        <div class="tool-item">
-          <span>{tool.name}</span>
+    <!-- Available Agents Section -->
+    <div class="sidebar-section">
+      <button class="section-header" onclick={() => toggleSection('availableAgents')}>
+        <span class="section-chevron" class:expanded={sectionsExpanded.availableAgents}>&#9656;</span>
+        <h4>Available Agents</h4>
+        <span class="section-count">{agents.length}</span>
+      </button>
+      {#if sectionsExpanded.availableAgents}
+        <div class="section-content">
+          {#if agents.length === 0}
+            <div class="hint">No agents created yet</div>
+          {:else}
+            <div class="hint">Drag to canvas</div>
+            {#each agents as agent}
+              <div
+                class="available-agent-item"
+                draggable="true"
+                ondragstart={(event) => event.dataTransfer?.setData('existing-agent-id', String(agent.id))}
+              >
+                <span class="available-agent-name">{agent.name}</span>
+                {#if agent.description}
+                  <span class="available-agent-desc">{agent.description}</span>
+                {/if}
+              </div>
+            {/each}
+          {/if}
         </div>
-      {/each}
+      {/if}
+    </div>
+
+    <!-- Available Tools Section -->
+    <div class="sidebar-section">
+      <button class="section-header" onclick={() => toggleSection('availableTools')}>
+        <span class="section-chevron" class:expanded={sectionsExpanded.availableTools}>&#9656;</span>
+        <h4>Available Tools</h4>
+        <span class="section-count">{tools.length}</span>
+      </button>
+      {#if sectionsExpanded.availableTools}
+        <div class="section-content">
+          {#if tools.length === 0}
+            <div class="hint">No tools created yet</div>
+          {:else}
+            <div class="hint">Drag to canvas</div>
+            {#each tools as tool}
+              <div
+                class="tool-item"
+                draggable="true"
+                ondragstart={(event) => event.dataTransfer?.setData('tool-id', String(tool.id))}
+              >
+                <span>{tool.name}</span>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {/if}
     </div>
 
     <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
@@ -335,7 +442,6 @@
     role="application"
     ondragover={(event) => event.preventDefault()}
     ondrop={handleCanvasDrop}
-    onconfigureAgent={handleConfigureAgentEvent}
   >
     <div class="canvas-header">
       <h2>Visual Agent Builder</h2>
@@ -364,10 +470,7 @@
     >
       <Background bgColor="#0f0f23" gap={20} />
       <Controls />
-      <MiniMap nodeColor={(node) => {
-        const template = getAgentTemplate(node.data?.agentType || 'react');
-        return template.color;
-      }} />
+      <MiniMap nodeColor={() => '#007acc'} />
     </SvelteFlow>
   </div>
 </div>
@@ -408,23 +511,6 @@
   </div>
 {/if}
 
-<!-- Agent Config Modal -->
-<AgentConfigModal
-  bind:open={showAgentConfigModal}
-  nodeId={configNodeId}
-  agentType={configAgentType}
-  initialName={configNodeName}
-  initialSystemPrompt={configNodePrompt}
-  initialUserPrompt={configNodeUserPrompt}
-  initialAssignedTools={configNodeTools}
-  initialLLMProvider={configNodeLLM}
-  {tools}
-  {llmProviders}
-  {selectedLLMProvider}
-  on:save={handleAgentConfigSave}
-  on:close={() => showAgentConfigModal = false}
-/>
-
 <style>
   .agent-builder-container {
     display: flex;
@@ -457,19 +543,92 @@
     text-align: center;
   }
 
-  .agent-types-section,
-  .tools-section {
-    margin-bottom: 15px;
-    padding-bottom: 15px;
+  .sidebar-section {
+    margin-bottom: 2px;
     border-bottom: 1px solid #ccc;
   }
 
-  .agent-types-section h4,
-  .tools-section h4 {
-    margin: 0 0 8px 0;
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 8px 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s;
+  }
+
+  .section-header:hover {
+    background: #e5e5e5;
+  }
+
+  .section-header h4 {
+    margin: 0;
     font-size: 13px;
     font-weight: 600;
     color: #333;
+    flex: 1;
+  }
+
+  .section-chevron {
+    font-size: 12px;
+    color: #666;
+    transition: transform 0.2s;
+    display: inline-block;
+  }
+
+  .section-chevron.expanded {
+    transform: rotate(90deg);
+  }
+
+  .section-count {
+    font-size: 11px;
+    color: #888;
+    background: #e0e0e0;
+    padding: 1px 6px;
+    border-radius: 8px;
+  }
+
+  .section-content {
+    padding: 0 4px 10px 4px;
+  }
+
+  .available-agent-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 10px;
+    margin: 4px 0;
+    background: #f8f8f8;
+    border: 1px solid #e0e0e0;
+    border-left: 3px solid #a855f7;
+    border-radius: 4px;
+    cursor: grab;
+    transition: all 0.2s;
+  }
+
+  .available-agent-item:hover {
+    background: #f0edf5;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .available-agent-item:active {
+    cursor: grabbing;
+  }
+
+  .available-agent-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #333;
+  }
+
+  .available-agent-desc {
+    font-size: 10px;
+    color: #666;
+    line-height: 1.3;
   }
 
   .hint {
@@ -534,6 +693,17 @@
     border-radius: 4px;
     font-size: 12px;
     color: #555;
+    cursor: grab;
+    transition: all 0.2s;
+  }
+
+  .tool-item:hover {
+    background: #f0f0f0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .tool-item:active {
+    cursor: grabbing;
   }
 
   .actions-section {

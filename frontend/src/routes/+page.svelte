@@ -1418,6 +1418,20 @@
         }}>
           {currentFlowId ? 'Update Flow' : 'Save Flow'}
         </Button>
+        {#if currentFlowId}
+          <Button
+            variant="outline"
+            onclick={() => {
+              currentFlowId = null;
+              nodes = [];
+              edges = [];
+              selectedCondaEnv = null;
+            }}
+            class="ml-2"
+          >
+            Clear
+          </Button>
+        {/if}
         <Button
           onclick={() => currentFlowId && runFlow(currentFlowId, getEntryPointInputValues())}
           disabled={!currentFlowId}
@@ -1471,6 +1485,7 @@
     <!-- AGENT BUILDER (Self-contained component) -->
     <AgentBuilder
       tools={data.tools}
+      agents={data.agents}
       userId={data.user?.id || 1}
       on:back={handleAgentBuilderBack}
       on:agentCreated={handleAgentCreated}
