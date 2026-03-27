@@ -17,30 +17,33 @@
   import { Label } from "$lib/components/ui/label";
 
   import ToolNode from './ToolNode.svelte';
+  import StartNode from './StartNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
   import LLMProvidersPanel from './LLMProvidersPanel.svelte';
 
   import { getAgentTemplatesList, getAgentTemplate, type AgentTypeKey } from '$lib/agentTemplates';
   import { buildAgentGraphConfig, validateAgentGraph } from '$lib/agentGraphBuilder';
-  import { createAgent, type Tool, type Agent, type AgentCreateData } from '$lib/api';
+  import { autoLayoutNodes } from '$lib/elkLayout';
+  import { createAgent, type Agent, type AgentCreateData } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
   import type { Viewport } from '@xyflow/svelte';
+
+  import type { AgentTemplate } from '$lib/agentTemplates';
 
   const dispatch = createEventDispatcher<{
     back: void;
     agentCreated: Agent;
+    configureNewAgent: { template: AgentTemplate };
   }>();
 
   // Props
-  export let tools: Tool[] = [];
   export let agents: Agent[] = [];
   export let userId: number = 1;
 
   // Sidebar section collapse state
   let sectionsExpanded = {
     newAgent: false,
-    availableAgents: false,
-    availableTools: false
+    availableAgents: false
   };
 
   function toggleSection(section: keyof typeof sectionsExpanded) {
@@ -53,15 +56,30 @@
 
   // Node and edge types for SvelteFlow
   const nodeTypes = {
-    toolNode: ToolNode
+    toolNode: ToolNode,
+    startNode: StartNode
   };
 
   const edgeTypes = {
     floating: FloatingEdge
   };
 
+  // The Start node is always present on the canvas
+  const START_NODE_ID = 'start';
+  function createStartNode(): Node {
+    return {
+      id: START_NODE_ID,
+      type: 'startNode',
+      data: { label: 'Start' },
+      position: { x: 50, y: 150 },
+      deletable: false,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left
+    };
+  }
+
   // Canvas state
-  let agentNodes: Node[] = [];
+  let agentNodes: Node[] = [createStartNode()];
   let agentEdges: Edge[] = [];
   let agentViewport: Viewport = { x: 0, y: 0, zoom: 1 };
 
@@ -76,6 +94,7 @@
   let showSaveAgentDialog = false;
   let composedAgentName = '';
   let composedAgentDescription = '';
+  let maxLoopIterations = 5;
   let isSavingAgent = false;
 
 
@@ -126,6 +145,53 @@
   }
 
   /**
+   * Add a fully configured agent node to the canvas (called from parent after modal confirmation)
+   */
+  export function addConfiguredAgentNode(nodeData: {
+    name: string;
+    description: string;
+    system_prompt: string;
+    llm_provider: string;
+    tool_ids: number[];
+    output_paths?: Record<string, string>;
+    agentType: AgentTypeKey;
+  }) {
+    // Calculate a default position based on existing nodes
+    const xOffset = agentNodes.length * 250;
+    const position = { x: 100 + xOffset, y: 150 };
+
+    const template = getAgentTemplate(nodeData.agentType);
+
+    const newNode: Node = {
+      id: String(Date.now()),
+      type: 'toolNode',
+      data: {
+        label: nodeData.name,
+        handles: ['a'],
+        isAgent: true,
+        agentType: nodeData.agentType,
+        name: nodeData.name,
+        description: nodeData.description,
+        system_prompt: nodeData.system_prompt,
+        llm_provider: nodeData.llm_provider,
+        tool_ids: nodeData.tool_ids,
+        output_paths: nodeData.output_paths,
+        graph_config: {},
+        script_code: '',
+        main_function: '',
+        input_schema: null,
+        output_schema: null,
+        runtimeLLM: null
+      },
+      position,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left
+    };
+
+    agentNodes = [...agentNodes, newNode];
+  }
+
+  /**
    * Add a node from an existing agent's configuration
    */
   function addExistingAgentNode(agentId: number, position: { x: number; y: number }) {
@@ -143,11 +209,13 @@
         handles: ['a'],
         isAgent: true,
         agentId: agent.id,
+        agentType: nodeConfig?.agent_type || 'pydanticai',
         name: agent.name,
         description: agent.description || '',
         system_prompt: nodeConfig?.system_prompt || '',
         llm_provider: nodeConfig?.llm_provider || '',
         tool_ids: nodeConfig?.tool_ids || [],
+        output_paths: nodeConfig?.output_paths || undefined,
         graph_config: agent.graph_config,
         script_code: '',
         main_function: '',
@@ -164,34 +232,99 @@
   }
 
   /**
-   * Add a custom agent node pre-assigned with a tool
+   * Load an existing complex agent onto the canvas.
+   * Reconstructs XYFlow nodes/edges from graph_config, then auto-layouts with ELK.
    */
-  function addToolNode(toolId: number, position: { x: number; y: number }) {
-    const tool = tools.find(t => t.id === toolId);
-    if (!tool) return;
+  export async function loadAgent(agent: Agent) {
+    try {
+      const config = agent.graph_config;
+      if (!config?.nodes) {
+        showToastMessage('Agent has no graph configuration', false);
+        return;
+      }
 
-    const newNode: Node = {
-      id: String(Date.now()),
-      type: 'toolNode',
-      data: {
-        label: tool.name,
-        handles: ['a'],
-        isAgent: false,
-        toolId: tool.id,
-        name: tool.name,
-        description: tool.description || '',
-        script_code: tool.script_code || '',
-        main_function: tool.main_function || '',
-        input_schema: tool.input_schema || null,
-        output_schema: tool.output_schema || null,
-        runtimeLLM: null
-      },
-      position,
-      sourcePosition: Position.Right,
-      targetPosition: Position.Left
-    };
+      // 1. Create Start node + agent nodes
+      const newNodes: Node[] = [createStartNode()];
 
-    agentNodes = [...agentNodes, newNode];
+      for (const [nodeId, nodeConfig] of Object.entries(config.nodes) as [string, any][]) {
+        newNodes.push({
+          id: nodeId,
+          type: 'toolNode',
+          data: {
+            label: nodeConfig.name || nodeId,
+            handles: ['a'],
+            isAgent: true,
+            agentType: nodeConfig.agent_type || 'pydanticai',
+            name: nodeConfig.name || nodeId,
+            description: nodeConfig.description || '',
+            system_prompt: nodeConfig.system_prompt || '',
+            llm_provider: nodeConfig.llm_provider || '',
+            tool_ids: nodeConfig.tool_ids || [],
+            output_paths: nodeConfig.output_paths || undefined,
+            graph_config: {},
+            script_code: '',
+            main_function: '',
+            input_schema: null,
+            output_schema: null,
+            runtimeLLM: null
+          },
+          position: { x: 0, y: 0 },
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left
+        });
+      }
+
+      // 2. Create edges (without sourceHandle initially, for ELK)
+      const newEdges: Edge[] = [];
+
+      if (config.entry_point) {
+        newEdges.push({
+          id: `start-${config.entry_point}`,
+          source: START_NODE_ID,
+          target: config.entry_point,
+          type: 'floating',
+          markerEnd: { type: MarkerType.ArrowClosed }
+        });
+      }
+
+      for (const edgeConfig of config.edges || []) {
+        newEdges.push({
+          id: `${edgeConfig.from_node}-${edgeConfig.to_node}`,
+          source: edgeConfig.from_node,
+          target: edgeConfig.to_node,
+          type: 'floating',
+          markerEnd: { type: MarkerType.ArrowClosed }
+        });
+      }
+
+      // 3. Auto-layout with ELK
+      const layoutedNodes = await autoLayoutNodes(newNodes, newEdges);
+
+      // 4. Restore sourceHandle from output_path after layout
+      for (const edgeConfig of config.edges || []) {
+        if (edgeConfig.output_path) {
+          const edge = newEdges.find(
+            e => e.source === edgeConfig.from_node && e.target === edgeConfig.to_node
+          );
+          if (edge) {
+            edge.sourceHandle = edgeConfig.output_path;
+          }
+        }
+      }
+
+      // 5. Apply to canvas
+      agentNodes = layoutedNodes;
+      agentEdges = newEdges;
+
+      // 6. Pre-fill save dialog metadata
+      composedAgentName = agent.name || '';
+      composedAgentDescription = agent.description || '';
+      maxLoopIterations = config.max_loop_iterations || 5;
+
+      showToastMessage(`Agent "${agent.name}" loaded successfully!`, true);
+    } catch (error) {
+      showToastMessage(`Failed to load agent: ${error}`, false);
+    }
   }
 
   /**
@@ -207,27 +340,15 @@
   }
 
   /**
-   * Handle drop on canvas — supports agent templates, existing agents, and tools
+   * Handle drop on canvas — supports existing agents and tools (templates use click-to-configure)
    */
   function handleCanvasDrop(event: DragEvent) {
     event.preventDefault();
     const position = getDropPosition(event);
 
-    const agentType = event.dataTransfer?.getData('agent-type');
-    if (agentType) {
-      addAgentNode(agentType as AgentTypeKey, position);
-      return;
-    }
-
     const existingAgentId = event.dataTransfer?.getData('existing-agent-id');
     if (existingAgentId) {
       addExistingAgentNode(Number(existingAgentId), position);
-      return;
-    }
-
-    const toolId = event.dataTransfer?.getData('tool-id');
-    if (toolId) {
-      addToolNode(Number(toolId), position);
       return;
     }
   }
@@ -239,6 +360,7 @@
     const newEdge: Edge = {
       id: `${params.source}-${params.target}`,
       source: params.source,
+      sourceHandle: params.sourceHandle || undefined,
       target: params.target,
       type: 'floating',
       markerEnd: {
@@ -271,6 +393,7 @@
       isSavingAgent = true;
 
       const graphConfig = buildAgentGraphConfig(agentNodes, agentEdges);
+      graphConfig.max_loop_iterations = maxLoopIterations;
 
       const agentData: AgentCreateData = {
         name: composedAgentName.trim(),
@@ -286,7 +409,7 @@
       showSaveAgentDialog = false;
       composedAgentName = '';
       composedAgentDescription = '';
-      agentNodes = [];
+      agentNodes = [createStartNode()];
       agentEdges = [];
 
       // Notify parent
@@ -304,9 +427,10 @@
    * Clear the canvas
    */
   function clearCanvas() {
-    if (agentNodes.length === 0) return;
+    const agentCount = agentNodes.filter(n => n.type !== 'startNode').length;
+    if (agentCount === 0) return;
     if (!confirm('Clear all agent nodes? This cannot be undone.')) return;
-    agentNodes = [];
+    agentNodes = [createStartNode()];
     agentEdges = [];
   }
 
@@ -344,20 +468,20 @@
       </button>
       {#if sectionsExpanded.newAgent}
         <div class="section-content">
-          <div class="hint">Drag to canvas</div>
+          <div class="hint">Click to configure and add</div>
           {#each getAgentTemplatesList() as template}
-            <div
+            <button
               class="agent-type-item"
-              draggable="true"
-              ondragstart={(event) => event.dataTransfer?.setData('agent-type', template.type)}
+              onclick={() => dispatch('configureNewAgent', { template })}
               style="border-left-color: {template.color};"
+              type="button"
             >
               <span class="agent-type-icon">{template.icon}</span>
               <div class="agent-type-info">
                 <span class="agent-type-name">{template.name}</span>
                 <span class="agent-type-desc">{template.description}</span>
               </div>
-            </div>
+            </button>
           {/each}
         </div>
       {/if}
@@ -393,42 +517,15 @@
       {/if}
     </div>
 
-    <!-- Available Tools Section -->
-    <div class="sidebar-section">
-      <button class="section-header" onclick={() => toggleSection('availableTools')}>
-        <span class="section-chevron" class:expanded={sectionsExpanded.availableTools}>&#9656;</span>
-        <h4>Available Tools</h4>
-        <span class="section-count">{tools.length}</span>
-      </button>
-      {#if sectionsExpanded.availableTools}
-        <div class="section-content">
-          {#if tools.length === 0}
-            <div class="hint">No tools created yet</div>
-          {:else}
-            <div class="hint">Drag to canvas</div>
-            {#each tools as tool}
-              <div
-                class="tool-item"
-                draggable="true"
-                ondragstart={(event) => event.dataTransfer?.setData('tool-id', String(tool.id))}
-              >
-                <span>{tool.name}</span>
-              </div>
-            {/each}
-          {/if}
-        </div>
-      {/if}
-    </div>
-
     <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
 
     <div class="actions-section">
-      <Button size="sm" onclick={() => showSaveAgentDialog = true} class="w-full mb-2 bg-purple-600 hover:bg-purple-700" disabled={agentNodes.length === 0}>
+      <Button size="sm" onclick={() => showSaveAgentDialog = true} class="w-full mb-2 bg-purple-600 hover:bg-purple-700" disabled={agentNodes.filter(n => n.type !== 'startNode').length === 0}>
         {#snippet children()}
           Save Complex Agent
         {/snippet}
       </Button>
-      <Button size="sm" onclick={clearCanvas} class="w-full" variant="outline" disabled={agentNodes.length === 0}>
+      <Button size="sm" onclick={clearCanvas} class="w-full" variant="outline" disabled={agentNodes.filter(n => n.type !== 'startNode').length === 0}>
         {#snippet children()}
           Clear Canvas
         {/snippet}
@@ -445,7 +542,7 @@
   >
     <div class="canvas-header">
       <h2>Visual Agent Builder</h2>
-      <span class="node-count">{agentNodes.length} agent{agentNodes.length !== 1 ? 's' : ''}</span>
+      <span class="node-count">{agentNodes.filter(n => n.type !== 'startNode').length} agent{agentNodes.filter(n => n.type !== 'startNode').length !== 1 ? 's' : ''}</span>
     </div>
 
     <SvelteFlow
@@ -495,9 +592,16 @@
           <Input id="composedAgentDesc" bind:value={composedAgentDescription} placeholder="Describe what this agent does..." />
         </div>
 
+        {#if agentEdges.filter(e => e.source !== START_NODE_ID).length > agentNodes.filter(n => n.type !== 'startNode').length - 1}
+          <div class="form-field">
+            <Label for="maxLoopIter">Max Loop Iterations</Label>
+            <Input id="maxLoopIter" type="number" bind:value={maxLoopIterations} min={1} max={20} />
+          </div>
+        {/if}
+
         <div class="agent-summary">
           <span class="summary-label">Contains:</span>
-          <span class="summary-value">{agentNodes.length} sub-agent{agentNodes.length !== 1 ? 's' : ''}, {agentEdges.length} connection{agentEdges.length !== 1 ? 's' : ''}</span>
+          <span class="summary-value">{agentNodes.filter(n => n.type !== 'startNode').length} sub-agent{agentNodes.filter(n => n.type !== 'startNode').length !== 1 ? 's' : ''}, {agentEdges.filter(e => e.source !== START_NODE_ID).length} connection{agentEdges.filter(e => e.source !== START_NODE_ID).length !== 1 ? 's' : ''}</span>
         </div>
       </div>
 
@@ -648,8 +752,11 @@
     border: 1px solid #ccc;
     border-left: 4px solid;
     border-radius: 4px;
-    cursor: grab;
+    cursor: pointer;
     transition: all 0.2s;
+    width: 100%;
+    text-align: left;
+    font: inherit;
   }
 
   .agent-type-item:hover {
@@ -658,7 +765,7 @@
   }
 
   .agent-type-item:active {
-    cursor: grabbing;
+    background: #ebebeb;
   }
 
   .agent-type-icon {
@@ -683,27 +790,6 @@
     font-size: 10px;
     color: #666;
     line-height: 1.3;
-  }
-
-  .tool-item {
-    padding: 6px 10px;
-    margin: 4px 0;
-    background: #f8f8f8;
-    border: 1px solid #e0e0e0;
-    border-radius: 4px;
-    font-size: 12px;
-    color: #555;
-    cursor: grab;
-    transition: all 0.2s;
-  }
-
-  .tool-item:hover {
-    background: #f0f0f0;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  }
-
-  .tool-item:active {
-    cursor: grabbing;
   }
 
   .actions-section {

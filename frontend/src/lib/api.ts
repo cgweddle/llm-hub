@@ -781,12 +781,14 @@ export interface SubAgentNodeConfig {
   user_prompt?: string;        // Design-time task instruction, prepended to runtime input
   llm_provider: string;        // Name from config.yaml
   tool_ids: number[];
+  output_paths?: Record<string, string>;  // path_name → description for conditional routing
 }
 
 export interface AgentEdgeConfig {
   from_node: string;
   to_node: string;
   is_loop: boolean;
+  output_path?: string;        // Which output path this edge corresponds to
 }
 
 export interface AgentGraphConfig {

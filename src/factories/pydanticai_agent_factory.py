@@ -17,6 +17,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from database.database import get_session, get_tool_by_id, get_agent_by_id
 from utils import get_llm_config_by_name
+from utils.prompt_template import resolve_system_prompt_template
 from converters.pydanticai_tool_converter import PydanticAIToolConverter
 
 logger = logging.getLogger(__name__)
@@ -60,14 +61,19 @@ class PydanticAIAgentFactory:
 
         result_type = self._build_result_type(output_schema) if output_schema else None
 
+        # Fetch tool records for template resolution and registration
+        tool_ids = node_config.get("tool_ids", [])
+        tool_records = [get_tool_by_id(self.session, tid) for tid in tool_ids]
+        tool_records = [t for t in tool_records if t is not None]
+
         system_prompt = node_config.get("system_prompt", "You are a helpful assistant.")
+        system_prompt = resolve_system_prompt_template(system_prompt, node_config, tool_records)
 
         if result_type:
             agent = Agent(model=model, result_type=result_type, system_prompt=system_prompt)
         else:
             agent = Agent(model=model, system_prompt=system_prompt)
 
-        tool_ids = node_config.get("tool_ids", [])
         if tool_ids:
             self._register_tools_by_ids(agent, tool_ids)
 

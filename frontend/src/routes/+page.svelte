@@ -17,13 +17,14 @@
   import { python } from '@codemirror/lang-python';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { EditorState } from '@codemirror/state';
-  import { onDestroy, setContext } from 'svelte';
+  import { onDestroy, setContext, tick } from 'svelte';
 
   import ColorSelectorNode from './ColorSelectorNode.svelte';
   import ToolNode from './ToolNode.svelte';
   import TriggerNode from './TriggerNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
   import AgentBuilder from './AgentBuilder.svelte';
+  import type { AgentTemplate } from '$lib/agentTemplates';
   import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
   import LLMProvidersPanel from './LLMProvidersPanel.svelte';
   import FullscreenNodeModal from './FullscreenNodeModal.svelte';
@@ -136,10 +137,28 @@
   let showGeneratePromptAI = false;
   let promptAdditionalInstructions = '';
   let isGeneratingPrompt = false;
+  let newAgentOutputPaths: Array<{name: string, description: string}> = [];
+  let isConfiguringComplexNode = false;
+  let pendingAgentTemplate: AgentTemplate | null = null;
+  let agentBuilderRef: AgentBuilder;
 
   // Agent Builder mode
   let currentMode: BuilderMode = 'flow';
   builderMode.subscribe(mode => currentMode = mode);
+
+  // Intercept fullscreen opens for complex agents — redirect to AgentBuilder
+  $: if ($fullscreenNode?.nodeType === 'agent') {
+    const graphConfig = $fullscreenNode.data?.graph_config;
+    if (graphConfig && Object.keys(graphConfig.nodes || {}).length > 1) {
+      const agentId = $fullscreenNode.data?.agentId;
+      const agent = data.agents.find((a: Agent) => a.id === agentId);
+      fullscreenNode.close();
+      if (agent) {
+        builderMode.setAgent();
+        tick().then(() => agentBuilderRef.loadAgent(agent));
+      }
+    }
+  }
 
   // CodeMirror editor for Create Tool modal
   let createToolEditorContainer: HTMLDivElement;
@@ -285,6 +304,7 @@
           system_prompt: entryNode.system_prompt || '',
           llm_provider: entryNode.llm_provider || '',
           tool_ids: entryNode.tool_ids || [],
+          output_paths: entryNode.output_paths || undefined,
           script_code: '',
           main_function: '',
           input_schema: null,
@@ -547,6 +567,7 @@
                 system_prompt: entryNodeConfig.system_prompt || '',
                 llm_provider: entryNodeConfig.llm_provider || '',
                 tool_ids: entryNodeConfig.tool_ids || [],
+                output_paths: entryNodeConfig.output_paths || undefined,
                 script_code: '',
                 main_function: '',
                 input_schema: null,
@@ -1080,9 +1101,17 @@
             "main": {
               agent_type: "pydanticai",
               name: newAgentName.trim(),
+              description: newAgentDescription.trim(),
               system_prompt: newAgentSystemPrompt.trim(),
               llm_provider: newAgentLLMProvider || '',
-              tool_ids: newAgentSelectedTools
+              tool_ids: newAgentSelectedTools,
+              ...(newAgentOutputPaths.filter(p => p.name.trim()).length > 0 ? {
+                output_paths: Object.fromEntries(
+                  newAgentOutputPaths
+                    .filter(p => p.name.trim())
+                    .map(p => [p.name.trim(), p.description.trim()])
+                )
+              } : {})
             }
           },
           edges: [],
@@ -1197,7 +1226,25 @@
     }
   }
 
+  function addAgentOutputPath() {
+    newAgentOutputPaths = [...newAgentOutputPaths, { name: '', description: '' }];
+  }
+
+  function removeAgentOutputPath(index: number) {
+    newAgentOutputPaths = newAgentOutputPaths.filter((_, i) => i !== index);
+  }
+
   function openAgentDetails(agent: Agent) {
+    // Complex agent: load into AgentBuilder canvas
+    const nodeCount = Object.keys(agent.graph_config?.nodes || {}).length;
+    if (nodeCount > 1) {
+      builderMode.setAgent();
+      tick().then(() => {
+        agentBuilderRef.loadAgent(agent);
+      });
+      return;
+    }
+
     const entryPoint = agent.graph_config?.entry_point || 'main';
     const entryNode = agent.graph_config?.nodes?.[entryPoint] || {};
 
@@ -1227,6 +1274,9 @@
     showGeneratePromptAI = false;
     promptAdditionalInstructions = '';
     isGeneratingPrompt = false;
+    newAgentOutputPaths = [];
+    isConfiguringComplexNode = false;
+    pendingAgentTemplate = null;
   }
 
   // Agent Builder handlers
@@ -1240,6 +1290,43 @@
 
   function handleAgentBuilderBack() {
     builderMode.setFlow();
+  }
+
+  function handleConfigureNewAgent(event: CustomEvent<{ template: AgentTemplate }>) {
+    const { template } = event.detail;
+    pendingAgentTemplate = template;
+    isConfiguringComplexNode = true;
+    newAgentName = template.name;
+    newAgentDescription = template.description;
+    newAgentSystemPrompt = template.defaultSystemPrompt;
+    newAgentSelectedTools = [];
+    newAgentLLMProvider = '';
+    newAgentOutputPaths = [];
+    showCreateAgentModal = true;
+  }
+
+  function handleAddNodeToCanvas() {
+    if (!pendingAgentTemplate) return;
+
+    const outputPaths = newAgentOutputPaths.filter(p => p.name.trim()).length > 0
+      ? Object.fromEntries(
+          newAgentOutputPaths
+            .filter(p => p.name.trim())
+            .map(p => [p.name.trim(), p.description.trim()])
+        )
+      : undefined;
+
+    agentBuilderRef.addConfiguredAgentNode({
+      name: newAgentName.trim(),
+      description: newAgentDescription.trim(),
+      system_prompt: newAgentSystemPrompt.trim(),
+      llm_provider: newAgentLLMProvider || '',
+      tool_ids: newAgentSelectedTools,
+      output_paths: outputPaths,
+      agentType: pendingAgentTemplate.type
+    });
+
+    closeCreateAgentModal();
   }
 </script>
 
@@ -1484,11 +1571,12 @@
   {:else}
     <!-- AGENT BUILDER (Self-contained component) -->
     <AgentBuilder
-      tools={data.tools}
+      bind:this={agentBuilderRef}
       agents={data.agents}
       userId={data.user?.id || 1}
       on:back={handleAgentBuilderBack}
       on:agentCreated={handleAgentCreated}
+      on:configureNewAgent={handleConfigureNewAgent}
     />
   {/if}
 
@@ -1743,7 +1831,7 @@
     <div class="create-tool-overlay" onclick={closeCreateAgentModal}>
       <div class="create-tool-modal" onclick={(e) => e.stopPropagation()}>
         <div class="create-tool-header">
-          <h2 class="create-tool-title">Create New Agent</h2>
+          <h2 class="create-tool-title">{isConfiguringComplexNode ? 'Configure Agent Node' : 'Create New Agent'}</h2>
           <button class="create-tool-close" onclick={closeCreateAgentModal}>×</button>
         </div>
 
@@ -1890,15 +1978,55 @@
               {/each}
             {/if}
           </div>
+
+          <!-- Output Paths Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Output Paths</div>
+            <div class="create-tool-helper-text" style="margin-bottom: 12px;">
+              Define conditional output paths for routing in multi-agent workflows.
+            </div>
+            {#if newAgentOutputPaths.length > 0}
+              <div class="output-paths-list">
+                {#each newAgentOutputPaths as path, index}
+                  <div class="output-path-row">
+                    <input
+                      type="text"
+                      class="create-tool-input output-path-name"
+                      bind:value={path.name}
+                      placeholder="Path name (e.g., revise)"
+                    />
+                    <input
+                      type="text"
+                      class="create-tool-input output-path-description"
+                      bind:value={path.description}
+                      placeholder="When to choose this path"
+                    />
+                    <button class="output-path-remove" onclick={() => removeAgentOutputPath(index)}>
+                      &times;
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+            <button class="output-path-add" onclick={addAgentOutputPath} type="button">
+              + Add Output Path
+            </button>
+          </div>
         </div>
 
         <div class="create-tool-footer">
           <Button variant="outline" onclick={closeCreateAgentModal}>
             {#snippet children()}Cancel{/snippet}
           </Button>
-          <Button onclick={handleCreateAgent} disabled={isCreatingAgent} class="bg-green-600 hover:bg-green-700">
-            {#snippet children()}{isCreatingAgent ? 'Creating...' : 'Create Agent'}{/snippet}
-          </Button>
+          {#if isConfiguringComplexNode}
+            <Button onclick={handleAddNodeToCanvas} class="bg-purple-600 hover:bg-purple-700">
+              {#snippet children()}Add to Canvas{/snippet}
+            </Button>
+          {:else}
+            <Button onclick={handleCreateAgent} disabled={isCreatingAgent} class="bg-green-600 hover:bg-green-700">
+              {#snippet children()}{isCreatingAgent ? 'Creating...' : 'Create Agent'}{/snippet}
+            </Button>
+          {/if}
         </div>
       </div>
     </div>
@@ -2612,5 +2740,62 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  /* Output Paths */
+  .output-paths-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .output-path-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .output-path-name {
+    width: 120px;
+  }
+
+  .output-path-description {
+    flex: 1;
+  }
+
+  .output-path-remove {
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: #5a1d1d;
+    color: #ff6b6b;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .output-path-remove:hover {
+    background: #7a2d2d;
+  }
+
+  .output-path-add {
+    padding: 6px 12px;
+    background: transparent;
+    border: 1px dashed #3e3e42;
+    color: #007acc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    transition: all 0.2s ease;
+  }
+
+  .output-path-add:hover {
+    border-color: #007acc;
+    background: rgba(0, 122, 204, 0.1);
   }
 </style>

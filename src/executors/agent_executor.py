@@ -22,7 +22,7 @@ Features:
 
 import logging
 from datetime import datetime
-from typing import Dict, Any, AsyncGenerator, Optional
+from typing import Dict, Any, AsyncGenerator, Optional, Tuple, List
 
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from database.database import get_agent_by_id, get_tool_by_id, create_execution, update_execution
 from database.database_setup import Execution
+from utils.prompt_template import resolve_system_prompt_template
 
 # Import retry utilities
 try:
@@ -67,6 +68,42 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 logger.info(logger_init_msg)
+
+
+def _build_output_path_types(output_paths: Dict[str, str]):
+    """Build dynamic Pydantic union types from output_paths config.
+
+    Given {"revise": "Draft needs work", "approve": "Draft is ready"},
+    creates model classes Revise and Approve each with a 'content' field,
+    and returns (union_type, {ClassName: path_name} mapping).
+
+    PydanticAI treats union members as separate output tools,
+    so the LLM actively chooses which path to take.
+    """
+    from pydantic import BaseModel, create_model
+
+    models = {}
+    class_to_path = {}
+    for path_name, description in output_paths.items():
+        # Create a model class with the path name capitalized
+        class_name = path_name.capitalize()
+        model = create_model(
+            class_name,
+            content=(str, ...),
+            __doc__=description,
+        )
+        models[path_name] = model
+        class_to_path[class_name] = path_name
+
+    # Build the union type
+    from typing import Union
+    model_list = list(models.values())
+    if len(model_list) == 1:
+        union_type = model_list[0]
+    else:
+        union_type = Union[tuple(model_list)]
+
+    return union_type, class_to_path, models
 
 
 class AgentExecutor:
@@ -239,21 +276,26 @@ class AgentExecutor:
             f"entry: {entry_point}, exits: {exit_points}"
         )
 
-        # Build adjacency list
+        # Build adjacency list and edge metadata
         adjacency: Dict[str, list] = {node_id: [] for node_id in nodes_config}
         loop_edges: set = set()
+        edge_output_paths: Dict[tuple, str] = {}  # (from, to) → output_path name
         for edge in edges_config:
             from_node = edge.get("from_node")
             to_node = edge.get("to_node")
             is_loop = edge.get("is_loop", False)
+            output_path = edge.get("output_path")
             if from_node and to_node:
                 adjacency[from_node].append(to_node)
                 if is_loop:
                     loop_edges.add((from_node, to_node))
+                if output_path:
+                    edge_output_paths[(from_node, to_node)] = output_path
 
         # Track execution
         execution_trace = []
         node_outputs: Dict[str, Any] = {}
+        node_messages: Dict[str, List] = {}  # node_id → PydanticAI message history for loop iterations
         loop_counts: Dict[tuple, int] = {}
         step_sequence = 0
 
@@ -273,8 +315,12 @@ class AgentExecutor:
                 node_input = node_outputs.get(node_id + "_input", current_input)
 
                 # Execute the sub-agent node
+                chosen_path = None
                 try:
                     trace_id = None
+                    # Pass message_history for loop iterations (None on first visit)
+                    history = node_messages.get(node_id)
+
                     if LANGFUSE_AVAILABLE and langfuse_observe:
                         # Capture trace ID even if the agent fails
                         _captured_trace_id = None
@@ -283,15 +329,17 @@ class AgentExecutor:
                         async def _observed_run():
                             nonlocal _captured_trace_id
                             _captured_trace_id = langfuse_client.get_current_trace_id()
-                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input)
+                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, message_history=history)
                             return result
 
-                        output = await _observed_run()
+                        output, messages, chosen_path = await _observed_run()
                         trace_id = _captured_trace_id
                         langfuse_client.flush()
                     else:
-                        output = await self._run_sub_agent(node_id, nodes_config[node_id], node_input)
+                        output, messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, message_history=history)
                     node_outputs[node_id] = output
+                    if messages is not None:
+                        node_messages[node_id] = messages
 
                     execution_trace.append({
                         "node": node_id,
@@ -341,16 +389,25 @@ class AgentExecutor:
                         f"Agent node '{nodes_config[node_id].get('name', node_id)}' failed: {e}"
                     ) from e
 
-                # Skip successor traversal if this is an exit point
-                if node_id in exit_points:
-                    continue
-
-                # Add successor nodes
+                # Traverse successor nodes
+                # Exit points skip forward edges but still follow loop edges
+                is_exit = node_id in exit_points
                 for successor in adjacency.get(node_id, []):
                     edge_key = (node_id, successor)
+                    is_loop_edge = edge_key in loop_edges
+
+                    # Exit points only follow loop edges back, not forward edges
+                    if is_exit and not is_loop_edge:
+                        continue
+
+                    # Filter by output_path when the node chose a specific path
+                    edge_path = edge_output_paths.get(edge_key)
+                    if chosen_path is not None and edge_path is not None:
+                        if edge_path != chosen_path:
+                            continue
 
                     # Handle loop edges with iteration limit
-                    if edge_key in loop_edges:
+                    if is_loop_edge:
                         loop_counts[edge_key] = loop_counts.get(edge_key, 0) + 1
                         if loop_counts[edge_key] > max_loop_iterations:
                             logger.warning(
@@ -384,22 +441,23 @@ class AgentExecutor:
             "sub_agent_count": len(nodes_config)
         }
 
-    async def _run_sub_agent(self, node_id: str, node_config: Dict, node_input: str) -> str:
+    async def _run_sub_agent(
+        self, node_id: str, node_config: Dict, node_input: str,
+        message_history: Optional[List] = None
+    ) -> Tuple[str, Optional[List], Optional[str]]:
         """
         Create and run a sub-agent for a single graph node.
-        Returns the agent's text output. Internal tracing is handled by LangFuse.
+        Returns (output_text, messages, chosen_path) where:
+        - messages is the PydanticAI message history for loop iterations
+        - chosen_path is the output path name (None if no output_paths configured)
+        Internal tracing is handled by LangFuse.
         """
         logger.debug(
             f"Running sub-agent: {node_config.get('name', node_id)} "
             f"(type: {node_config.get('agent_type')})"
         )
 
-        agent_type = node_config.get("agent_type", "pydanticai")
-
-        if agent_type == "react":
-            return await self._run_react_node(node_config, node_input)
-        else:
-            return await self._run_pydanticai_node(node_config, node_input)
+        return await self._run_pydanticai_node(node_config, node_input, message_history=message_history)
 
     @staticmethod
     def _apply_user_prompt(node_config: Dict, node_input: str) -> str:
@@ -409,8 +467,13 @@ class AgentExecutor:
             return f"{user_prompt}\n\n{node_input}"
         return node_input
 
-    async def _run_pydanticai_node(self, node_config: Dict, node_input: str) -> str:
-        """Run a PydanticAI sub-agent. LangFuse auto-captures internal tool calls and LLM I/O."""
+    async def _run_pydanticai_node(
+        self, node_config: Dict, node_input: str,
+        message_history: Optional[List] = None
+    ) -> Tuple[str, List, Optional[str]]:
+        """Run a PydanticAI sub-agent. Returns (output_text, all_messages, chosen_path).
+        chosen_path is None for nodes without output_paths.
+        LangFuse auto-captures internal tool calls and LLM I/O."""
         from pydantic_ai import Agent
 
         node_input = self._apply_user_prompt(node_config, node_input)
@@ -418,19 +481,44 @@ class AgentExecutor:
         llm_provider = node_config.get("llm_provider", "")
         model_name = self._resolve_model_name(llm_provider)
 
-        sub_agent = Agent(
-            model=model_name,
-            system_prompt=node_config.get("system_prompt", "You are a helpful assistant."),
-        )
+        # Build output type and routing from output_paths if configured
+        output_paths = node_config.get("output_paths")
+        output_type = None
+        class_to_path = None
+        if output_paths and len(output_paths) > 0:
+            output_type, class_to_path, _ = _build_output_path_types(output_paths)
 
-        # Load and register tools if tool_ids are specified
+        # Fetch tool records for template resolution and registration
         tool_ids = node_config.get("tool_ids", [])
+        tool_records = [get_tool_by_id(self.session, tid) for tid in tool_ids]
+        tool_records = [t for t in tool_records if t is not None]
+
+        system_prompt = node_config.get("system_prompt", "You are a helpful assistant.")
+        system_prompt = resolve_system_prompt_template(system_prompt, node_config, tool_records)
+
+        # Append routing instructions when output paths are configured
+        if output_paths:
+            routing_lines = ["\n\nYou must choose one of the following output paths:"]
+            for path_name, description in output_paths.items():
+                routing_lines.append(f'- "{path_name.capitalize()}": {description}')
+            system_prompt += "\n".join(routing_lines)
+
+        agent_kwargs = dict(
+            model=model_name,
+            system_prompt=system_prompt,
+        )
+        if output_type is not None:
+            agent_kwargs["output_type"] = output_type
+
+        sub_agent = Agent(**agent_kwargs)
+
+        # Register tools on the agent
         if tool_ids:
             self._register_tools_on_agent(sub_agent, tool_ids)
 
         # Run with retry if enabled
         async def run():
-            return await sub_agent.run(node_input)
+            return await sub_agent.run(node_input, message_history=message_history)
 
         if self.enable_retry:
             def on_retry(attempt, exception, delay):
@@ -439,44 +527,28 @@ class AgentExecutor:
         else:
             result = await run()
 
+        # Extract output and determine chosen path
         result_data = result.output
-        if hasattr(result_data, 'model_dump'):
-            result_data = result_data.model_dump()
+        chosen_path = None
 
-        return str(result_data) if result_data else ""
+        if class_to_path and result_data is not None:
+            # Determine which union member was chosen via isinstance
+            class_name = type(result_data).__name__
+            chosen_path = class_to_path.get(class_name)
+            # Extract content from the structured output
+            if hasattr(result_data, 'content'):
+                output_str = str(result_data.content)
+            elif hasattr(result_data, 'model_dump'):
+                output_str = str(result_data.model_dump())
+            else:
+                output_str = str(result_data)
+            logger.info(f"Output path chosen: {chosen_path} (class: {class_name})")
+        else:
+            if hasattr(result_data, 'model_dump'):
+                result_data = result_data.model_dump()
+            output_str = str(result_data) if result_data else ""
 
-    async def _run_react_node(self, node_config: Dict, node_input: str) -> str:
-        """Run a React (Google ADK) sub-agent. LangFuse auto-captures via ADK instrumentation."""
-        from factories.agent_factory import ReactAgentFactory, AgentConfig, setup_llm_environment, DatabaseToolLoader
-        from utils import get_llm_config_by_name
-
-        node_input = self._apply_user_prompt(node_config, node_input)
-
-        llm_provider = node_config.get("llm_provider", "")
-        llm_config = get_llm_config_by_name(llm_provider)
-        if not llm_config:
-            raise ValueError(f"LLM config '{llm_provider}' not found")
-
-        llm_config['config_name'] = llm_provider
-        model = setup_llm_environment(llm_config)
-
-        tool_loader = DatabaseToolLoader(self.session)
-        for tool_id in node_config.get("tool_ids", []):
-            try:
-                tool_loader.load_tool(tool_id)
-            except Exception as e:
-                logger.warning(f"Failed to load tool {tool_id}: {e}")
-
-        from factories.agent_factory import ReActAgent
-        agent = ReActAgent(
-            name=node_config.get("name", "Agent"),
-            model=model,
-            tool_loader=tool_loader,
-            agent_description=node_config.get("system_prompt", "You are a helpful assistant."),
-        )
-
-        result = await agent.run_async(node_input)
-        return result.get("answer", "")
+        return (output_str, result.all_messages(), chosen_path)
 
     def _register_tools_on_agent(self, agent, tool_ids):
         """Register database tools on a PydanticAI agent."""
@@ -519,12 +591,19 @@ class AgentExecutor:
         llm_provider = node_config.get("llm_provider", "")
         model_name = self._resolve_model_name(llm_provider)
 
+        # Fetch tool records for template resolution and registration
+        tool_ids = node_config.get("tool_ids", [])
+        tool_records = [get_tool_by_id(self.session, tid) for tid in tool_ids]
+        tool_records = [t for t in tool_records if t is not None]
+
+        system_prompt = node_config.get("system_prompt", "You are a helpful assistant.")
+        system_prompt = resolve_system_prompt_template(system_prompt, node_config, tool_records)
+
         agent = Agent(
             model=model_name,
-            system_prompt=node_config.get("system_prompt", "You are a helpful assistant."),
+            system_prompt=system_prompt,
         )
 
-        tool_ids = node_config.get("tool_ids", [])
         if tool_ids:
             self._register_tools_on_agent(agent, tool_ids)
 

@@ -7,6 +7,13 @@ A system prompt defines the agent's identity, role, and behavioral guidelines. I
 4. Specify output format preferences or guardrails
 5. Be written in second person ("You are...", "You should...")
 
-Do NOT include task-specific instructions, example inputs, or placeholders like [INSERT X HERE] — those belong in user prompts, not system prompts.
+You MUST include the following placeholders exactly as written (curly braces included) in your generated system prompt:
+- {AGENT_NAME} — where the agent's name should appear (e.g. "You are {AGENT_NAME}, a...")
+- {AGENT_DESCRIPTION} — where the agent's role/purpose should appear
+- {TOOLS_SECTION} — where the list of available tools should appear
+
+These placeholders will be filled in at runtime with the actual agent name, description, and tools. Do NOT replace them with the values provided in the user message — keep them as literal placeholders.
+
+Do NOT include task-specific instructions, example inputs, or any other custom placeholders — those belong in user prompts, not system prompts.
 
 Output ONLY the system prompt text. Do not include any meta-commentary, markdown formatting, or explanations.

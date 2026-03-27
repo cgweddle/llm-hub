@@ -33,6 +33,7 @@
   let editedAgentSystemPrompt = '';
   let editedAgentLLMConfig = '';
   let editedAgentToolIds: number[] = [];
+  let editedOutputPaths: Array<{name: string, description: string}> = [];
 
   // Initialize agent edit state when entering edit mode
   function startEditingAgent() {
@@ -42,7 +43,21 @@
     editedAgentSystemPrompt = nodeData.data.system_prompt || '';
     editedAgentLLMConfig = nodeData.data.llm_provider || '';
     editedAgentToolIds = [...(nodeData.data.tool_ids || [])];
+    // Load output paths as array of {name, description}
+    const paths = nodeData.data.output_paths || {};
+    editedOutputPaths = Object.entries(paths).map(([name, description]) => ({
+      name,
+      description: description as string
+    }));
     isEditingAgent = true;
+  }
+
+  function addOutputPath() {
+    editedOutputPaths = [...editedOutputPaths, { name: '', description: '' }];
+  }
+
+  function removeOutputPath(index: number) {
+    editedOutputPaths = editedOutputPaths.filter((_, i) => i !== index);
   }
 
   function cancelEditingAgent() {
@@ -82,9 +97,17 @@
           [entryPoint]: {
             ...(existingGraphConfig.nodes?.[entryPoint] || {}),
             name: editedAgentName,
+            description: editedAgentDescription,
             system_prompt: editedAgentSystemPrompt,
             llm_provider: editedAgentLLMConfig,
-            tool_ids: editedAgentToolIds
+            tool_ids: editedAgentToolIds,
+            ...(editedOutputPaths.length > 0 ? {
+              output_paths: Object.fromEntries(
+                editedOutputPaths
+                  .filter(p => p.name.trim())
+                  .map(p => [p.name.trim(), p.description.trim()])
+              )
+            } : {})
           }
         }
       };
@@ -103,6 +126,7 @@
       nodeData.data.system_prompt = updatedEntryNode.system_prompt || '';
       nodeData.data.llm_provider = updatedEntryNode.llm_provider || '';
       nodeData.data.tool_ids = updatedEntryNode.tool_ids || [];
+      nodeData.data.output_paths = updatedEntryNode.output_paths || undefined;
       nodeData.data.graph_config = updatedAgent.graph_config;
 
       // Notify parent to update sidebar + canvas
@@ -707,6 +731,48 @@
             {/if}
           </div>
 
+          <!-- Output Paths (conditional routing) -->
+          <div class="section">
+            <div class="section-label">Output Paths</div>
+            {#if isEditingAgent}
+              <div class="output-paths-list">
+                {#each editedOutputPaths as path, index}
+                  <div class="output-path-row">
+                    <input
+                      type="text"
+                      class="output-path-name"
+                      bind:value={path.name}
+                      placeholder="Path name (e.g., revise)"
+                    />
+                    <input
+                      type="text"
+                      class="output-path-description"
+                      bind:value={path.description}
+                      placeholder="When to choose this path"
+                    />
+                    <button class="output-path-remove" on:click={() => removeOutputPath(index)}>
+                      &times;
+                    </button>
+                  </div>
+                {/each}
+                <button class="output-path-add" on:click={addOutputPath}>
+                  + Add Output Path
+                </button>
+              </div>
+            {:else if nodeData.data.output_paths && Object.keys(nodeData.data.output_paths).length > 0}
+              <div class="output-paths-list">
+                {#each Object.entries(nodeData.data.output_paths) as [pathName, pathDesc]}
+                  <div class="output-path-display">
+                    <span class="output-path-badge">{pathName}</span>
+                    <span class="output-path-desc-text">{pathDesc}</span>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="description-text no-data">No output paths (single output)</p>
+            {/if}
+          </div>
+
         {:else if nodeData.nodeType === 'expandable'}
           <!-- Expandable Node Content -->
           <div class="section">
@@ -1308,5 +1374,103 @@
   .agent-edit-textarea:focus {
     outline: none;
     border-color: #007acc;
+  }
+
+  /* Output Paths */
+  .output-paths-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .output-path-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .output-path-name {
+    width: 120px;
+    padding: 6px 10px;
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    color: #cccccc;
+    font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  .output-path-description {
+    flex: 1;
+    padding: 6px 10px;
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    color: #cccccc;
+    font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  .output-path-name:focus,
+  .output-path-description:focus {
+    outline: none;
+    border-color: #007acc;
+  }
+
+  .output-path-remove {
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: #5a1d1d;
+    color: #ff6b6b;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .output-path-remove:hover {
+    background: #7a2d2d;
+  }
+
+  .output-path-add {
+    padding: 6px 12px;
+    background: transparent;
+    border: 1px dashed #3e3e42;
+    color: #007acc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    transition: all 0.2s ease;
+  }
+
+  .output-path-add:hover {
+    border-color: #007acc;
+    background: rgba(0, 122, 204, 0.1);
+  }
+
+  .output-path-display {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+  }
+
+  .output-path-badge {
+    padding: 3px 10px;
+    background: #0e7a0d;
+    color: white;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .output-path-desc-text {
+    color: #a0a0a0;
+    font-size: 13px;
   }
 </style>

@@ -13,10 +13,12 @@ import type { AgentTypeKey } from './agentTemplates';
 export interface SubAgentConfig {
   agent_type: AgentTypeKey;
   name: string;
+  description: string;
   system_prompt: string;
   user_prompt: string;
   llm_provider: string;
   tool_ids: number[];
+  output_paths?: Record<string, string>;  // path_name → description for conditional routing
 }
 
 /**
@@ -25,7 +27,8 @@ export interface SubAgentConfig {
 export interface AgentEdge {
   from_node: string;
   to_node: string;
-  is_loop: boolean;  // True if this is a backward connection (loop)
+  is_loop: boolean;
+  output_path?: string;  // Which output path this edge corresponds to
 }
 
 /**
@@ -36,65 +39,142 @@ export interface AgentGraphConfig {
   edges: AgentEdge[];
   entry_point: string;
   exit_points: string[];
+  max_loop_iterations?: number;
 }
 
 /**
- * Convert visual agent builder representation to graph_config
+ * Classify which edges are back edges (loops) using DFS from a known start node.
+ * A back edge points to a node currently on the DFS recursion stack (an ancestor).
+ * Returns a Set of edge indices that are back edges.
+ */
+function classifyBackEdges(
+  startNodeId: string,
+  nodeIds: string[],
+  edges: { source: string; target: string }[]
+): Set<number> {
+  const adj = new Map<string, { target: string; edgeIndex: number }[]>();
+  for (const id of nodeIds) {
+    adj.set(id, []);
+  }
+  edges.forEach((edge, idx) => {
+    const list = adj.get(edge.source);
+    if (list) {
+      list.push({ target: edge.target, edgeIndex: idx });
+    }
+  });
+
+  const visited = new Set<string>();
+  const onStack = new Set<string>();
+  const backEdges = new Set<number>();
+
+  function dfs(node: string) {
+    visited.add(node);
+    onStack.add(node);
+
+    for (const { target, edgeIndex } of adj.get(node) || []) {
+      if (onStack.has(target)) {
+        backEdges.add(edgeIndex);
+      } else if (!visited.has(target)) {
+        dfs(target);
+      }
+    }
+
+    onStack.delete(node);
+  }
+
+  // Start DFS from the known entry point
+  dfs(startNodeId);
+
+  // Visit any disconnected nodes (shouldn't happen in a valid graph, but safe)
+  for (const id of nodeIds) {
+    if (!visited.has(id)) {
+      dfs(id);
+    }
+  }
+
+  return backEdges;
+}
+
+/**
+ * Convert visual agent builder representation to graph_config.
+ * Uses the Start node to determine the entry point, and DFS to classify loop edges.
  */
 export function buildAgentGraph(
   nodes: XYFlowNode[],
   edges: XYFlowEdge[]
 ): AgentGraphConfig {
-  // Build nodes config from agent builder nodes
+  // Find and validate the Start node
+  const startNode = nodes.find(n => n.type === 'startNode');
+  if (!startNode) {
+    throw new Error('No Start node found. The Start node determines which agent runs first.');
+  }
+
+  const startEdge = edges.find(e => e.source === startNode.id);
+  if (!startEdge) {
+    throw new Error('The Start node is not connected. Draw an edge from Start to the first agent.');
+  }
+
+  const entryPoint = startEdge.target;
+
+  // Filter to agent nodes only (exclude Start node)
+  const agentNodes = nodes.filter(n => n.type !== 'startNode');
+  const agentEdges = edges.filter(e => e.source !== startNode.id);
+
+  if (agentNodes.length === 0) {
+    throw new Error('No agent nodes found. Add at least one agent to the canvas.');
+  }
+
+  // Verify the Start node points to an actual agent node
+  if (!agentNodes.some(n => n.id === entryPoint)) {
+    throw new Error('The Start node must connect to an agent node.');
+  }
+
+  // Build nodes config from agent nodes
   const nodesConfig: Record<string, SubAgentConfig> = {};
 
-  nodes.forEach(node => {
-    if (node.type === 'agentBuilderNode') {
-      const subAgent: SubAgentConfig = {
-        agent_type: node.data.agentType || 'react',
-        name: node.data.name || 'Agent',
-        system_prompt: node.data.systemPrompt || '',
-        user_prompt: node.data.userPrompt || '',
-        llm_provider: node.data.llmProvider || '',
-        tool_ids: node.data.assignedTools || []
-      };
+  agentNodes.forEach(node => {
+    const subAgent: SubAgentConfig = {
+      agent_type: node.data.agentType || 'react',
+      name: node.data.name || 'Agent',
+      description: node.data.description || '',
+      system_prompt: node.data.system_prompt || '',
+      user_prompt: node.data.user_prompt || '',
+      llm_provider: node.data.llm_provider || '',
+      tool_ids: node.data.tool_ids || []
+    };
 
-      nodesConfig[node.id] = subAgent;
+    if (node.data.output_paths && Object.keys(node.data.output_paths).length > 0) {
+      subAgent.output_paths = node.data.output_paths;
     }
+
+    nodesConfig[node.id] = subAgent;
   });
 
-  // Build edges, detecting loops based on node positions
-  const edgesConfig: AgentEdge[] = edges.map(edge => {
-    const sourceNode = nodes.find(n => n.id === edge.source);
-    const targetNode = nodes.find(n => n.id === edge.target);
+  // Classify back edges via DFS from the entry point
+  const agentNodeIds = agentNodes.map(n => n.id);
+  const backEdgeIndices = classifyBackEdges(
+    entryPoint,
+    agentNodeIds,
+    agentEdges.map(e => ({ source: e.source, target: e.target }))
+  );
 
-    // Detect loop: if target is positioned to the left of source, it's a loop
-    const isLoop = !!(sourceNode && targetNode &&
-      targetNode.position.x < sourceNode.position.x);
-
-    return {
+  // Build edge configs with DFS-computed is_loop
+  const edgesConfig: AgentEdge[] = agentEdges.map((edge, idx) => {
+    const agentEdge: AgentEdge = {
       from_node: edge.source,
       to_node: edge.target,
-      is_loop: isLoop
+      is_loop: backEdgeIndices.has(idx)
     };
+
+    if (edge.sourceHandle) {
+      agentEdge.output_path = edge.sourceHandle;
+    }
+
+    return agentEdge;
   });
 
-  // Find entry point (node with no incoming edges, excluding loops)
+  // Find exit points (agent nodes with no outgoing forward edges)
   const forwardEdges = edgesConfig.filter(e => !e.is_loop);
-  const nodesWithIncoming = new Set(forwardEdges.map(e => e.to_node));
-  const agentNodes = nodes.filter(n => n.type === 'agentBuilderNode');
-  const entryNodes = agentNodes.filter(n => !nodesWithIncoming.has(n.id));
-
-  if (entryNodes.length === 0) {
-    throw new Error('No entry point found - all agent nodes have incoming edges');
-  }
-  if (entryNodes.length > 1) {
-    throw new Error(`Multiple entry points found: ${entryNodes.map(n => n.data.name || n.id).join(', ')}. The composed agent must have exactly one starting node.`);
-  }
-
-  const entryPoint = entryNodes[0].id;
-
-  // Find exit points (nodes with no outgoing forward edges)
   const nodesWithOutgoing = new Set(forwardEdges.map(e => e.from_node));
   const exitPoints = agentNodes
     .filter(n => !nodesWithOutgoing.has(n.id))
@@ -132,26 +212,27 @@ export function validateAgentGraph(
 ): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
-  // Check we have at least one node
-  const agentNodes = nodes.filter(n => n.type === 'agentBuilderNode');
+  // Exclude Start node from agent validation
+  const agentNodes = nodes.filter(n => n.type !== 'startNode');
+
   if (agentNodes.length === 0) {
     errors.push('No agent nodes found. Add at least one agent to the canvas.');
   }
 
-  // Check all nodes have required data
+  // Validate agent nodes have required data
   for (const node of agentNodes) {
     if (!node.data.agentType) {
       errors.push(`Node "${node.data.name || node.id}" has no agent type`);
     }
-    if (!node.data.systemPrompt) {
+    if (!node.data.system_prompt) {
       errors.push(`Node "${node.data.name || node.id}" has no system prompt`);
     }
-    if (!node.data.llmProvider) {
+    if (!node.data.llm_provider) {
       errors.push(`Node "${node.data.name || node.id}" has no LLM provider assigned`);
     }
   }
 
-  // Try building the graph to catch entry/exit point issues
+  // Try building the graph to catch Start node and topology issues
   if (agentNodes.length > 0) {
     try {
       buildAgentGraph(nodes, edges);
