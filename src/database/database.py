@@ -123,7 +123,7 @@ def update_agent(session: Any, agent_id: int, **kwargs) -> Optional[Agent]:
 
 def delete_agent(session: Any, agent_id: int) -> bool:
     """Delete an agent"""
-    agent = get_agent_by_id(agent_id)
+    agent = get_agent_by_id(session, agent_id)
     if agent:
         session.delete(agent)
         session.commit()
@@ -237,6 +237,7 @@ def delete_tool(session: Any, tool_id: int) -> bool:
         session.commit()
         return True
     return False
+
 
 ## Public items functions
 def get_public_agents(session: Any) -> List[Agent]:

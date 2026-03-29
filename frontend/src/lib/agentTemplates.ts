@@ -38,7 +38,10 @@ When creating a plan:
 - Consider potential challenges and edge cases
 - Ensure steps are appropriately sized (not too broad, not too granular)
 - Include validation checkpoints where appropriate`,
-    defaultUserPrompt: '{input}'
+    defaultUserPrompt: `{message_history}
+
+Create a plan for the following task:
+{input}`
   },
 
   react: {
@@ -62,7 +65,10 @@ Guidelines:
 - Handle errors gracefully and adapt your approach
 - Provide clear, informative responses
 - Know when to ask for clarification vs. making reasonable assumptions`,
-    defaultUserPrompt: '{input}'
+    defaultUserPrompt: `{message_history}
+
+Complete the following task:
+{input}`
   },
 
   reflection: {

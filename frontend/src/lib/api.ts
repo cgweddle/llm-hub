@@ -548,6 +548,36 @@ export async function deleteFlow(flowId: number): Promise<void> {
   }
 }
 
+export async function deleteAgent(agentId: number): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/agents/${agentId}`, {
+      method: 'DELETE'
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to delete agent: ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error('Error deleting agent:', error);
+    throw error;
+  }
+}
+
+export async function deleteTool(toolId: number): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/tools/${toolId}`, {
+      method: 'DELETE'
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to delete tool: ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error('Error deleting tool:', error);
+    throw error;
+  }
+}
+
 // Tool creation (generic/manual)
 export interface ToolCreate {
   name: string;

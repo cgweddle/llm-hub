@@ -24,7 +24,7 @@
   import { getAgentTemplatesList, getAgentTemplate, type AgentTypeKey } from '$lib/agentTemplates';
   import { buildAgentGraphConfig, validateAgentGraph } from '$lib/agentGraphBuilder';
   import { autoLayoutNodes } from '$lib/elkLayout';
-  import { createAgent, type Agent, type AgentCreateData } from '$lib/api';
+  import { createAgent, updateAgent, type Agent, type AgentCreateData } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
   import type { Viewport } from '@xyflow/svelte';
 
@@ -33,6 +33,7 @@
   const dispatch = createEventDispatcher<{
     back: void;
     agentCreated: Agent;
+    agentUpdated: Agent;
     configureNewAgent: { template: AgentTemplate };
   }>();
 
@@ -91,6 +92,7 @@
   $: llmProvidersStore.set(llmProviders);
 
   // Save dialog state
+  let loadedAgentId: number | null = null;
   let showSaveAgentDialog = false;
   let composedAgentName = '';
   let composedAgentDescription = '';
@@ -154,7 +156,7 @@
     user_prompt?: string;
     llm_provider: string;
     tool_ids: number[];
-    output_paths?: Record<string, string>;
+    output_paths?: Record<string, string | { description: string; return_behavior: string }>;
     agentType: AgentTypeKey;
   }) {
     // Calculate a default position based on existing nodes
@@ -191,6 +193,15 @@
     };
 
     agentNodes = [...agentNodes, newNode];
+  }
+
+  /**
+   * Update a node's data on the canvas (called from FullscreenNodeModal for unsaved nodes)
+   */
+  export function updateNodeData(nodeId: string, updatedData: any) {
+    agentNodes = agentNodes.map(n =>
+      n.id === nodeId ? { ...n, data: { ...n.data, ...updatedData } } : n
+    );
   }
 
   /**
@@ -238,6 +249,7 @@
    * Reconstructs XYFlow nodes/edges from graph_config, then auto-layouts with ELK.
    */
   export async function loadAgent(agent: Agent) {
+    loadedAgentId = agent.id;
     try {
       const config = agent.graph_config;
       if (!config?.nodes) {
@@ -260,6 +272,7 @@
             name: nodeConfig.name || nodeId,
             description: nodeConfig.description || '',
             system_prompt: nodeConfig.system_prompt || '',
+            user_prompt: nodeConfig.user_prompt || '',
             llm_provider: nodeConfig.llm_provider || '',
             tool_ids: nodeConfig.tool_ids || [],
             output_paths: nodeConfig.output_paths || undefined,
@@ -397,25 +410,37 @@
       const graphConfig = buildAgentGraphConfig(agentNodes, agentEdges);
       graphConfig.max_loop_iterations = maxLoopIterations;
 
-      const agentData: AgentCreateData = {
-        name: composedAgentName.trim(),
-        description: composedAgentDescription.trim() || `Composed agent with ${agentNodes.length} sub-agents`,
-        graph_config: graphConfig
-      };
+      let savedAgent: Agent;
+      const agentName = composedAgentName.trim();
+      const agentDescription = composedAgentDescription.trim() || `Composed agent with ${agentNodes.length} sub-agents`;
 
-      const createdAgent = await createAgent(userId, agentData);
-
-      showToastMessage(`Composed agent "${createdAgent.name}" created successfully!`, true);
+      if (loadedAgentId) {
+        savedAgent = await updateAgent(loadedAgentId, {
+          name: agentName,
+          description: agentDescription,
+          graph_config: graphConfig
+        });
+        showToastMessage(`Agent "${savedAgent.name}" updated successfully!`, true);
+        dispatch('agentUpdated', savedAgent);
+      } else {
+        const agentData: AgentCreateData = {
+          name: agentName,
+          description: agentDescription,
+          graph_config: graphConfig
+        };
+        savedAgent = await createAgent(userId, agentData);
+        showToastMessage(`Composed agent "${savedAgent.name}" created successfully!`, true);
+        dispatch('agentCreated', savedAgent);
+      }
 
       // Reset state
       showSaveAgentDialog = false;
+      loadedAgentId = null;
       composedAgentName = '';
       composedAgentDescription = '';
       agentNodes = [createStartNode()];
       agentEdges = [];
 
-      // Notify parent
-      dispatch('agentCreated', createdAgent);
       dispatch('back');
 
     } catch (error) {
@@ -432,6 +457,7 @@
     const agentCount = agentNodes.filter(n => n.type !== 'startNode').length;
     if (agentCount === 0) return;
     if (!confirm('Clear all agent nodes? This cannot be undone.')) return;
+    loadedAgentId = null;
     agentNodes = [createStartNode()];
     agentEdges = [];
   }
@@ -524,7 +550,7 @@
     <div class="actions-section">
       <Button size="sm" onclick={() => showSaveAgentDialog = true} class="w-full mb-2 bg-purple-600 hover:bg-purple-700" disabled={agentNodes.filter(n => n.type !== 'startNode').length === 0}>
         {#snippet children()}
-          Save Complex Agent
+          {loadedAgentId ? 'Update Agent' : 'Save Complex Agent'}
         {/snippet}
       </Button>
       <Button size="sm" onclick={clearCanvas} class="w-full" variant="outline" disabled={agentNodes.filter(n => n.type !== 'startNode').length === 0}>
@@ -579,7 +605,7 @@
   <div class="dialog-overlay" onclick={() => showSaveAgentDialog = false}>
     <div class="dialog-content" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-header">
-        <h3>Save Complex Agent</h3>
+        <h3>{loadedAgentId ? 'Update Agent' : 'Save Complex Agent'}</h3>
         <button class="dialog-close" onclick={() => showSaveAgentDialog = false}>×</button>
       </div>
 
@@ -610,7 +636,7 @@
       <div class="dialog-footer">
         <Button variant="outline" onclick={() => showSaveAgentDialog = false}>Cancel</Button>
         <Button onclick={saveComposedAgent} disabled={isSavingAgent || !composedAgentName.trim()} class="bg-purple-600 hover:bg-purple-700">
-          {isSavingAgent ? 'Saving...' : 'Save Agent'}
+          {isSavingAgent ? 'Saving...' : loadedAgentId ? 'Update' : 'Save'}
         </Button>
       </div>
     </div>

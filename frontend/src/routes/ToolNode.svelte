@@ -13,7 +13,7 @@
   // Reactive destructuring so variables update when data prop changes
   let name: string, description: string, script_code: string, main_function: string;
   let handles: string[], toolId: number, input_schema: any, output_schema: any, runtimeLLM: any;
-  let output_paths: Record<string, string> | undefined;
+  let output_paths: Record<string, any> | undefined;
   $: ({ name, description, script_code, main_function, handles = ['a'], toolId, input_schema, output_schema, runtimeLLM, output_paths } = data);
 
   // Get LLM providers from parent context (passed from +page.svelte)
@@ -59,7 +59,7 @@
   }
 
   // Compute output path entries for agent nodes with conditional routing
-  let outputPathEntries: Array<[string, string]> = [];
+  let outputPathEntries: Array<[string, any]> = [];
   $: {
     if (data.isAgent && output_paths && typeof output_paths === 'object') {
       outputPathEntries = Object.entries(output_paths);
@@ -113,6 +113,7 @@
           description,
           agentId: data.agentId,
           system_prompt: data.system_prompt || '',
+          user_prompt: data.user_prompt || '',
           llm_provider: data.llm_provider || '',
           tool_ids: data.tool_ids || [],
           graph_config: data.graph_config || {},
@@ -296,7 +297,7 @@
   <!-- Agent nodes with output paths: one handle per path -->
   {#each outputPathEntries as [pathName, pathDescription], index}
     <div class="output-handle-wrapper" style="top: {60 + index * 35}px;">
-      <span class="handle-label-outside output-label" title={pathDescription}>
+      <span class="handle-label-outside output-label" title={typeof pathDescription === 'string' ? pathDescription : pathDescription.description}>
         {pathName}
       </span>
       <Handle

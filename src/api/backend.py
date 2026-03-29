@@ -13,8 +13,8 @@ from src.database.database import (
     get_available_agents, get_available_tools, get_available_flows,
     get_public_agents, get_public_tools, get_public_flows,
     create_tool, get_user_tools, create_flow, get_user_flows,
-    get_tool_by_id, update_tool, get_flow_by_id, update_flow, delete_flow,
-    get_agent_by_id, update_agent,
+    get_tool_by_id, update_tool, delete_tool, get_flow_by_id, update_flow, delete_flow,
+    get_agent_by_id, update_agent, delete_agent,
     get_execution_by_id, get_user_executions
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
@@ -423,6 +423,19 @@ def update_agent_endpoint(agent_id: int, agent_update: AgentUpdate, db: Session 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
 
+@app.delete("/agents/{agent_id}")
+def delete_agent_endpoint(agent_id: int, db: Session = Depends(get_db)):
+    """Delete an agent"""
+    try:
+        success = delete_agent(db, agent_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return {"status": "success", "message": f"Agent {agent_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent deletion failed: {str(e)}")
+
 @app.post("/agents/generate-system-prompt")
 def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Session = Depends(get_db)):
     """Generate a system prompt for an agent using AI with streaming"""
@@ -713,6 +726,19 @@ def update_tool_endpoint(tool_id: int, tool_update: ToolUpdate, db: Session = De
         raise HTTPException(status_code=500, detail="Failed to update tool")
 
     return updated_tool
+
+@app.delete("/tools/{tool_id}")
+def delete_tool_endpoint(tool_id: int, db: Session = Depends(get_db)):
+    """Delete a tool"""
+    try:
+        success = delete_tool(db, tool_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Tool not found")
+        return {"status": "success", "message": f"Tool {tool_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tool deletion failed: {str(e)}")
 
 # Tool Validation endpoints
 @app.post("/tools/validate-two")

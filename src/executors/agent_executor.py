@@ -70,10 +70,18 @@ logger = logging.getLogger(__name__)
 logger.info(logger_init_msg)
 
 
-def _build_output_path_types(output_paths: Dict[str, str]):
+def _get_path_description(path_config) -> str:
+    """Extract description from an output path config (string or dict)."""
+    if isinstance(path_config, str):
+        return path_config
+    return path_config.get("description", "")
+
+
+def _build_output_path_types(output_paths: Dict[str, Any]):
     """Build dynamic Pydantic union types from output_paths config.
 
-    Given {"revise": "Draft needs work", "approve": "Draft is ready"},
+    Given {"revise": "Draft needs work", "approve": "Draft is ready"} or
+    {"revise": {"description": "...", "return_behavior": "node_output"}, ...},
     creates model classes Revise and Approve each with a 'content' field,
     and returns (union_type, {ClassName: path_name} mapping).
 
@@ -84,7 +92,8 @@ def _build_output_path_types(output_paths: Dict[str, str]):
 
     models = {}
     class_to_path = {}
-    for path_name, description in output_paths.items():
+    for path_name, path_config in output_paths.items():
+        description = _get_path_description(path_config)
         # Create a model class with the path name capitalized
         class_name = path_name.capitalize()
         model = create_model(
@@ -336,6 +345,13 @@ class AgentExecutor:
                         langfuse_client.flush()
                     else:
                         output, node_result_messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, predecessor_messages=predecessor_msgs)
+                    # Apply return behavior for the chosen path
+                    if chosen_path:
+                        node_output_paths = nodes_config[node_id].get("output_paths", {})
+                        path_config = node_output_paths.get(chosen_path, {})
+                        if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
+                            output = node_input
+
                     node_outputs[node_id] = output
                     if node_result_messages is not None:
                         messages = node_result_messages
@@ -505,7 +521,8 @@ class AgentExecutor:
         # Append routing instructions when output paths are configured
         if output_paths:
             routing_lines = ["\n\nYou must choose one of the following output paths:"]
-            for path_name, description in output_paths.items():
+            for path_name, path_config in output_paths.items():
+                description = _get_path_description(path_config)
                 routing_lines.append(f'- "{path_name.capitalize()}": {description}')
             system_prompt += "\n".join(routing_lines)
 

@@ -13,6 +13,7 @@
   export let allTools: Tool[] = [];
   export let onToolUpdated: ((nodeId: string, updatedData: any) => void) | undefined = undefined;
   export let onAgentUpdated: ((agentId: number, updatedData: any) => void) | undefined = undefined;
+  export let onNodeDataUpdated: ((nodeId: string, updatedData: any) => void) | undefined = undefined;
 
   // Resolve tool IDs to tool objects for agent display
   function getToolsByIds(toolIds: number[]): Tool[] {
@@ -31,9 +32,11 @@
   let editedAgentName = '';
   let editedAgentDescription = '';
   let editedAgentSystemPrompt = '';
+  let editedAgentUserPrompt = '';
   let editedAgentLLMConfig = '';
   let editedAgentToolIds: number[] = [];
-  let editedOutputPaths: Array<{name: string, description: string}> = [];
+  let editedOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
+  let userPromptBackdrop: HTMLDivElement;
 
   // Initialize agent edit state when entering edit mode
   function startEditingAgent() {
@@ -41,19 +44,21 @@
     editedAgentName = nodeData.data.name || '';
     editedAgentDescription = nodeData.data.description || '';
     editedAgentSystemPrompt = nodeData.data.system_prompt || '';
+    editedAgentUserPrompt = nodeData.data.user_prompt || '';
     editedAgentLLMConfig = nodeData.data.llm_provider || '';
     editedAgentToolIds = [...(nodeData.data.tool_ids || [])];
-    // Load output paths as array of {name, description}
+    // Load output paths as array of {name, description, return_behavior}
     const paths = nodeData.data.output_paths || {};
-    editedOutputPaths = Object.entries(paths).map(([name, description]) => ({
+    editedOutputPaths = Object.entries(paths).map(([name, pathConfig]) => ({
       name,
-      description: description as string
+      description: typeof pathConfig === 'string' ? pathConfig : pathConfig.description || '',
+      return_behavior: typeof pathConfig === 'string' ? 'node_output' : pathConfig.return_behavior || 'node_output'
     }));
     isEditingAgent = true;
   }
 
   function addOutputPath() {
-    editedOutputPaths = [...editedOutputPaths, { name: '', description: '' }];
+    editedOutputPaths = [...editedOutputPaths, { name: '', description: '', return_behavior: 'node_output' }];
   }
 
   function removeOutputPath(index: number) {
@@ -73,16 +78,54 @@
     }
   }
 
+  function buildOutputPathsFromEdited() {
+    return editedOutputPaths.filter(p => p.name.trim()).length > 0
+      ? Object.fromEntries(
+          editedOutputPaths
+            .filter(p => p.name.trim())
+            .map(p => [p.name.trim(), {
+              description: p.description.trim(),
+              return_behavior: p.return_behavior || 'node_output'
+            }])
+        )
+      : undefined;
+  }
+
   async function handleSaveAgent() {
+    isSavingAgent = true;
+    agentSaveError = false;
+
+    // No agentId means this is an unsaved node on the agent builder canvas.
+    // Update the node data locally instead of calling the backend.
     if (!nodeData?.data.agentId) {
-      agentSaveError = true;
-      agentSaveMessage = 'Cannot save: Agent ID not found';
+      const updatedData = {
+        ...nodeData.data,
+        name: editedAgentName,
+        label: editedAgentName,
+        description: editedAgentDescription,
+        system_prompt: editedAgentSystemPrompt,
+        user_prompt: editedAgentUserPrompt,
+        llm_provider: editedAgentLLMConfig,
+        tool_ids: [...editedAgentToolIds],
+        output_paths: buildOutputPathsFromEdited(),
+      };
+
+      // Update the store so the modal reflects changes immediately
+      nodeData.data = updatedData;
+      fullscreenNode.open({ ...nodeData, data: updatedData });
+
+      // Notify parent to update the canvas node
+      if (onNodeDataUpdated) {
+        onNodeDataUpdated(nodeData.nodeId, updatedData);
+      }
+
+      agentSaveError = false;
+      agentSaveMessage = 'Node updated';
+      isEditingAgent = false;
+      isSavingAgent = false;
       setTimeout(() => { agentSaveMessage = ''; }, 3000);
       return;
     }
-
-    isSavingAgent = true;
-    agentSaveError = false;
 
     try {
       // Rebuild graph_config from edited fields
@@ -99,15 +142,10 @@
             name: editedAgentName,
             description: editedAgentDescription,
             system_prompt: editedAgentSystemPrompt,
+            user_prompt: editedAgentUserPrompt,
             llm_provider: editedAgentLLMConfig,
             tool_ids: editedAgentToolIds,
-            ...(editedOutputPaths.length > 0 ? {
-              output_paths: Object.fromEntries(
-                editedOutputPaths
-                  .filter(p => p.name.trim())
-                  .map(p => [p.name.trim(), p.description.trim()])
-              )
-            } : {})
+            ...(buildOutputPathsFromEdited() ? { output_paths: buildOutputPathsFromEdited() } : {})
           }
         }
       };
@@ -674,6 +712,40 @@
             {/if}
           </div>
 
+          <!-- User Prompt -->
+          <div class="section">
+            <div class="section-label">User Prompt</div>
+            {#if isEditingAgent}
+              <div class="highlighted-textarea-container">
+                <div class="highlighted-textarea-backdrop" bind:this={userPromptBackdrop} aria-hidden="true">
+                  {@html editedAgentUserPrompt
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/\{input\}/g, '<span class="template-var">{input}</span>')
+                    .replace(/\{message_history\}/g, '<span class="template-var">{message_history}</span>')
+                  + '\n'}
+                </div>
+                <textarea
+                  class="highlighted-textarea"
+                  bind:value={editedAgentUserPrompt}
+                  placeholder="e.g. &#123;input&#125;"
+                  rows="6"
+                  style="min-height: 100px;"
+                  on:scroll={(e) => { if (userPromptBackdrop) userPromptBackdrop.scrollTop = e.currentTarget.scrollTop; }}
+                ></textarea>
+              </div>
+            {:else}
+              <pre class="system-prompt-text">{@html (nodeData.data.user_prompt || 'No user prompt configured')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\{input\}/g, '<span class="template-var-display">{input}</span>')
+                .replace(/\{message_history\}/g, '<span class="template-var-display">{message_history}</span>')
+              }</pre>
+            {/if}
+          </div>
+
           <!-- LLM Configuration -->
           <div class="section">
             <div class="section-label">LLM Configuration</div>
@@ -750,6 +822,13 @@
                       bind:value={path.description}
                       placeholder="When to choose this path"
                     />
+                    <select
+                      class="output-path-behavior"
+                      bind:value={path.return_behavior}
+                    >
+                      <option value="node_output">Node Output</option>
+                      <option value="previous_output">Previous Output</option>
+                    </select>
                     <button class="output-path-remove" on:click={() => removeOutputPath(index)}>
                       &times;
                     </button>
@@ -764,7 +843,10 @@
                 {#each Object.entries(nodeData.data.output_paths) as [pathName, pathDesc]}
                   <div class="output-path-display">
                     <span class="output-path-badge">{pathName}</span>
-                    <span class="output-path-desc-text">{pathDesc}</span>
+                    <span class="output-path-desc-text">{typeof pathDesc === 'string' ? pathDesc : pathDesc.description}</span>
+                    <span class="output-path-behavior-badge {typeof pathDesc === 'object' && pathDesc.return_behavior === 'previous_output' ? 'previous' : 'node'}">
+                      {typeof pathDesc === 'object' && pathDesc.return_behavior === 'previous_output' ? 'Previous Output' : 'Node Output'}
+                    </span>
                   </div>
                 {/each}
               </div>
@@ -1376,6 +1458,80 @@
     border-color: #007acc;
   }
 
+  .highlighted-textarea-container {
+    position: relative;
+    background: #1e1e1e;
+    border-radius: 4px;
+  }
+
+  .highlighted-textarea-backdrop,
+  .highlighted-textarea {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    letter-spacing: normal;
+    word-spacing: normal;
+    tab-size: 4;
+    padding: 16px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    margin: 0;
+  }
+
+  .highlighted-textarea-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow: auto;
+    color: #cccccc;
+    pointer-events: none;
+    scrollbar-width: none;
+  }
+
+  .highlighted-textarea-backdrop::-webkit-scrollbar {
+    display: none;
+  }
+
+  .highlighted-textarea {
+    background: transparent !important;
+    color: transparent;
+    caret-color: #cccccc;
+    position: relative;
+    z-index: 1;
+    resize: vertical;
+    width: 100%;
+    outline: none;
+    border-color: #3e3e42;
+  }
+
+  .highlighted-textarea:focus {
+    border-color: #007acc;
+  }
+
+  .highlighted-textarea::placeholder {
+    color: #6e6e6e;
+  }
+
+  .highlighted-textarea::selection {
+    background: rgba(0, 122, 204, 0.4);
+    color: transparent;
+  }
+
+  .highlighted-textarea-backdrop :global(.template-var) {
+    color: #4ec9b0;
+    font-weight: 600;
+  }
+
+  .system-prompt-text :global(.template-var-display) {
+    color: #4ec9b0;
+    font-weight: 600;
+  }
+
   /* Output Paths */
   .output-paths-list {
     display: flex;
@@ -1411,8 +1567,21 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
 
+  .output-path-behavior {
+    width: 150px;
+    flex-shrink: 0;
+    padding: 6px 10px;
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    color: #cccccc;
+    font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
   .output-path-name:focus,
-  .output-path-description:focus {
+  .output-path-description:focus,
+  .output-path-behavior:focus {
     outline: none;
     border-color: #007acc;
   }
@@ -1472,5 +1641,23 @@
   .output-path-desc-text {
     color: #a0a0a0;
     font-size: 13px;
+  }
+
+  .output-path-behavior-badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: auto;
+  }
+
+  .output-path-behavior-badge.node {
+    background: #1a3a1a;
+    color: #4ec94e;
+  }
+
+  .output-path-behavior-badge.previous {
+    background: #1a3a5c;
+    color: #4ec9b0;
   }
 </style>

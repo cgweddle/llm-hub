@@ -42,6 +42,8 @@
     executeFlow,
     getFlowDetails,
     deleteFlow,
+    deleteAgent,
+    deleteTool,
     createPythonScriptTool,
     generateToolCodeStream,
     editToolCodeStream,
@@ -139,7 +141,8 @@
   let showGeneratePromptAI = false;
   let promptAdditionalInstructions = '';
   let isGeneratingPrompt = false;
-  let newAgentOutputPaths: Array<{name: string, description: string}> = [];
+  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
+  let createAgentUserPromptBackdrop: HTMLDivElement;
   let isConfiguringComplexNode = false;
   let pendingAgentTemplate: AgentTemplate | null = null;
   let agentBuilderRef: AgentBuilder;
@@ -757,6 +760,44 @@
     }
   }
 
+  async function handleDeleteAgent(agentId: number, agentName: string, event: Event) {
+    event.stopPropagation();
+    if (!confirm(`Are you sure you want to delete "${agentName}"?`)) return;
+
+    try {
+      await deleteAgent(agentId);
+      data.agents = data.agents.filter(a => a.id !== agentId);
+      validationSuccess = true;
+      validationMessage = `Agent "${agentName}" deleted successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to delete agent: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
+  async function handleDeleteTool(toolId: number, toolName: string, event: Event) {
+    event.stopPropagation();
+    if (!confirm(`Are you sure you want to delete "${toolName}"?`)) return;
+
+    try {
+      await deleteTool(toolId);
+      data.tools = data.tools.filter(t => t.id !== toolId);
+      validationSuccess = true;
+      validationMessage = `Tool "${toolName}" deleted successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to delete tool: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
   /**
    * Create a new tool
    */
@@ -1120,7 +1161,10 @@
                 output_paths: Object.fromEntries(
                   newAgentOutputPaths
                     .filter(p => p.name.trim())
-                    .map(p => [p.name.trim(), p.description.trim()])
+                    .map(p => [p.name.trim(), {
+                      description: p.description.trim(),
+                      return_behavior: p.return_behavior
+                    }])
                 )
               } : {})
             }
@@ -1262,7 +1306,7 @@
   }
 
   function addAgentOutputPath() {
-    newAgentOutputPaths = [...newAgentOutputPaths, { name: '', description: '' }];
+    newAgentOutputPaths = [...newAgentOutputPaths, { name: '', description: '', return_behavior: 'node_output' }];
   }
 
   function removeAgentOutputPath(index: number) {
@@ -1315,6 +1359,21 @@
     pendingAgentTemplate = null;
   }
 
+  function handleNodeDataUpdated(nodeId: string, updatedData: any) {
+    // Update agent builder canvas nodes (for unsaved nodes edited via modal)
+    if (currentMode === 'agent' && agentBuilderRef) {
+      agentBuilderRef.updateNodeData(nodeId, updatedData);
+    }
+    // Update flow canvas nodes
+    nodes = nodes.map(n =>
+      n.id === nodeId ? { ...n, data: { ...n.data, ...updatedData } } : n
+    );
+  }
+
+  function handleAgentUpdatedFromBuilder(event: CustomEvent<Agent>) {
+    data.agents = data.agents.map(a => a.id === event.detail.id ? event.detail : a);
+  }
+
   // Agent Builder handlers
   function enterAgentBuilderMode() {
     builderMode.setAgent();
@@ -1357,7 +1416,10 @@
       ? Object.fromEntries(
           newAgentOutputPaths
             .filter(p => p.name.trim())
-            .map(p => [p.name.trim(), p.description.trim()])
+            .map(p => [p.name.trim(), {
+              description: p.description.trim(),
+              return_behavior: p.return_behavior
+            }])
         )
       : undefined;
 
@@ -1458,13 +1520,20 @@
             Create New Tool
           {/snippet}
         </Button>
-        {#each availableTools as tool}
+        {#each data.tools as tool}
           <div
-            class="draggable-node"
+            class="sidebar-item"
             draggable="true"
-            ondragstart={(event) => event.dataTransfer?.setData('text/plain', tool)}
+            ondragstart={(event) => event.dataTransfer?.setData('text/plain', tool.name)}
           >
-            {tool}
+            <span class="sidebar-item-name">{tool.name}</span>
+            <button
+              class="sidebar-item-delete"
+              onclick={(e) => handleDeleteTool(tool.id, tool.name, e)}
+              title="Delete tool"
+            >
+              ×
+            </button>
           </div>
         {/each}
       </div>
@@ -1485,16 +1554,25 @@
         </div>
         {#each data.agents as agent}
           <div
-            class="draggable-node"
+            class="sidebar-item"
             draggable="true"
             ondragstart={(event) => event.dataTransfer?.setData('text/plain', agent.name)}
             onclick={() => openAgentDetails(agent)}
             title="Click to view details, drag to add to canvas"
           >
-            {agent.name}
-            {#if agent.graph_config && Object.keys(agent.graph_config.nodes || {}).length > 1}
-              <span class="composed-badge">⚡</span>
-            {/if}
+            <span class="sidebar-item-name">
+              {agent.name}
+              {#if agent.graph_config && Object.keys(agent.graph_config.nodes || {}).length > 1}
+                <span class="composed-badge">⚡</span>
+              {/if}
+            </span>
+            <button
+              class="sidebar-item-delete"
+              onclick={(e) => handleDeleteAgent(agent.id, agent.name, e)}
+              title="Delete agent"
+            >
+              ×
+            </button>
           </div>
         {/each}
       </div>
@@ -1622,6 +1700,7 @@
       userId={data.user?.id || 1}
       on:back={handleAgentBuilderBack}
       on:agentCreated={handleAgentCreated}
+      on:agentUpdated={handleAgentUpdatedFromBuilder}
       on:configureNewAgent={handleConfigureNewAgent}
     />
   {/if}
@@ -1658,7 +1737,7 @@
   {/if}
 
   <!-- Fullscreen Node Modal -->
-  <FullscreenNodeModal {llmProviders} allTools={data.tools} onToolUpdated={handleToolUpdated} onAgentUpdated={handleAgentUpdated} />
+  <FullscreenNodeModal {llmProviders} allTools={data.tools} onToolUpdated={handleToolUpdated} onAgentUpdated={handleAgentUpdated} onNodeDataUpdated={handleNodeDataUpdated} />
 
 
   <!-- Create Tool Modal -->
@@ -1924,7 +2003,7 @@
               Use &#123;input&#125; where the runtime input should appear. Use &#123;message_history&#125; to include the full conversation history from previous nodes.
             </div>
             <div class="highlighted-textarea-container">
-              <div class="highlighted-textarea-backdrop" aria-hidden="true">
+              <div class="highlighted-textarea-backdrop" bind:this={createAgentUserPromptBackdrop} aria-hidden="true">
                 {@html newAgentUserPrompt
                   .replace(/&/g, '&amp;')
                   .replace(/</g, '&lt;')
@@ -1939,6 +2018,7 @@
                 placeholder="e.g. &#123;input&#125;"
                 rows="4"
                 style="min-height: 80px;"
+                onscroll={(e) => { if (createAgentUserPromptBackdrop) createAgentUserPromptBackdrop.scrollTop = e.currentTarget.scrollTop; }}
               ></textarea>
             </div>
           </div>
@@ -2073,6 +2153,13 @@
                       bind:value={path.description}
                       placeholder="When to choose this path"
                     />
+                    <select
+                      class="create-tool-input output-path-behavior"
+                      bind:value={path.return_behavior}
+                    >
+                      <option value="node_output">Node Output</option>
+                      <option value="previous_output">Previous Output</option>
+                    </select>
                     <button class="output-path-remove" onclick={() => removeAgentOutputPath(index)}>
                       &times;
                     </button>
@@ -2214,6 +2301,51 @@
     background: white;
     border: 1px solid #ccc;
     cursor: grab;
+  }
+
+  .sidebar-item {
+    padding: 5px 8px;
+    margin: 5px 0;
+    background: white;
+    border: 1px solid #ccc;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .sidebar-item:hover {
+    background: #e8f4f8;
+  }
+
+  .sidebar-item-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-item-delete {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .sidebar-item-delete:hover {
+    background: #ff4444;
+    color: white;
   }
 
   .flow-container {
@@ -2713,9 +2845,14 @@
     left: 0;
     right: 0;
     bottom: 0;
-    overflow: hidden;
+    overflow: auto;
     color: #d4d4d4;
     pointer-events: none;
+    scrollbar-width: none;
+  }
+
+  .highlighted-textarea-backdrop::-webkit-scrollbar {
+    display: none;
   }
 
   .highlighted-textarea {
@@ -2898,6 +3035,11 @@
 
   .output-path-description {
     flex: 1;
+  }
+
+  .output-path-behavior {
+    width: 150px;
+    flex-shrink: 0;
   }
 
   .output-path-remove {

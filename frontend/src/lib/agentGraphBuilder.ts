@@ -18,7 +18,7 @@ export interface SubAgentConfig {
   user_prompt: string;
   llm_provider: string;
   tool_ids: number[];
-  output_paths?: Record<string, string>;  // path_name → description for conditional routing
+  output_paths?: Record<string, string | { description: string; return_behavior: string }>;  // path_name → config for conditional routing
 }
 
 /**
