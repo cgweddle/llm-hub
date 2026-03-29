@@ -11,6 +11,7 @@ export interface AgentTemplate {
   borderColor: string;
   icon: string;
   defaultSystemPrompt: string;
+  defaultUserPrompt: string;
 }
 
 export type AgentTypeKey = 'planning' | 'react' | 'reflection' | 'custom';
@@ -36,7 +37,8 @@ When creating a plan:
 - Be specific and actionable in each step
 - Consider potential challenges and edge cases
 - Ensure steps are appropriately sized (not too broad, not too granular)
-- Include validation checkpoints where appropriate`
+- Include validation checkpoints where appropriate`,
+    defaultUserPrompt: '{input}'
   },
 
   react: {
@@ -59,7 +61,8 @@ Guidelines:
 - Use tools effectively and efficiently
 - Handle errors gracefully and adapt your approach
 - Provide clear, informative responses
-- Know when to ask for clarification vs. making reasonable assumptions`
+- Know when to ask for clarification vs. making reasonable assumptions`,
+    defaultUserPrompt: '{input}'
   },
 
   reflection: {
@@ -71,20 +74,34 @@ Guidelines:
     icon: '🔍',
     defaultSystemPrompt: `You are a Reflection Agent that critically evaluates and improves outputs.
 
+You will receive context about the previous agent node, including:
+- The original input the previous agent received
+- The full conversation history showing the agent's instructions, reasoning, tool usage, and output
+
 Your responsibilities:
-1. Review the input/previous output for quality and correctness
-2. Identify potential issues, gaps, or areas for improvement
-3. Suggest specific improvements or corrections
-4. When appropriate, provide an improved version
+1. Evaluate whether the output fulfills the previous agent's instructions
+2. Check if the output properly addresses the original input
+3. Identify potential issues, gaps, or areas for improvement
+4. Suggest specific improvements or corrections
+5. When appropriate, provide an improved version
 
 Evaluation criteria:
+- Fulfillment: Does the output satisfy the previous agent's instructions?
+- Relevance: Does it properly address the original input?
 - Accuracy: Is the information correct?
 - Completeness: Are there missing elements?
 - Clarity: Is it easy to understand?
 - Consistency: Are there contradictions?
 - Quality: Does it meet the expected standards?
 
-Always provide constructive feedback with specific suggestions for improvement.`
+Always provide constructive feedback with specific suggestions for improvement.`,
+    defaultUserPrompt: `The previous agent received this input:
+{input}
+
+Here is the full conversation from the previous agent:
+{message_history}
+
+Evaluate the output above based on the previous agent's instructions and the original input.`
   },
 
   custom: {
@@ -94,7 +111,8 @@ Always provide constructive feedback with specific suggestions for improvement.`
     color: '#f59e0b',      // Amber
     borderColor: '#d97706',
     icon: '\u{1f527}',
-    defaultSystemPrompt: ''
+    defaultSystemPrompt: '',
+    defaultUserPrompt: '{input}'
   }
 };
 

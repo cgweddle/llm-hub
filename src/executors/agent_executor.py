@@ -32,7 +32,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from database.database import get_agent_by_id, get_tool_by_id, create_execution, update_execution
 from database.database_setup import Execution
-from utils.prompt_template import resolve_system_prompt_template
+from utils.prompt_template import resolve_system_prompt_template, resolve_user_prompt_template
 
 # Import retry utilities
 try:
@@ -295,7 +295,7 @@ class AgentExecutor:
         # Track execution
         execution_trace = []
         node_outputs: Dict[str, Any] = {}
-        node_messages: Dict[str, List] = {}  # node_id → PydanticAI message history for loop iterations
+        messages: List = []  # Accumulating PydanticAI message history across all nodes
         loop_counts: Dict[tuple, int] = {}
         step_sequence = 0
 
@@ -318,8 +318,7 @@ class AgentExecutor:
                 chosen_path = None
                 try:
                     trace_id = None
-                    # Pass message_history for loop iterations (None on first visit)
-                    history = node_messages.get(node_id)
+                    predecessor_msgs = messages if messages else None
 
                     if LANGFUSE_AVAILABLE and langfuse_observe:
                         # Capture trace ID even if the agent fails
@@ -329,17 +328,17 @@ class AgentExecutor:
                         async def _observed_run():
                             nonlocal _captured_trace_id
                             _captured_trace_id = langfuse_client.get_current_trace_id()
-                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, message_history=history)
+                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, predecessor_messages=predecessor_msgs)
                             return result
 
-                        output, messages, chosen_path = await _observed_run()
+                        output, node_result_messages, chosen_path = await _observed_run()
                         trace_id = _captured_trace_id
                         langfuse_client.flush()
                     else:
-                        output, messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, message_history=history)
+                        output, node_result_messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, predecessor_messages=predecessor_msgs)
                     node_outputs[node_id] = output
-                    if messages is not None:
-                        node_messages[node_id] = messages
+                    if node_result_messages is not None:
+                        messages = node_result_messages
 
                     execution_trace.append({
                         "node": node_id,
@@ -443,12 +442,12 @@ class AgentExecutor:
 
     async def _run_sub_agent(
         self, node_id: str, node_config: Dict, node_input: str,
-        message_history: Optional[List] = None
+        predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, Optional[List], Optional[str]]:
         """
         Create and run a sub-agent for a single graph node.
         Returns (output_text, messages, chosen_path) where:
-        - messages is the PydanticAI message history for loop iterations
+        - messages is the PydanticAI message history (all_messages() from the run)
         - chosen_path is the output path name (None if no output_paths configured)
         Internal tracing is handled by LangFuse.
         """
@@ -457,26 +456,33 @@ class AgentExecutor:
             f"(type: {node_config.get('agent_type')})"
         )
 
-        return await self._run_pydanticai_node(node_config, node_input, message_history=message_history)
+        return await self._run_pydanticai_node(node_config, node_input, predecessor_messages=predecessor_messages)
 
     @staticmethod
-    def _apply_user_prompt(node_config: Dict, node_input: str) -> str:
-        """Prepend user_prompt to node_input when present."""
+    def _apply_user_prompt(node_config: Dict, node_input: str,
+                           predecessor_messages: Optional[List] = None) -> str:
+        """Resolve user_prompt templates into the final user message.
+
+        If the user_prompt contains {input}, it replaces it with node_input
+        and the resolved template IS the user message. If no user_prompt is
+        set, node_input is used directly."""
         user_prompt = node_config.get("user_prompt", "").strip()
         if user_prompt:
-            return f"{user_prompt}\n\n{node_input}"
+            return resolve_user_prompt_template(
+                user_prompt, node_input, predecessor_messages
+            )
         return node_input
 
     async def _run_pydanticai_node(
         self, node_config: Dict, node_input: str,
-        message_history: Optional[List] = None
+        predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, List, Optional[str]]:
         """Run a PydanticAI sub-agent. Returns (output_text, all_messages, chosen_path).
         chosen_path is None for nodes without output_paths.
         LangFuse auto-captures internal tool calls and LLM I/O."""
         from pydantic_ai import Agent
 
-        node_input = self._apply_user_prompt(node_config, node_input)
+        node_input = self._apply_user_prompt(node_config, node_input, predecessor_messages)
 
         llm_provider = node_config.get("llm_provider", "")
         model_name = self._resolve_model_name(llm_provider)
@@ -518,7 +524,7 @@ class AgentExecutor:
 
         # Run with retry if enabled
         async def run():
-            return await sub_agent.run(node_input, message_history=message_history)
+            return await sub_agent.run(node_input)
 
         if self.enable_retry:
             def on_retry(attempt, exception, delay):

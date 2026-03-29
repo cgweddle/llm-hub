@@ -1,15 +1,21 @@
 """
-System prompt template resolver.
+Prompt template resolvers.
 
-Resolves placeholders in agent system prompts at runtime:
+System prompt placeholders (resolved at agent creation):
   {AGENT_NAME}        → node name
   {AGENT_DESCRIPTION} → node description
   {TOOLS_SECTION}     → formatted list of tool names
+
+User prompt placeholders (resolved at execution time):
+  {input}             → node_input text (preceding node's output or user's runtime input)
+  {message_history}   → serialized PydanticAI message history from previous nodes
 
 Backward compatible: prompts without placeholders pass through unchanged.
 """
 
 from typing import Any, Dict, List, Optional
+
+from utils.message_serializer import serialize_messages
 
 
 def resolve_system_prompt_template(
@@ -43,5 +49,33 @@ def resolve_system_prompt_template(
         tools_section = "This agent has no specific tools assigned."
 
     result = result.replace("{TOOLS_SECTION}", tools_section)
+
+    return result
+
+
+def resolve_user_prompt_template(
+    user_prompt: str,
+    node_input: str,
+    predecessor_messages: Optional[List] = None,
+) -> str:
+    """
+    Replace template placeholders in a user prompt with runtime values.
+
+    Args:
+        user_prompt: Raw user prompt, possibly containing {input} and {message_history}.
+        node_input: The node's input text (preceding node's output or user's runtime input).
+        predecessor_messages: Accumulated PydanticAI messages from previous nodes.
+
+    Returns:
+        User prompt with placeholders resolved.
+    """
+    result = user_prompt
+
+    result = result.replace("{input}", node_input)
+
+    if predecessor_messages:
+        result = result.replace("{message_history}", serialize_messages(predecessor_messages))
+    else:
+        result = result.replace("{message_history}", "")
 
     return result

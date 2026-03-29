@@ -47,6 +47,7 @@
     editToolCodeStream,
     createAgent,
     generateSystemPromptStream,
+    generateUserPromptStream,
     type ValidationResult,
     type ConnectionValidationResult,
     type Tool,
@@ -131,6 +132,7 @@
   let newAgentName = '';
   let newAgentDescription = '';
   let newAgentSystemPrompt = '';
+  let newAgentUserPrompt = '{input}';
   let newAgentSelectedTools: number[] = [];
   let newAgentLLMProvider = '';
   let isCreatingAgent = false;
@@ -1089,6 +1091,14 @@
       return;
     }
 
+    if (!newAgentUserPrompt.includes('{input}')) {
+      validationSuccess = false;
+      validationMessage = 'User prompt must contain {input} so the agent receives runtime input';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
+
     try {
       isCreatingAgent = true;
 
@@ -1103,6 +1113,7 @@
               name: newAgentName.trim(),
               description: newAgentDescription.trim(),
               system_prompt: newAgentSystemPrompt.trim(),
+              user_prompt: newAgentUserPrompt.trim(),
               llm_provider: newAgentLLMProvider || '',
               tool_ids: newAgentSelectedTools,
               ...(newAgentOutputPaths.filter(p => p.name.trim()).length > 0 ? {
@@ -1173,42 +1184,66 @@
     try {
       isGeneratingPrompt = true;
       newAgentSystemPrompt = '';
+      newAgentUserPrompt = '';
 
       // Get selected tool names
       const selectedToolNames = data.tools
         .filter((t: Tool) => newAgentSelectedTools.includes(t.id))
         .map((t: Tool) => t.name);
 
+      const requestData = {
+        agent_name: newAgentName.trim(),
+        agent_description: newAgentDescription.trim(),
+        tool_names: selectedToolNames,
+        model: selectedLLMProvider.name,
+        additional_instructions: promptAdditionalInstructions.trim() || undefined
+      };
+
+      // Pass 1: Generate system prompt
+      let generatedSystemPrompt = '';
+
       await generateSystemPromptStream(
-        {
-          agent_name: newAgentName.trim(),
-          agent_description: newAgentDescription.trim(),
-          tool_names: selectedToolNames,
-          model: selectedLLMProvider.name,
-          additional_instructions: promptAdditionalInstructions.trim() || undefined
-        },
-        // onChunk
+        requestData,
         (chunk: string) => {
           newAgentSystemPrompt += chunk;
         },
-        // onDone
         (systemPrompt: string) => {
           newAgentSystemPrompt = systemPrompt;
-          validationSuccess = true;
-          validationMessage = 'System prompt generated successfully!';
-          showValidationToast = true;
-          setTimeout(() => { showValidationToast = false; }, 3000);
-          isGeneratingPrompt = false;
+          generatedSystemPrompt = systemPrompt;
         },
-        // onError
         (error: string) => {
           validationSuccess = false;
-          validationMessage = `Failed to generate prompt: ${error}`;
+          validationMessage = `Failed to generate system prompt: ${error}`;
           showValidationToast = true;
           setTimeout(() => { showValidationToast = false; }, 5000);
           isGeneratingPrompt = false;
         }
       );
+
+      // Pass 2: Generate user prompt (aware of the system prompt)
+      if (generatedSystemPrompt) {
+        await generateUserPromptStream(
+          { ...requestData, generated_system_prompt: generatedSystemPrompt },
+          (chunk: string) => {
+            newAgentUserPrompt += chunk;
+          },
+          (userPrompt: string) => {
+            newAgentUserPrompt = userPrompt;
+            validationSuccess = true;
+            validationMessage = 'System and user prompts generated successfully!';
+            showValidationToast = true;
+            setTimeout(() => { showValidationToast = false; }, 3000);
+            isGeneratingPrompt = false;
+          },
+          (error: string) => {
+            validationSuccess = false;
+            validationMessage = `Failed to generate user prompt: ${error}`;
+            showValidationToast = true;
+            setTimeout(() => { showValidationToast = false; }, 5000);
+            isGeneratingPrompt = false;
+          }
+        );
+      }
     } catch (error) {
       validationSuccess = false;
       validationMessage = `Failed to generate prompt: ${error}`;
@@ -1269,6 +1304,7 @@
     newAgentName = '';
     newAgentDescription = '';
     newAgentSystemPrompt = '';
+    newAgentUserPrompt = '{input}';
     newAgentSelectedTools = [];
     newAgentLLMProvider = '';
     showGeneratePromptAI = false;
@@ -1299,6 +1335,7 @@
     newAgentName = template.name;
     newAgentDescription = template.description;
     newAgentSystemPrompt = template.defaultSystemPrompt;
+    newAgentUserPrompt = template.defaultUserPrompt;
     newAgentSelectedTools = [];
     newAgentLLMProvider = '';
     newAgentOutputPaths = [];
@@ -1307,6 +1344,14 @@
 
   function handleAddNodeToCanvas() {
     if (!pendingAgentTemplate) return;
+
+    if (!newAgentUserPrompt.includes('{input}')) {
+      validationSuccess = false;
+      validationMessage = 'User prompt must contain {input} so the agent receives runtime input';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
 
     const outputPaths = newAgentOutputPaths.filter(p => p.name.trim()).length > 0
       ? Object.fromEntries(
@@ -1320,6 +1365,7 @@
       name: newAgentName.trim(),
       description: newAgentDescription.trim(),
       system_prompt: newAgentSystemPrompt.trim(),
+      user_prompt: newAgentUserPrompt.trim(),
       llm_provider: newAgentLLMProvider || '',
       tool_ids: newAgentSelectedTools,
       output_paths: outputPaths,
@@ -1869,6 +1915,32 @@
               rows="10"
               style="min-height: 200px;"
             ></textarea>
+          </div>
+
+          <!-- User Prompt Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">User Prompt</div>
+            <div class="create-tool-helper-text" style="margin-bottom: 8px;">
+              Use &#123;input&#125; where the runtime input should appear. Use &#123;message_history&#125; to include the full conversation history from previous nodes.
+            </div>
+            <div class="highlighted-textarea-container">
+              <div class="highlighted-textarea-backdrop" aria-hidden="true">
+                {@html newAgentUserPrompt
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/\{input\}/g, '<span class="template-var">{input}</span>')
+                  .replace(/\{message_history\}/g, '<span class="template-var">{message_history}</span>')
+                + '\n'}
+              </div>
+              <textarea
+                class="highlighted-textarea"
+                bind:value={newAgentUserPrompt}
+                placeholder="e.g. &#123;input&#125;"
+                rows="4"
+                style="min-height: 80px;"
+              ></textarea>
+            </div>
           </div>
 
           <!-- Generate with AI Section -->
@@ -2610,6 +2682,71 @@
 
   .create-tool-textarea::placeholder {
     color: #6e6e6e;
+  }
+
+  .highlighted-textarea-container {
+    position: relative;
+    background: #2d2d30;
+    border-radius: 4px;
+  }
+
+  .highlighted-textarea-backdrop,
+  .highlighted-textarea {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    letter-spacing: normal;
+    word-spacing: normal;
+    tab-size: 4;
+    padding: 10px 12px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    margin: 0;
+  }
+
+  .highlighted-textarea-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow: hidden;
+    color: #d4d4d4;
+    pointer-events: none;
+  }
+
+  .highlighted-textarea {
+    background: transparent !important;
+    color: transparent;
+    caret-color: #d4d4d4;
+    position: relative;
+    z-index: 1;
+    resize: vertical;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.2s;
+    border-color: #3e3e42;
+  }
+
+  .highlighted-textarea:focus {
+    border-color: #007acc;
+  }
+
+  .highlighted-textarea::placeholder {
+    color: #6e6e6e;
+  }
+
+  .highlighted-textarea::selection {
+    background: rgba(0, 122, 204, 0.4);
+    color: transparent;
+  }
+
+  .highlighted-textarea-backdrop :global(.template-var) {
+    color: #4ec9b0;
+    font-weight: 600;
   }
 
   .create-tool-code-container {

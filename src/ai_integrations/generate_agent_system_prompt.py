@@ -27,6 +27,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 
 PROMPT_NAME = "agent_prompt_gen"
+USER_PROMPT_GEN_NAME = "agent_user_prompt_gen"
 
 
 def generate_system_prompt_stream(
@@ -149,10 +150,14 @@ def generate_user_prompt_stream(
     agent_description: str,
     tool_names: List[str],
     llm_model: str,
+    generated_system_prompt: str,
     additional_instructions: Optional[str] = None
 ) -> Iterator[str]:
     """
     Generate a task-specific user prompt for an agent using LLM with streaming.
+
+    Uses a separate prompt template (agent_user_prompt_gen) that is aware of
+    the agent's system prompt, so the user prompt complements it without overlap.
 
     Args:
         session: Database session
@@ -160,17 +165,18 @@ def generate_user_prompt_stream(
         agent_description: Description of what the agent does
         tool_names: List of tool names available to the agent
         llm_model: Config name from ~/.llm_hub/config.yaml
+        generated_system_prompt: The already-generated system prompt for this agent
         additional_instructions: Optional extra instructions
 
     Yields:
         JSON strings with streaming updates
     """
-    # 1. Query prompts from database
-    prompt_record = get_prompt_by_name(session, PROMPT_NAME)
+    # 1. Query user prompt generation template from database
+    prompt_record = get_prompt_by_name(session, USER_PROMPT_GEN_NAME)
 
     if not prompt_record:
         yield json.dumps({
-            "error": f"Prompt '{PROMPT_NAME}' not found in database. "
+            "error": f"Prompt '{USER_PROMPT_GEN_NAME}' not found in database. "
                      "Run 'python src/prompts/upload_prompts.py' to upload prompts."
         }) + "\n"
         return
@@ -205,11 +211,12 @@ def generate_user_prompt_stream(
     else:
         additional_section = ""
 
-    # 4. Fill placeholders in user prompt
+    # 4. Fill placeholders in user prompt template
     user_prompt_filled = user_prompt_template.replace("{AGENT_NAME}", agent_name)
     user_prompt_filled = user_prompt_filled.replace("{AGENT_DESCRIPTION}", agent_description)
     user_prompt_filled = user_prompt_filled.replace("{TOOLS_SECTION}", tools_section)
     user_prompt_filled = user_prompt_filled.replace("{ADDITIONAL_SECTION}", additional_section)
+    user_prompt_filled = user_prompt_filled.replace("{SYSTEM_PROMPT}", generated_system_prompt)
 
     # 5. Prepare LLM credentials
     llm_api_key = api_key

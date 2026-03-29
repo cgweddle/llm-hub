@@ -252,6 +252,14 @@ class SystemPromptGenerateRequest(BaseModel):
     model: str
     additional_instructions: Optional[str] = None
 
+class UserPromptGenerateRequest(BaseModel):
+    agent_name: str
+    agent_description: str
+    tool_names: List[str] = []
+    model: str
+    generated_system_prompt: str
+    additional_instructions: Optional[str] = None
+
 
 class CodeGenerateRequest(BaseModel):
     tool_name: str
@@ -448,7 +456,7 @@ def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Se
         raise HTTPException(status_code=500, detail=f"System prompt generation failed: {str(e)}")
 
 @app.post("/agents/generate-user-prompt")
-def generate_user_prompt_endpoint(request: SystemPromptGenerateRequest, db: Session = Depends(get_db)):
+def generate_user_prompt_endpoint(request: UserPromptGenerateRequest, db: Session = Depends(get_db)):
     """Generate a task-specific user prompt for an agent using AI with streaming"""
     try:
         from src.ai_integrations.generate_agent_system_prompt import generate_user_prompt_stream
@@ -461,6 +469,7 @@ def generate_user_prompt_endpoint(request: SystemPromptGenerateRequest, db: Sess
                     agent_description=request.agent_description,
                     tool_names=request.tool_names,
                     llm_model=request.model,
+                    generated_system_prompt=request.generated_system_prompt,
                     additional_instructions=request.additional_instructions
                 ):
                     yield chunk

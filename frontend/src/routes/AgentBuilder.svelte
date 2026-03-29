@@ -151,6 +151,7 @@
     name: string;
     description: string;
     system_prompt: string;
+    user_prompt?: string;
     llm_provider: string;
     tool_ids: number[];
     output_paths?: Record<string, string>;
@@ -173,6 +174,7 @@
         name: nodeData.name,
         description: nodeData.description,
         system_prompt: nodeData.system_prompt,
+        user_prompt: nodeData.user_prompt || '',
         llm_provider: nodeData.llm_provider,
         tool_ids: nodeData.tool_ids,
         output_paths: nodeData.output_paths,

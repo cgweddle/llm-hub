@@ -868,6 +868,10 @@ export interface SystemPromptGenerateRequest {
   additional_instructions?: string;
 }
 
+export interface UserPromptGenerateRequest extends SystemPromptGenerateRequest {
+  generated_system_prompt: string;
+}
+
 // System prompt generation with streaming
 export async function generateSystemPromptStream(
   request: SystemPromptGenerateRequest,
@@ -936,7 +940,7 @@ export async function generateSystemPromptStream(
 
 // User prompt generation with streaming
 export async function generateUserPromptStream(
-  request: SystemPromptGenerateRequest,
+  request: UserPromptGenerateRequest,
   onChunk: (chunk: string) => void,
   onDone: (userPrompt: string) => void,
   onError: (error: string) => void
