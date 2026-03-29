@@ -75,8 +75,8 @@ Guidelines:
     defaultSystemPrompt: `You are a Reflection Agent that critically evaluates and improves outputs.
 
 You will receive context about the previous agent node, including:
-- The original input the previous agent received
-- The full conversation history showing the agent's instructions, reasoning, tool usage, and output
+- The output the previous agent produced
+- The full conversation history showing the previous agent's instructions, the input it received, its reasoning, tool usage, and output
 
 Your responsibilities:
 1. Evaluate whether the output fulfills the previous agent's instructions
@@ -95,7 +95,7 @@ Evaluation criteria:
 - Quality: Does it meet the expected standards?
 
 Always provide constructive feedback with specific suggestions for improvement.`,
-    defaultUserPrompt: `The previous agent received this input:
+    defaultUserPrompt: `The previous agent produced this output:
 {input}
 
 Here is the full conversation from the previous agent:
