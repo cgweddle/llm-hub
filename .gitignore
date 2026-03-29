@@ -1,6 +1,8 @@
 # Database
 database/
 
+.DS_Store
+
 !/src/database/
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -10,6 +12,9 @@ __pycache__/
 # C extensions
 *.so
 
+
+.svelte-kit/
+
 # Distribution / packaging
 .Python
 build/
@@ -18,7 +23,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/

@@ -5,5 +5,8 @@ langchain
 langgraph
 langchain-aws
 pydantic[email]
+pydantic-ai>=0.0.13
+httpx>=0.27.0
 google-adk
+langfuse
 pytest

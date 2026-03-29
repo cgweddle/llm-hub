@@ -13,7 +13,8 @@
   // Reactive destructuring so variables update when data prop changes
   let name: string, description: string, script_code: string, main_function: string;
   let handles: string[], toolId: number, input_schema: any, output_schema: any, runtimeLLM: any;
-  $: ({ name, description, script_code, main_function, handles = ['a'], toolId, input_schema, output_schema, runtimeLLM } = data);
+  let output_paths: Record<string, any> | undefined;
+  $: ({ name, description, script_code, main_function, handles = ['a'], toolId, input_schema, output_schema, runtimeLLM, output_paths } = data);
 
   // Get LLM providers from parent context (passed from +page.svelte)
   const llmProvidersStore = getContext<Writable<LLMProvider[]>>('llmProviders');
@@ -57,8 +58,18 @@
     }
   }
 
-  // Update node internals when expansion state changes
-  $: if (outputExpanded !== undefined) {
+  // Compute output path entries for agent nodes with conditional routing
+  let outputPathEntries: Array<[string, any]> = [];
+  $: {
+    if (data.isAgent && output_paths && typeof output_paths === 'object') {
+      outputPathEntries = Object.entries(output_paths);
+    } else {
+      outputPathEntries = [];
+    }
+  }
+
+  // Update node internals when expansion state or output paths change
+  $: if (outputExpanded !== undefined || outputPathEntries.length >= 0) {
     updateNodeInternals(id);
   }
 
@@ -93,20 +104,40 @@
   }
 
   function openFullscreen() {
-    fullscreenNode.open({
-      nodeId: id,
-      nodeType: 'tool',
-      data: {
-        name,
-        description,
-        script_code,
-        main_function,
-        toolId,
-        input_schema,
-        output_schema,
-        id
-      }
-    });
+    if (data.isAgent) {
+      fullscreenNode.open({
+        nodeId: id,
+        nodeType: 'agent',
+        data: {
+          name,
+          description,
+          agentId: data.agentId,
+          system_prompt: data.system_prompt || '',
+          user_prompt: data.user_prompt || '',
+          llm_provider: data.llm_provider || '',
+          tool_ids: data.tool_ids || [],
+          graph_config: data.graph_config || {},
+          output_paths: data.output_paths || {},
+          output_schema,
+          id
+        }
+      });
+    } else {
+      fullscreenNode.open({
+        nodeId: id,
+        nodeType: 'tool',
+        data: {
+          name,
+          description,
+          script_code,
+          main_function,
+          toolId,
+          input_schema,
+          output_schema,
+          id
+        }
+      });
+    }
   }
 
   // Truncate description for collapsed view
@@ -262,7 +293,23 @@
 {/if}
 
 <!-- Output Handles (Source) -->
-{#if outputIsDictionary}
+{#if outputPathEntries.length > 0}
+  <!-- Agent nodes with output paths: one handle per path -->
+  {#each outputPathEntries as [pathName, pathDescription], index}
+    <div class="output-handle-wrapper" style="top: {60 + index * 35}px;">
+      <span class="handle-label-outside output-label" title={typeof pathDescription === 'string' ? pathDescription : pathDescription.description}>
+        {pathName}
+      </span>
+      <Handle
+        type="source"
+        position={Position.Right}
+        id={pathName}
+        style="background: #0e7a0d; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
+        {isConnectable}
+      />
+    </div>
+  {/each}
+{:else if outputIsDictionary}
   <!-- Dictionary output with expand/collapse -->
   <div class="output-handle-wrapper" style="top: 60px;">
     <button

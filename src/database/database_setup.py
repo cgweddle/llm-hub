@@ -40,16 +40,13 @@ class User(Base):
 
 class Agent(Base):
     __tablename__ = 'agents'
-    
+
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     name = Column(String(100), nullable=False)
     description = Column(Text)
-    agent_type = Column(String(50), nullable=False)  # 'react', 'tool_calling', etc.
-    system_prompt = Column(Text)
-    llm_config = Column(JSON)  # Store LLM configuration as JSON
-    tools_config = Column(JSON)  # Store tool configurations
-    agent_metadata = Column(JSON)  # Additional agent metadata
+    graph_config = Column(JSON, nullable=False)  # Unified agent workflow graph
+    output_schema = Column(JSON)  # JSON schema for structured output validation
     is_public = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -82,6 +79,7 @@ class Tool(Base):
 
     # Relationships
     agents = relationship("Agent", secondary=agent_tool_association, back_populates="tools")
+    executions = relationship("Execution", back_populates="tool")
 
 class Flow(Base):
     __tablename__ = 'flows'
@@ -104,40 +102,41 @@ class Flow(Base):
     executions = relationship("Execution", back_populates="flow")
 
 class Execution(Base):
+    """
+    Self-referencing execution tree. Every execution — flow, agent, tool,
+    tool_call, tool_result, trigger — is a row in this table.
+    Top-level executions have parent_id=NULL. Children reference their parent.
+    """
     __tablename__ = 'executions'
-    
+
     id = Column(Integer, primary_key=True)
+    parent_id = Column(Integer, ForeignKey('executions.id'), nullable=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    agent_id = Column(Integer, ForeignKey('agents.id'))
-    flow_id = Column(Integer, ForeignKey('flows.id'))
-    execution_type = Column(String(20), nullable=False)  # 'agent' or 'flow'
+    agent_id = Column(Integer, ForeignKey('agents.id'), nullable=True)
+    flow_id = Column(Integer, ForeignKey('flows.id'), nullable=True)
+    tool_id = Column(Integer, ForeignKey('tools.id'), nullable=True)
+    execution_type = Column(String(50), nullable=False)  # 'flow', 'agent', 'tool', 'tool_call', 'tool_result', 'trigger'
+    node_id = Column(String(100), nullable=True)  # Node identifier from graph_config
+    name = Column(String(200), nullable=True)  # Human-readable name
+    sequence = Column(Integer, nullable=True)  # Execution order within parent
     input_data = Column(JSON)
     output_data = Column(JSON)
     status = Column(String(20), default='running')  # 'running', 'completed', 'failed'
     error_message = Column(Text)
     started_at = Column(DateTime, default=func.now())
     completed_at = Column(DateTime)
-    execution_metadata = Column(JSON)  # Additional execution metadata
-    
-    # Relationships
+    execution_metadata = Column(JSON)  # Cost, model name, token counts, etc.
+    langfuse_trace_id = Column(String(200), nullable=True)  # LangFuse trace ID for cross-referencing
+
+    # Self-referential relationships
+    parent = relationship("Execution", remote_side=[id], back_populates="children")
+    children = relationship("Execution", back_populates="parent", order_by="Execution.sequence")
+
+    # Foreign key relationships
     user = relationship("User", back_populates="executions")
     agent = relationship("Agent", back_populates="executions")
     flow = relationship("Flow", back_populates="executions")
-    messages = relationship("Message", back_populates="execution")
-
-class Message(Base):
-    __tablename__ = 'messages'
-    
-    id = Column(Integer, primary_key=True)
-    execution_id = Column(Integer, ForeignKey('executions.id'), nullable=False)
-    role = Column(String(20), nullable=False)  # 'user', 'assistant', 'tool', 'system'
-    content = Column(Text, nullable=False)
-    sender = Column(String(100))  # Agent name or tool name
-    timestamp = Column(DateTime, default=func.now())
-    message_metadata = Column(JSON)  # Additional message metadata
-    
-    # Relationships
-    execution = relationship("Execution", back_populates="messages")
+    tool = relationship("Tool", back_populates="executions")
 
 class Prompts(Base):
     __tablename__ = 'prompts'

@@ -17,14 +17,20 @@
   import { python } from '@codemirror/lang-python';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { EditorState } from '@codemirror/state';
-  import { onDestroy, setContext } from 'svelte';
+  import { onDestroy, setContext, tick } from 'svelte';
 
   import ColorSelectorNode from './ColorSelectorNode.svelte';
   import ToolNode from './ToolNode.svelte';
+  import TriggerNode from './TriggerNode.svelte';
   import FloatingEdge from './FloatingEdge.svelte';
+  import AgentBuilder from './AgentBuilder.svelte';
+  import type { AgentTemplate } from '$lib/agentTemplates';
   import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
   import LLMProvidersPanel from './LLMProvidersPanel.svelte';
   import FullscreenNodeModal from './FullscreenNodeModal.svelte';
+  import InfoPanel from './InfoPanel.svelte';
+  import { fullscreenNode } from '$lib/stores/fullscreenNode';
+  import { builderMode, type BuilderMode } from '$lib/stores/builderMode';
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
@@ -36,9 +42,14 @@
     executeFlow,
     getFlowDetails,
     deleteFlow,
+    deleteAgent,
+    deleteTool,
     createPythonScriptTool,
     generateToolCodeStream,
     editToolCodeStream,
+    createAgent,
+    generateSystemPromptStream,
+    generateUserPromptStream,
     type ValidationResult,
     type ConnectionValidationResult,
     type Tool,
@@ -46,7 +57,9 @@
     type FlowCreateRequest,
     type FlowUpdateRequest,
     type Flow as FlowType,
-    type CodeGenerateRequest
+    type CodeGenerateRequest,
+    type AgentCreateData,
+    type SystemPromptGenerateRequest
   } from '../lib/api';
   import { buildEnhancedGraphConfig } from '$lib/flowBuilder';
   import { autoLayoutNodes } from '$lib/elkLayout';
@@ -82,6 +95,10 @@
   // Current flow tracking
   let currentFlowId: number | null = null;
 
+  // Info panel state
+  let showInfoPanel = false;
+  let lastExecutionId: number | null = null;
+
   // Conda environment state
   let selectedCondaEnv: string | null = null;
 
@@ -111,6 +128,42 @@
   let isCreatingTool = false;
   let isGeneratingCode = false;
   let isEditingCode = false;
+
+  // Create Agent modal state
+  let showCreateAgentModal = false;
+  let newAgentName = '';
+  let newAgentDescription = '';
+  let newAgentSystemPrompt = '';
+  let newAgentUserPrompt = '{input}';
+  let newAgentSelectedTools: number[] = [];
+  let newAgentLLMProvider = '';
+  let isCreatingAgent = false;
+  let showGeneratePromptAI = false;
+  let promptAdditionalInstructions = '';
+  let isGeneratingPrompt = false;
+  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
+  let createAgentUserPromptBackdrop: HTMLDivElement;
+  let isConfiguringComplexNode = false;
+  let pendingAgentTemplate: AgentTemplate | null = null;
+  let agentBuilderRef: AgentBuilder;
+
+  // Agent Builder mode
+  let currentMode: BuilderMode = 'flow';
+  builderMode.subscribe(mode => currentMode = mode);
+
+  // Intercept fullscreen opens for complex agents — redirect to AgentBuilder
+  $: if ($fullscreenNode?.nodeType === 'agent') {
+    const graphConfig = $fullscreenNode.data?.graph_config;
+    if (graphConfig && Object.keys(graphConfig.nodes || {}).length > 1) {
+      const agentId = $fullscreenNode.data?.agentId;
+      const agent = data.agents.find((a: Agent) => a.id === agentId);
+      fullscreenNode.close();
+      if (agent) {
+        builderMode.setAgent();
+        tick().then(() => agentBuilderRef.loadAgent(agent));
+      }
+    }
+  }
 
   // CodeMirror editor for Create Tool modal
   let createToolEditorContainer: HTMLDivElement;
@@ -161,7 +214,8 @@
 
   const nodeTypes = {
     selectorNode: ColorSelectorNode,
-    toolNode: ToolNode
+    toolNode: ToolNode,
+    triggerNode: TriggerNode
   };
 
   const edgeTypes = {
@@ -200,12 +254,76 @@
     }
   }
 
+  function handleAgentUpdated(agentId: number, updatedAgent: Agent) {
+    // Update sidebar data
+    data.agents = data.agents.map(a => a.id === agentId ? { ...a, ...updatedAgent } : a);
+
+    // Extract entry node config from graph_config
+    const entryPoint = updatedAgent.graph_config?.entry_point || 'main';
+    const entryNode = updatedAgent.graph_config?.nodes?.[entryPoint] || {};
+
+    // Update any canvas nodes for this agent
+    nodes = nodes.map(n => {
+      if (n.data?.isAgent && n.data?.agentId === agentId) {
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            name: updatedAgent.name,
+            description: updatedAgent.description || '',
+            graph_config: updatedAgent.graph_config,
+            system_prompt: entryNode.system_prompt || '',
+            llm_provider: entryNode.llm_provider || '',
+            tool_ids: entryNode.tool_ids || [],
+          }
+        };
+      }
+      return n;
+    });
+  }
+
   // Use tools and agents from database instead of hardcoded nodes
   $: availableTools = data.tools.map(tool => tool.name);
   $: availableAgents = data.agents.map(agent => agent.name);
   $: availableFlows = data.flows;
 
   function addNode(nodeName: string, position: { x: number; y: number }) {
+    // Check if it's an agent
+    const agent = data.agents.find((a: Agent) => a.name === nodeName);
+    if (agent) {
+      // Extract entry node config from graph_config
+      const entryPoint = agent.graph_config?.entry_point || 'main';
+      const entryNode = agent.graph_config?.nodes?.[entryPoint] || {};
+
+      const newNode: Node = {
+        id: String(Date.now()),
+        type: 'toolNode',
+        data: {
+          label: nodeName,
+          handles: ['a'],
+          isAgent: true,
+          agentId: agent.id,
+          name: agent.name,
+          description: agent.description || '',
+          graph_config: agent.graph_config,
+          system_prompt: entryNode.system_prompt || '',
+          llm_provider: entryNode.llm_provider || '',
+          tool_ids: entryNode.tool_ids || [],
+          output_paths: entryNode.output_paths || undefined,
+          script_code: '',
+          main_function: '',
+          input_schema: null,
+          output_schema: agent.output_schema || null,
+          runtimeLLM: null
+        },
+        position,
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left
+      };
+      nodes = [...nodes, newNode];
+      return;
+    }
+
     // Find the tool from the database
     const tool = data.tools.find((t: Tool) => t.name === nodeName);
 
@@ -233,6 +351,33 @@
     nodes = [...nodes, newNode];
   }
 
+  function addTriggerNode(triggerType: string, position: { x: number; y: number }) {
+    // Only allow one trigger node per flow
+    const existingTrigger = nodes.find(n => n.type === 'triggerNode');
+    if (existingTrigger) {
+      validationSuccess = false;
+      validationMessage = 'Only one trigger node allowed per flow.';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    const newNode: Node = {
+      id: String(Date.now()),
+      type: 'triggerNode',
+      data: {
+        label: 'Text Input',
+        name: 'Text Input',
+        triggerType: triggerType,
+        triggerValue: ''
+      },
+      position,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left
+    };
+    nodes = [...nodes, newNode];
+  }
+
   async function onConnect(params) {
     try {
       console.log('Connecting:', params);
@@ -241,8 +386,8 @@
       const sourceNode = nodes.find(n => n.id === params.source);
       const targetNode = nodes.find(n => n.id === params.target);
 
-      // If both nodes have tool IDs, validate compatibility
-      if (sourceNode?.data?.toolId && targetNode?.data?.toolId) {
+      // If both nodes have tool IDs (and neither is an agent), validate compatibility
+      if (sourceNode?.data?.toolId && targetNode?.data?.toolId && !sourceNode?.data?.isAgent && !targetNode?.data?.isAgent) {
         // Use granular field-level validation
         const validation = await validateConnection(
           sourceNode.data.toolId,
@@ -405,8 +550,59 @@
             };
             nodeMap.set(nodeId, newNode);
           }
+        } else if (nodeConfig.node_type === 'agent') {
+          // Find the agent from data.agents
+          const agent = data.agents.find((a: Agent) => a.id === nodeConfig.id);
+
+          if (agent) {
+            const entryPoint = agent.graph_config?.entry_point || 'main';
+            const entryNodeConfig = agent.graph_config?.nodes?.[entryPoint] || {};
+
+            const newNode: Node = {
+              id: nodeId,
+              type: 'toolNode',
+              data: {
+                label: agent.name,
+                handles: ['a'],
+                isAgent: true,
+                agentId: agent.id,
+                name: agent.name,
+                description: agent.description || '',
+                graph_config: agent.graph_config,
+                system_prompt: entryNodeConfig.system_prompt || '',
+                llm_provider: entryNodeConfig.llm_provider || '',
+                tool_ids: entryNodeConfig.tool_ids || [],
+                output_paths: entryNodeConfig.output_paths || undefined,
+                script_code: '',
+                main_function: '',
+                input_schema: null,
+                output_schema: agent.output_schema || null,
+                runtimeLLM: entryNodeConfig.llm_provider
+                  ? llmProviders.find(p => p.name === entryNodeConfig.llm_provider) || null
+                  : null
+              },
+              position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
+              sourcePosition: Position.Right,
+              targetPosition: Position.Left
+            };
+            nodeMap.set(nodeId, newNode);
+          }
+        } else if (nodeConfig.node_type === 'trigger') {
+          const newNode: Node = {
+            id: nodeId,
+            type: 'triggerNode',
+            data: {
+              label: 'Text Input',
+              name: 'Text Input',
+              triggerType: 'text_input',
+              triggerValue: nodeConfig.input_value || ''
+            },
+            position: { x: 50, y: 200 },
+            sourcePosition: Position.Right,
+            targetPosition: Position.Left
+          };
+          nodeMap.set(nodeId, newNode);
         }
-        // TODO: Add agent node support
       }
 
       // Recreate edges from graph_config
@@ -468,7 +664,13 @@
    * Get initial input values from the entry point node
    */
   function getEntryPointInputValues(): Record<string, any> {
-    // Find the entry point node (node with no incoming edges)
+    // If there's a trigger node, use its text value as input
+    const triggerNode = nodes.find(n => n.type === 'triggerNode');
+    if (triggerNode && triggerNode.data.triggerValue) {
+      return { text: triggerNode.data.triggerValue };
+    }
+
+    // Fallback: find the entry point node (node with no incoming edges)
     const nodesWithIncoming = new Set(edges.map(e => e.target));
     const entryNode = nodes.find(n => n.type === 'toolNode' && !nodesWithIncoming.has(n.id));
 
@@ -485,6 +687,12 @@
   async function runFlow(flowId: number, initialInput: Record<string, any>) {
     try {
       const result = await executeFlow(flowId, initialInput, selectedCondaEnv);
+
+      // Capture execution ID and open info panel
+      if (result.execution_id) {
+        lastExecutionId = result.execution_id;
+        showInfoPanel = true;
+      }
 
       if (result.status === 'completed') {
         console.log('✓ Flow completed successfully');
@@ -547,6 +755,44 @@
     } catch (error) {
       validationSuccess = false;
       validationMessage = `Failed to delete flow: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
+  async function handleDeleteAgent(agentId: number, agentName: string, event: Event) {
+    event.stopPropagation();
+    if (!confirm(`Are you sure you want to delete "${agentName}"?`)) return;
+
+    try {
+      await deleteAgent(agentId);
+      data.agents = data.agents.filter(a => a.id !== agentId);
+      validationSuccess = true;
+      validationMessage = `Agent "${agentName}" deleted successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to delete agent: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
+  async function handleDeleteTool(toolId: number, toolName: string, event: Event) {
+    event.stopPropagation();
+    if (!confirm(`Are you sure you want to delete "${toolName}"?`)) return;
+
+    try {
+      await deleteTool(toolId);
+      data.tools = data.tools.filter(t => t.id !== toolId);
+      validationSuccess = true;
+      validationMessage = `Tool "${toolName}" deleted successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to delete tool: ${error}`;
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
     }
@@ -865,6 +1111,331 @@
     destroyCreateToolEditor();
     showCreateToolModal = false;
   }
+
+  /**
+   * Create a new agent
+   */
+  async function handleCreateAgent() {
+    if (!newAgentName.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter an agent name';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    if (!newAgentSystemPrompt.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter a system prompt for the agent';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+
+    if (!newAgentUserPrompt.includes('{input}')) {
+      validationSuccess = false;
+      validationMessage = 'User prompt must contain {input} so the agent receives runtime input';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
+
+    try {
+      isCreatingAgent = true;
+
+      const userId = data.user?.id || 1;
+      const agentData: AgentCreateData = {
+        name: newAgentName.trim(),
+        description: newAgentDescription.trim(),
+        graph_config: {
+          nodes: {
+            "main": {
+              agent_type: "pydanticai",
+              name: newAgentName.trim(),
+              description: newAgentDescription.trim(),
+              system_prompt: newAgentSystemPrompt.trim(),
+              user_prompt: newAgentUserPrompt.trim(),
+              llm_provider: newAgentLLMProvider || '',
+              tool_ids: newAgentSelectedTools,
+              ...(newAgentOutputPaths.filter(p => p.name.trim()).length > 0 ? {
+                output_paths: Object.fromEntries(
+                  newAgentOutputPaths
+                    .filter(p => p.name.trim())
+                    .map(p => [p.name.trim(), {
+                      description: p.description.trim(),
+                      return_behavior: p.return_behavior
+                    }])
+                )
+              } : {})
+            }
+          },
+          edges: [],
+          entry_point: "main",
+          exit_points: ["main"]
+        }
+      };
+
+      const createdAgent = await createAgent(userId, agentData);
+
+      // Add the new agent to the available agents list
+      data.agents = [...data.agents, createdAgent];
+
+      // Show success
+      validationSuccess = true;
+      validationMessage = `Agent "${createdAgent.name}" created successfully!`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+
+      // Reset and close modal
+      closeCreateAgentModal();
+
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to create agent: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    } finally {
+      isCreatingAgent = false;
+    }
+  }
+
+  /**
+   * Generate system prompt using AI with streaming
+   */
+  async function handleGeneratePrompt() {
+    if (!newAgentName.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter an agent name before generating a prompt';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+    if (!newAgentDescription.trim()) {
+      validationSuccess = false;
+      validationMessage = 'Please enter an agent description before generating a prompt';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 3000);
+      return;
+    }
+    if (!selectedLLMProvider) {
+      validationSuccess = false;
+      validationMessage = 'Please select an LLM provider';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
+
+    try {
+      isGeneratingPrompt = true;
+      newAgentSystemPrompt = '';
+      newAgentUserPrompt = '';
+
+      // Get selected tool names
+      const selectedToolNames = data.tools
+        .filter((t: Tool) => newAgentSelectedTools.includes(t.id))
+        .map((t: Tool) => t.name);
+
+      const requestData = {
+        agent_name: newAgentName.trim(),
+        agent_description: newAgentDescription.trim(),
+        tool_names: selectedToolNames,
+        model: selectedLLMProvider.name,
+        additional_instructions: promptAdditionalInstructions.trim() || undefined
+      };
+
+      // Pass 1: Generate system prompt
+      let generatedSystemPrompt = '';
+
+      await generateSystemPromptStream(
+        requestData,
+        (chunk: string) => {
+          newAgentSystemPrompt += chunk;
+        },
+        (systemPrompt: string) => {
+          newAgentSystemPrompt = systemPrompt;
+          generatedSystemPrompt = systemPrompt;
+        },
+        (error: string) => {
+          validationSuccess = false;
+          validationMessage = `Failed to generate system prompt: ${error}`;
+          showValidationToast = true;
+          setTimeout(() => { showValidationToast = false; }, 5000);
+          isGeneratingPrompt = false;
+        }
+      );
+
+      // Pass 2: Generate user prompt (aware of the system prompt)
+      if (generatedSystemPrompt) {
+        await generateUserPromptStream(
+          { ...requestData, generated_system_prompt: generatedSystemPrompt },
+          (chunk: string) => {
+            newAgentUserPrompt += chunk;
+          },
+          (userPrompt: string) => {
+            newAgentUserPrompt = userPrompt;
+            validationSuccess = true;
+            validationMessage = 'System and user prompts generated successfully!';
+            showValidationToast = true;
+            setTimeout(() => { showValidationToast = false; }, 3000);
+            isGeneratingPrompt = false;
+          },
+          (error: string) => {
+            validationSuccess = false;
+            validationMessage = `Failed to generate user prompt: ${error}`;
+            showValidationToast = true;
+            setTimeout(() => { showValidationToast = false; }, 5000);
+            isGeneratingPrompt = false;
+          }
+        );
+      }
+    } catch (error) {
+      validationSuccess = false;
+      validationMessage = `Failed to generate prompt: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      isGeneratingPrompt = false;
+    }
+  }
+
+  function toggleToolSelection(toolId: number) {
+    if (newAgentSelectedTools.includes(toolId)) {
+      newAgentSelectedTools = newAgentSelectedTools.filter(id => id !== toolId);
+    } else {
+      newAgentSelectedTools = [...newAgentSelectedTools, toolId];
+    }
+  }
+
+  function addAgentOutputPath() {
+    newAgentOutputPaths = [...newAgentOutputPaths, { name: '', description: '', return_behavior: 'node_output' }];
+  }
+
+  function removeAgentOutputPath(index: number) {
+    newAgentOutputPaths = newAgentOutputPaths.filter((_, i) => i !== index);
+  }
+
+  function openAgentDetails(agent: Agent) {
+    // Complex agent: load into AgentBuilder canvas
+    const nodeCount = Object.keys(agent.graph_config?.nodes || {}).length;
+    if (nodeCount > 1) {
+      builderMode.setAgent();
+      tick().then(() => {
+        agentBuilderRef.loadAgent(agent);
+      });
+      return;
+    }
+
+    const entryPoint = agent.graph_config?.entry_point || 'main';
+    const entryNode = agent.graph_config?.nodes?.[entryPoint] || {};
+
+    fullscreenNode.open({
+      nodeId: `sidebar-agent-${agent.id}`,
+      nodeType: 'agent',
+      data: {
+        name: agent.name,
+        description: agent.description || '',
+        agentId: agent.id,
+        graph_config: agent.graph_config,
+        system_prompt: entryNode.system_prompt || '',
+        llm_provider: entryNode.llm_provider || '',
+        tool_ids: entryNode.tool_ids || [],
+        output_schema: agent.output_schema || null
+      }
+    });
+  }
+
+  function closeCreateAgentModal() {
+    showCreateAgentModal = false;
+    newAgentName = '';
+    newAgentDescription = '';
+    newAgentSystemPrompt = '';
+    newAgentUserPrompt = '{input}';
+    newAgentSelectedTools = [];
+    newAgentLLMProvider = '';
+    showGeneratePromptAI = false;
+    promptAdditionalInstructions = '';
+    isGeneratingPrompt = false;
+    newAgentOutputPaths = [];
+    isConfiguringComplexNode = false;
+    pendingAgentTemplate = null;
+  }
+
+  function handleNodeDataUpdated(nodeId: string, updatedData: any) {
+    // Update agent builder canvas nodes (for unsaved nodes edited via modal)
+    if (currentMode === 'agent' && agentBuilderRef) {
+      agentBuilderRef.updateNodeData(nodeId, updatedData);
+    }
+    // Update flow canvas nodes
+    nodes = nodes.map(n =>
+      n.id === nodeId ? { ...n, data: { ...n.data, ...updatedData } } : n
+    );
+  }
+
+  function handleAgentUpdatedFromBuilder(event: CustomEvent<Agent>) {
+    data.agents = data.agents.map(a => a.id === event.detail.id ? event.detail : a);
+  }
+
+  // Agent Builder handlers
+  function enterAgentBuilderMode() {
+    builderMode.setAgent();
+  }
+
+  function handleAgentCreated(event: CustomEvent<Agent>) {
+    data.agents = [...data.agents, event.detail];
+  }
+
+  function handleAgentBuilderBack() {
+    builderMode.setFlow();
+  }
+
+  function handleConfigureNewAgent(event: CustomEvent<{ template: AgentTemplate }>) {
+    const { template } = event.detail;
+    pendingAgentTemplate = template;
+    isConfiguringComplexNode = true;
+    newAgentName = template.name;
+    newAgentDescription = template.description;
+    newAgentSystemPrompt = template.defaultSystemPrompt;
+    newAgentUserPrompt = template.defaultUserPrompt;
+    newAgentSelectedTools = [];
+    newAgentLLMProvider = '';
+    newAgentOutputPaths = [];
+    showCreateAgentModal = true;
+  }
+
+  function handleAddNodeToCanvas() {
+    if (!pendingAgentTemplate) return;
+
+    if (!newAgentUserPrompt.includes('{input}')) {
+      validationSuccess = false;
+      validationMessage = 'User prompt must contain {input} so the agent receives runtime input';
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+      return;
+    }
+
+    const outputPaths = newAgentOutputPaths.filter(p => p.name.trim()).length > 0
+      ? Object.fromEntries(
+          newAgentOutputPaths
+            .filter(p => p.name.trim())
+            .map(p => [p.name.trim(), {
+              description: p.description.trim(),
+              return_behavior: p.return_behavior
+            }])
+        )
+      : undefined;
+
+    agentBuilderRef.addConfiguredAgentNode({
+      name: newAgentName.trim(),
+      description: newAgentDescription.trim(),
+      system_prompt: newAgentSystemPrompt.trim(),
+      user_prompt: newAgentUserPrompt.trim(),
+      llm_provider: newAgentLLMProvider || '',
+      tool_ids: newAgentSelectedTools,
+      output_paths: outputPaths,
+      agentType: pendingAgentTemplate.type
+    });
+
+    closeCreateAgentModal();
+  }
 </script>
 
 <div class="app-container">
@@ -877,147 +1448,262 @@
   {/if}
 
   <div class="node-window">
-    <div class="user-section">
-      {#if data.user}
-        <div class="current-user">
-          <strong>{data.user.username}</strong>
-          <small>{data.user.email}</small>
+    {#if currentMode === 'flow'}
+      <!-- FLOW BUILDER SIDEBAR -->
+      <div class="user-section">
+        {#if data.user}
+          <div class="current-user">
+            <strong>{data.user.username}</strong>
+            <small>{data.user.email}</small>
+          </div>
+          <form method="POST" action="/logout" class="mt-2">
+            <Button type="submit" variant="outline" class="w-full" size="sm">
+              Logout
+            </Button>
+          </form>
+        {:else}
+          <div class="space-y-2">
+            <Button class="w-full" onclick={() => window.location.href = '/login'}>
+              Sign In
+            </Button>
+            <Button variant="outline" class="w-full" onclick={() => window.location.href = '/register'}>
+              Register
+            </Button>
+          </div>
+        {/if}
+      </div>
+
+      <CondaEnvironmentsPanel bind:selectedEnv={selectedCondaEnv} />
+
+      <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
+
+      <div class="triggers-section">
+        <h4>Triggers</h4>
+        <div
+          class="draggable-node trigger-draggable"
+          draggable="true"
+          ondragstart={(event) => {
+            event.dataTransfer?.setData('application/json', JSON.stringify({ itemType: 'trigger', triggerType: 'text_input' }));
+            event.dataTransfer?.setData('text/plain', '__trigger__text_input');
+          }}
+        >
+          Text Input
         </div>
-        <form method="POST" action="/logout" class="mt-2">
-          <Button type="submit" variant="outline" class="w-full" size="sm">
-            Logout
+      </div>
+
+      <div class="flows-section">
+        <h4>Available Flows</h4>
+        <Button class="w-full mb-2" size="sm" onclick={() => showSaveDialog = true}>
+          Create New Flow
+        </Button>
+        {#each availableFlows as flow}
+          <div
+            class="flow-item"
+            onclick={() => loadFlow(flow.id)}
+          >
+            <span class="flow-item-name">{flow.name}</span>
+            <button
+              class="flow-item-delete"
+              onclick={(e) => handleDeleteFlow(flow.id, flow.name, e)}
+              title="Delete flow"
+            >
+              ×
+            </button>
+          </div>
+        {/each}
+      </div>
+
+      <div class="tools-section">
+        <h4>Available Tools</h4>
+        <Button size="sm" onclick={() => showCreateToolModal = true} class="w-full mb-2 bg-blue-600 hover:bg-blue-700">
+          {#snippet children()}
+            Create New Tool
+          {/snippet}
+        </Button>
+        {#each data.tools as tool}
+          <div
+            class="sidebar-item"
+            draggable="true"
+            ondragstart={(event) => event.dataTransfer?.setData('text/plain', tool.name)}
+          >
+            <span class="sidebar-item-name">{tool.name}</span>
+            <button
+              class="sidebar-item-delete"
+              onclick={(e) => handleDeleteTool(tool.id, tool.name, e)}
+              title="Delete tool"
+            >
+              ×
+            </button>
+          </div>
+        {/each}
+      </div>
+
+      <div class="agents-section">
+        <h4>Available Agents</h4>
+        <div class="agent-buttons">
+          <Button size="sm" onclick={() => showCreateAgentModal = true} class="w-full mb-1 bg-green-600 hover:bg-green-700">
+            {#snippet children()}
+              Create Simple Agent
+            {/snippet}
           </Button>
-        </form>
-      {:else}
-        <div class="space-y-2">
-          <Button class="w-full" onclick={() => window.location.href = '/login'}>
-            Sign In
-          </Button>
-          <Button variant="outline" class="w-full" onclick={() => window.location.href = '/register'}>
-            Register
+          <Button size="sm" onclick={enterAgentBuilderMode} class="w-full mb-2 bg-purple-600 hover:bg-purple-700">
+            {#snippet children()}
+              Create Complex Agent
+            {/snippet}
           </Button>
         </div>
+        {#each data.agents as agent}
+          <div
+            class="sidebar-item"
+            draggable="true"
+            ondragstart={(event) => event.dataTransfer?.setData('text/plain', agent.name)}
+            onclick={() => openAgentDetails(agent)}
+            title="Click to view details, drag to add to canvas"
+          >
+            <span class="sidebar-item-name">
+              {agent.name}
+              {#if agent.graph_config && Object.keys(agent.graph_config.nodes || {}).length > 1}
+                <span class="composed-badge">⚡</span>
+              {/if}
+            </span>
+            <button
+              class="sidebar-item-delete"
+              onclick={(e) => handleDeleteAgent(agent.id, agent.name, e)}
+              title="Delete agent"
+            >
+              ×
+            </button>
+          </div>
+        {/each}
+      </div>
+
+    {/if}
+  </div>
+
+  {#if currentMode === 'flow'}
+    <!-- FLOW BUILDER CANVAS -->
+    <div
+      class="flow-container"
+      role="application"
+      ondragover={(event) => event.preventDefault()}
+      ondrop={(event) => {
+        event.preventDefault();
+
+        // Get the flow container bounds
+        const flowContainer = event.currentTarget;
+        const rect = flowContainer.getBoundingClientRect();
+
+        // Convert screen coordinates to flow coordinates using viewport
+        const position = {
+          x: (event.clientX - rect.left - viewport.x) / viewport.zoom,
+          y: (event.clientY - rect.top - viewport.y) / viewport.zoom
+        };
+
+        // Check for trigger node drop (uses application/json payload)
+        const jsonData = event.dataTransfer?.getData('application/json');
+        if (jsonData) {
+          try {
+            const parsed = JSON.parse(jsonData);
+            if (parsed.itemType === 'trigger') {
+              addTriggerNode(parsed.triggerType, position);
+              return;
+            }
+          } catch (e) { /* not JSON, fall through */ }
+        }
+
+        const nodeName = event.dataTransfer?.getData('text/plain');
+        if (!nodeName) return;
+        addNode(nodeName, position);
+      }}
+    >
+      <!-- Flow Controls -->
+      <div class="flow-controls">
+        <Button onclick={() => {
+          if (currentFlowId) {
+            // Update existing flow directly
+            saveFlow();
+          } else {
+            // Show dialog for new flow
+            showSaveDialog = true;
+          }
+        }}>
+          {currentFlowId ? 'Update Flow' : 'Save Flow'}
+        </Button>
+        {#if currentFlowId}
+          <Button
+            variant="outline"
+            onclick={() => {
+              currentFlowId = null;
+              nodes = [];
+              edges = [];
+              selectedCondaEnv = null;
+            }}
+            class="ml-2"
+          >
+            Clear
+          </Button>
+        {/if}
+        <Button
+          onclick={() => currentFlowId && runFlow(currentFlowId, getEntryPointInputValues())}
+          disabled={!currentFlowId}
+          class="ml-2 bg-green-600 hover:bg-green-700 text-white"
+        >
+          ▶ Run
+        </Button>
+      </div>
+
+      <div class="canvas-area">
+        <SvelteFlow
+          bind:nodes
+          {nodeTypes}
+          bind:edges
+          {edgeTypes}
+          {defaultEdgeOptions}
+          connectionLineType={ConnectionLineType.Straight}
+          {connectionLineStyle}
+          style="background: #1A192B"
+          fitView
+          bind:viewport
+          onconnect={onConnect}
+        >
+          <Background />
+          <Controls />
+          <MiniMap />
+        </SvelteFlow>
+
+        <!-- Info panel toggle button (only shown when panel is closed) -->
+        {#if !showInfoPanel}
+          <button
+            class="info-toggle-btn"
+            onclick={() => showInfoPanel = true}
+            title="Show Info Panel"
+          >
+            &#9432; Info
+          </button>
+        {/if}
+      </div>
+
+      {#if showInfoPanel}
+        <InfoPanel
+          executionId={lastExecutionId}
+          flowName={flowName}
+          onclose={() => showInfoPanel = false}
+        />
       {/if}
     </div>
 
-    <CondaEnvironmentsPanel bind:selectedEnv={selectedCondaEnv} />
-
-    <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
-
-    <div class="flows-section">
-      <h4>Available Flows</h4>
-      <Button class="w-full mb-2" size="sm" onclick={() => showSaveDialog = true}>
-        Create New Flow
-      </Button>
-      {#each availableFlows as flow}
-        <div
-          class="flow-item"
-          onclick={() => loadFlow(flow.id)}
-        >
-          <span class="flow-item-name">{flow.name}</span>
-          <button
-            class="flow-item-delete"
-            onclick={(e) => handleDeleteFlow(flow.id, flow.name, e)}
-            title="Delete flow"
-          >
-            ×
-          </button>
-        </div>
-      {/each}
-    </div>
-
-    <div class="tools-section">
-      <h4>Available Tools</h4>
-      <Button size="sm" onclick={() => showCreateToolModal = true} class="w-full mb-2 bg-blue-600 hover:bg-blue-700">
-        {#snippet children()}
-          Create New Tool
-        {/snippet}
-      </Button>
-      {#each availableTools as tool}
-        <div
-          class="draggable-node"
-          draggable="true"
-          ondragstart={(event) => event.dataTransfer?.setData('text/plain', tool)}
-        >
-          {tool}
-        </div>
-      {/each}
-    </div>
-
-    <h4>Available Agents</h4>
-    {#each availableAgents as agent}
-      <div
-        class="draggable-node"
-        draggable="true"
-        ondragstart={(event) => event.dataTransfer?.setData('text/plain', agent)}
-      >
-        {agent}
-      </div>
-    {/each}
-  </div>
-
-  <div
-    class="flow-container"
-    role="application"
-    ondragover={(event) => event.preventDefault()}
-    ondrop={(event) => {
-      event.preventDefault();
-      const nodeName = event.dataTransfer?.getData('text/plain');
-      if (!nodeName) return;
-
-      // Get the flow container bounds
-      const flowContainer = event.currentTarget;
-      const rect = flowContainer.getBoundingClientRect();
-
-      // Convert screen coordinates to flow coordinates using viewport
-      const position = {
-        x: (event.clientX - rect.left - viewport.x) / viewport.zoom,
-        y: (event.clientY - rect.top - viewport.y) / viewport.zoom
-      };
-
-      addNode(nodeName, position);
-    }}
-  >
-    <!-- Flow Controls -->
-    <div class="flow-controls">
-      <Button onclick={() => {
-        if (currentFlowId) {
-          // Update existing flow directly
-          saveFlow();
-        } else {
-          // Show dialog for new flow
-          showSaveDialog = true;
-        }
-      }}>
-        {currentFlowId ? 'Update Flow' : 'Save Flow'}
-      </Button>
-      <Button
-        onclick={() => currentFlowId && runFlow(currentFlowId, getEntryPointInputValues())}
-        disabled={!currentFlowId}
-        class="ml-2 bg-green-600 hover:bg-green-700 text-white"
-      >
-        ▶ Run
-      </Button>
-    </div>
-
-    <SvelteFlow
-      bind:nodes
-      {nodeTypes}
-      bind:edges
-      {edgeTypes}
-      {defaultEdgeOptions}
-      connectionLineType={ConnectionLineType.Straight}
-      {connectionLineStyle}
-      style="background: #1A192B"
-      fitView
-      bind:viewport
-      onconnect={onConnect}
-    >
-      <Background />
-      <Controls />
-      <MiniMap />
-    </SvelteFlow>
-  </div>
+  {:else}
+    <!-- AGENT BUILDER (Self-contained component) -->
+    <AgentBuilder
+      bind:this={agentBuilderRef}
+      agents={data.agents}
+      userId={data.user?.id || 1}
+      on:back={handleAgentBuilderBack}
+      on:agentCreated={handleAgentCreated}
+      on:agentUpdated={handleAgentUpdatedFromBuilder}
+      on:configureNewAgent={handleConfigureNewAgent}
+    />
+  {/if}
 
   <!-- Save Flow Dialog -->
   {#if showSaveDialog}
@@ -1051,7 +1737,8 @@
   {/if}
 
   <!-- Fullscreen Node Modal -->
-  <FullscreenNodeModal {llmProviders} onToolUpdated={handleToolUpdated} />
+  <FullscreenNodeModal {llmProviders} allTools={data.tools} onToolUpdated={handleToolUpdated} onAgentUpdated={handleAgentUpdated} onNodeDataUpdated={handleNodeDataUpdated} />
+
 
   <!-- Create Tool Modal -->
   {#if showCreateToolModal}
@@ -1263,6 +1950,246 @@
       </div>
     </div>
   {/if}
+
+  <!-- Create Agent Modal -->
+  {#if showCreateAgentModal}
+    <div class="create-tool-overlay" onclick={closeCreateAgentModal}>
+      <div class="create-tool-modal" onclick={(e) => e.stopPropagation()}>
+        <div class="create-tool-header">
+          <h2 class="create-tool-title">{isConfiguringComplexNode ? 'Configure Agent Node' : 'Create New Agent'}</h2>
+          <button class="create-tool-close" onclick={closeCreateAgentModal}>×</button>
+        </div>
+
+        <div class="create-tool-body">
+          <!-- Agent Details Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Agent Details</div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="agentName">Name</label>
+              <input
+                id="agentName"
+                class="create-tool-input"
+                bind:value={newAgentName}
+                placeholder="Agent Name"
+              />
+            </div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="agentDesc">Description</label>
+              <input
+                id="agentDesc"
+                class="create-tool-input"
+                bind:value={newAgentDescription}
+                placeholder="Describe what this agent does..."
+              />
+            </div>
+          </div>
+
+          <!-- System Prompt Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">System Prompt</div>
+            <textarea
+              class="create-tool-textarea"
+              bind:value={newAgentSystemPrompt}
+              placeholder="Enter the system prompt for this agent..."
+              rows="10"
+              style="min-height: 200px;"
+            ></textarea>
+          </div>
+
+          <!-- User Prompt Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">User Prompt</div>
+            <div class="create-tool-helper-text" style="margin-bottom: 8px;">
+              Use &#123;input&#125; where the runtime input should appear. Use &#123;message_history&#125; to include the full conversation history from previous nodes.
+            </div>
+            <div class="highlighted-textarea-container">
+              <div class="highlighted-textarea-backdrop" bind:this={createAgentUserPromptBackdrop} aria-hidden="true">
+                {@html newAgentUserPrompt
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/\{input\}/g, '<span class="template-var">{input}</span>')
+                  .replace(/\{message_history\}/g, '<span class="template-var">{message_history}</span>')
+                + '\n'}
+              </div>
+              <textarea
+                class="highlighted-textarea"
+                bind:value={newAgentUserPrompt}
+                placeholder="e.g. &#123;input&#125;"
+                rows="4"
+                style="min-height: 80px;"
+                onscroll={(e) => { if (createAgentUserPromptBackdrop) createAgentUserPromptBackdrop.scrollTop = e.currentTarget.scrollTop; }}
+              ></textarea>
+            </div>
+          </div>
+
+          <!-- Generate with AI Section -->
+          <div class="create-tool-section">
+            <button
+              class="create-tool-expand-header"
+              onclick={() => showGeneratePromptAI = !showGeneratePromptAI}
+              type="button"
+            >
+              <span class="expand-icon">{showGeneratePromptAI ? '∨' : '→'}</span>
+              <span>Generate with AI</span>
+            </button>
+
+            {#if showGeneratePromptAI}
+              <div class="create-tool-ai-expanded">
+                <div class="create-tool-ai-field-left">
+                  <label class="create-tool-label" for="promptInstructions">Additional Instructions (optional)</label>
+                  <textarea
+                    id="promptInstructions"
+                    class="create-tool-textarea create-tool-textarea-full"
+                    bind:value={promptAdditionalInstructions}
+                    placeholder="Any additional requirements for the system prompt..."
+                    rows="8"
+                  ></textarea>
+                </div>
+
+                <div class="create-tool-ai-field-right">
+                  <div class="create-tool-ai-field">
+                    <label class="create-tool-label" for="promptLlmProvider">LLM Provider</label>
+                    <select
+                      id="promptLlmProvider"
+                      class="create-tool-input"
+                      bind:value={selectedLLMProvider}
+                    >
+                      <option value={null}>-- Select LLM --</option>
+                      {#each llmProviders as provider}
+                        <option value={provider}>{provider.name}</option>
+                      {/each}
+                    </select>
+                    {#if llmProviders.length === 0}
+                      <div class="create-tool-helper-text" style="color: #f59e0b;">
+                        No LLM providers configured. Configure one in the sidebar's "Attach LLM" panel.
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="create-tool-ai-field">
+                    <Button
+                      onclick={handleGeneratePrompt}
+                      disabled={isGeneratingPrompt || !newAgentName.trim() || !newAgentDescription.trim() || !selectedLLMProvider}
+                      class="bg-purple-600 hover:bg-purple-700"
+                    >
+                      {#snippet children()}
+                        {isGeneratingPrompt ? 'Generating...' : 'Generate with AI'}
+                      {/snippet}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <!-- LLM Provider Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">LLM Provider</div>
+            <div class="create-tool-form-row">
+              <label class="create-tool-label" for="agentLlmProvider">Select which LLM this agent uses</label>
+              <select
+                id="agentLlmProvider"
+                class="create-tool-input"
+                bind:value={newAgentLLMProvider}
+              >
+                <option value="">-- Select LLM --</option>
+                {#each llmProviders as provider}
+                  <option value={provider.name}>{provider.name}</option>
+                {/each}
+              </select>
+              <div class="create-tool-helper-text">
+                This determines which LLM the agent will use when executing tasks.
+              </div>
+            </div>
+          </div>
+
+          <!-- Select Tools Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Select Tools</div>
+            <div class="create-tool-helper-text" style="margin-bottom: 12px;">
+              Choose which tools this agent can use.
+            </div>
+            {#if data.tools.length === 0}
+              <div class="create-tool-helper-text" style="color: #f59e0b;">
+                No tools available. Create some tools first.
+              </div>
+            {:else}
+              {#each data.tools as tool}
+                <label class="tool-checkbox-item">
+                  <input
+                    type="checkbox"
+                    checked={newAgentSelectedTools.includes(tool.id)}
+                    onchange={() => toggleToolSelection(tool.id)}
+                  />
+                  <span class="tool-checkbox-name">{tool.name}</span>
+                  {#if tool.description}
+                    <span class="tool-checkbox-desc">{tool.description}</span>
+                  {/if}
+                </label>
+              {/each}
+            {/if}
+          </div>
+
+          <!-- Output Paths Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Output Paths</div>
+            <div class="create-tool-helper-text" style="margin-bottom: 12px;">
+              Define conditional output paths for routing in multi-agent workflows.
+            </div>
+            {#if newAgentOutputPaths.length > 0}
+              <div class="output-paths-list">
+                {#each newAgentOutputPaths as path, index}
+                  <div class="output-path-row">
+                    <input
+                      type="text"
+                      class="create-tool-input output-path-name"
+                      bind:value={path.name}
+                      placeholder="Path name (e.g., revise)"
+                    />
+                    <input
+                      type="text"
+                      class="create-tool-input output-path-description"
+                      bind:value={path.description}
+                      placeholder="When to choose this path"
+                    />
+                    <select
+                      class="create-tool-input output-path-behavior"
+                      bind:value={path.return_behavior}
+                    >
+                      <option value="node_output">Node Output</option>
+                      <option value="previous_output">Previous Output</option>
+                    </select>
+                    <button class="output-path-remove" onclick={() => removeAgentOutputPath(index)}>
+                      &times;
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+            <button class="output-path-add" onclick={addAgentOutputPath} type="button">
+              + Add Output Path
+            </button>
+          </div>
+        </div>
+
+        <div class="create-tool-footer">
+          <Button variant="outline" onclick={closeCreateAgentModal}>
+            {#snippet children()}Cancel{/snippet}
+          </Button>
+          {#if isConfiguringComplexNode}
+            <Button onclick={handleAddNodeToCanvas} class="bg-purple-600 hover:bg-purple-700">
+              {#snippet children()}Add to Canvas{/snippet}
+            </Button>
+          {:else}
+            <Button onclick={handleCreateAgent} disabled={isCreatingAgent} class="bg-green-600 hover:bg-green-700">
+              {#snippet children()}{isCreatingAgent ? 'Creating...' : 'Create Agent'}{/snippet}
+            </Button>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -1304,6 +2231,16 @@
 
   .current-user small {
     color: #666;
+  }
+
+  .triggers-section {
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #ccc;
+  }
+
+  .trigger-draggable {
+    border-left: 3px solid #e67e22;
   }
 
   .flows-section {
@@ -1366,11 +2303,85 @@
     cursor: grab;
   }
 
+  .sidebar-item {
+    padding: 5px 8px;
+    margin: 5px 0;
+    background: white;
+    border: 1px solid #ccc;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .sidebar-item:hover {
+    background: #e8f4f8;
+  }
+
+  .sidebar-item-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-item-delete {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .sidebar-item-delete:hover {
+    background: #ff4444;
+    color: white;
+  }
+
   .flow-container {
     flex-grow: 1;
+    display: flex;
+    flex-direction: column;
     position: relative;
     padding: 20px;
+    padding-bottom: 0;
     overflow: hidden;
+  }
+
+  .canvas-area {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+  }
+
+  .info-toggle-btn {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    z-index: 10;
+    background: oklch(0.2 0.005 260);
+    color: oklch(0.7 0 0);
+    border: 1px solid oklch(0.7 0 0 / 0.25);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .info-toggle-btn:hover {
+    background: oklch(0.25 0.005 260);
+    color: oklch(0.9 0 0);
   }
 
   /* Validation Toast */
@@ -1805,6 +2816,76 @@
     color: #6e6e6e;
   }
 
+  .highlighted-textarea-container {
+    position: relative;
+    background: #2d2d30;
+    border-radius: 4px;
+  }
+
+  .highlighted-textarea-backdrop,
+  .highlighted-textarea {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    letter-spacing: normal;
+    word-spacing: normal;
+    tab-size: 4;
+    padding: 10px 12px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    margin: 0;
+  }
+
+  .highlighted-textarea-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow: auto;
+    color: #d4d4d4;
+    pointer-events: none;
+    scrollbar-width: none;
+  }
+
+  .highlighted-textarea-backdrop::-webkit-scrollbar {
+    display: none;
+  }
+
+  .highlighted-textarea {
+    background: transparent !important;
+    color: transparent;
+    caret-color: #d4d4d4;
+    position: relative;
+    z-index: 1;
+    resize: vertical;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.2s;
+    border-color: #3e3e42;
+  }
+
+  .highlighted-textarea:focus {
+    border-color: #007acc;
+  }
+
+  .highlighted-textarea::placeholder {
+    color: #6e6e6e;
+  }
+
+  .highlighted-textarea::selection {
+    background: rgba(0, 122, 204, 0.4);
+    color: transparent;
+  }
+
+  .highlighted-textarea-backdrop :global(.template-var) {
+    color: #4ec9b0;
+    font-weight: 600;
+  }
+
   .create-tool-code-container {
     background: #1e1e1e;
     border-radius: 4px;
@@ -1871,5 +2952,129 @@
 
   .node-window::-webkit-scrollbar-thumb:hover {
     background: #888888;
+  }
+
+  /* Agents Section */
+  .agents-section {
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+  }
+
+  /* Tool Checkbox Items (for agent tool selection) */
+  .tool-checkbox-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    background: #2d2d30;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .tool-checkbox-item:hover {
+    background: #3e3e42;
+  }
+
+  .tool-checkbox-item input[type="checkbox"] {
+    margin-top: 2px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: #007acc;
+    flex-shrink: 0;
+  }
+
+  .tool-checkbox-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #cccccc;
+    white-space: nowrap;
+  }
+
+  .tool-checkbox-desc {
+    font-size: 12px;
+    color: #888888;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Composed Agent Badge */
+  .composed-badge {
+    margin-left: 4px;
+    font-size: 12px;
+  }
+
+  /* Agent Buttons in sidebar */
+  .agent-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  /* Output Paths */
+  .output-paths-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .output-path-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .output-path-name {
+    width: 120px;
+  }
+
+  .output-path-description {
+    flex: 1;
+  }
+
+  .output-path-behavior {
+    width: 150px;
+    flex-shrink: 0;
+  }
+
+  .output-path-remove {
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: #5a1d1d;
+    color: #ff6b6b;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .output-path-remove:hover {
+    background: #7a2d2d;
+  }
+
+  .output-path-add {
+    padding: 6px 12px;
+    background: transparent;
+    border: 1px dashed #3e3e42;
+    color: #007acc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    transition: all 0.2s ease;
+  }
+
+  .output-path-add:hover {
+    border-color: #007acc;
+    background: rgba(0, 122, 204, 0.1);
   }
 </style>

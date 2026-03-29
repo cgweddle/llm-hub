@@ -4,7 +4,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 import os
 import logging
-from .database_setup import User, Agent, Tool, Flow, Execution, Message, Prompts
+from .database_setup import User, Agent, Tool, Flow, Execution, Prompts
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -84,19 +84,20 @@ def get_session():
 
 ## Agent database
 
-def create_agent(session: Any, user_id: int, name: str, description: str, 
-                    agent_type: str, system_prompt: str, llm_config: Dict,
-                    tools_config: Dict, metadata: Dict = None) -> Agent:
-    """Create a new agent"""
+def create_agent(session: Any, user_id: int, name: str, description: str,
+                    graph_config: Dict, output_schema: Dict = None) -> Agent:
+    """Create a new agent with a unified graph_config.
+
+    graph_config contains nodes, edges, entry_point, exit_points, and
+    optionally max_loop_iterations. Every agent — simple or complex —
+    is represented as a graph.
+    """
     agent = Agent(
         user_id=user_id,
         name=name,
         description=description,
-        agent_type=agent_type,
-        system_prompt=system_prompt,
-        llm_config=llm_config,
-        tools_config=tools_config,
-        metadata=metadata or {}
+        graph_config=graph_config,
+        output_schema=output_schema
     )
     session.add(agent)
     session.commit()
@@ -112,16 +113,17 @@ def get_agent_by_id(session: Any, agent_id: int) -> Optional[Agent]:
 
 def update_agent(session: Any, agent_id: int, **kwargs) -> Optional[Agent]:
     """Update an agent"""
-    agent = get_agent_by_id(agent_id)
+    agent = get_agent_by_id(session, agent_id)
     if agent:
         for key, value in kwargs.items():
             setattr(agent, key, value)
         session.commit()
+        session.refresh(agent)
     return agent
 
 def delete_agent(session: Any, agent_id: int) -> bool:
     """Delete an agent"""
-    agent = get_agent_by_id(agent_id)
+    agent = get_agent_by_id(session, agent_id)
     if agent:
         session.delete(agent)
         session.commit()
@@ -236,6 +238,7 @@ def delete_tool(session: Any, tool_id: int) -> bool:
         return True
     return False
 
+
 ## Public items functions
 def get_public_agents(session: Any) -> List[Agent]:
     """Get all public agents"""
@@ -300,3 +303,39 @@ def get_available_flows(session: Any, user_id: int) -> List[Flow]:
 def get_prompt_by_name(session: Any, prompt_name: str) -> Optional[Prompts]:
     """Get prompt by name from Prompts table"""
     return session.query(Prompts).filter(Prompts.prompt_name == prompt_name).first()
+
+
+## Execution database functions
+
+def create_execution(session: Any, **kwargs) -> Execution:
+    """Create an execution record. Accepts any Execution column as a kwarg."""
+    execution = Execution(**kwargs)
+    session.add(execution)
+    session.commit()
+    session.refresh(execution)
+    return execution
+
+def get_execution_by_id(session: Any, execution_id: int) -> Optional[Execution]:
+    """Get a single execution by ID (children are lazy-loaded via relationship)."""
+    return session.query(Execution).filter(Execution.id == execution_id).first()
+
+def get_user_executions(session: Any, user_id: int, limit: int = 50, offset: int = 0) -> List[Execution]:
+    """Get top-level executions for a user (parent_id is NULL), newest first."""
+    return (
+        session.query(Execution)
+        .filter(Execution.user_id == user_id, Execution.parent_id.is_(None))
+        .order_by(Execution.started_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+def update_execution(session: Any, execution_id: int, **kwargs) -> Optional[Execution]:
+    """Update an execution record."""
+    execution = get_execution_by_id(session, execution_id)
+    if execution:
+        for key, value in kwargs.items():
+            setattr(execution, key, value)
+        session.commit()
+        session.refresh(execution)
+    return execution

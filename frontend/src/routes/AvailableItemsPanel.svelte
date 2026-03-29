@@ -152,7 +152,7 @@
                 </div>
                 <div class="item-description">{agent.description}</div>
                 <div class="item-meta">
-                  <span class="item-type">{agent.agent_type}</span>
+                  <span class="item-type">{agent.graph_config && Object.keys(agent.graph_config.nodes || {}).length > 1 ? 'Multi-Agent' : (agent.graph_config?.nodes?.[agent.graph_config?.entry_point]?.agent_type || 'agent')}</span>
                 </div>
               </div>
             {/each}

@@ -1,15 +1,19 @@
 """
 Flow Executor
-Executes database flows
+Executes database flows (DAGs of tool and agent nodes).
+Records the full execution tree in the database.
 """
 
 import sys
 import os
 import json
+import asyncio
 import logging
+from datetime import datetime
 from typing import Dict, Any, Callable, Optional, List
 from sqlalchemy.orm import Session
-from src.database.database_setup import Flow, Tool
+from src.database.database_setup import Flow, Tool, Execution
+from src.database.database import create_execution, update_execution
 from src.executors.tool_executor import create_executable_function, create_conda_executable_function
 from src.utils import get_llm_config_by_name
 
@@ -18,9 +22,10 @@ from src.utils import get_llm_config_by_name
 logger = logging.getLogger(__name__)
 
 class FlowExecutor:
-    def __init__(self, session: Session, flow_id: int):
+    def __init__(self, session: Session, flow_id: int, user_id: int):
         self.session = session
         self.flow_id = flow_id
+        self.user_id = user_id
 
         #Load flow from the database
         flow = self.session.query(Flow).filter(Flow.id == flow_id).first()
@@ -34,6 +39,16 @@ class FlowExecutor:
         self.tools_cache = {}
         self.execution_trace = []
 
+        # DB execution tracking
+        self.root_execution = None
+        self._step_sequence = 0
+
+    def _next_sequence(self) -> int:
+        """Get and increment the step sequence counter."""
+        seq = self._step_sequence
+        self._step_sequence += 1
+        return seq
+
     def _prepare_tools(self, start_node: Optional[int] = None):
         nodes_config = self.graph_config["nodes"]
         edges_config = self.graph_config["edges"]
@@ -44,14 +59,22 @@ class FlowExecutor:
             nodes_to_reload.add(start_node)
             for node_name in nodes_to_reload:
                 node_info = nodes_config.get(node_name)
-                
+
                 tool_id = node_info['tool_id']
                 self.tools_cache.pop(tool_id, None)
                 self.executable_functions.pop(node_name, None)
                 logger.info(f"Cleared cache for tool {tool_id}")
-        
+
         # Load / reload tools
         for node_name, node_info in nodes_config.items():
+            # Skip agent nodes — they delegate to AgentExecutor at runtime
+            if node_info.get('node_type') == 'agent':
+                continue
+
+            # Skip trigger nodes — they provide initial input, not executable functions
+            if node_info.get('node_type') == 'trigger':
+                continue
+
             # Support both 'id' and 'tool_id' keys for backwards compatibility
             tool_id = node_info.get('id') or node_info.get('tool_id')
 
@@ -111,15 +134,16 @@ class FlowExecutor:
                     if next_node not in downstream_nodes:
                         downstream_nodes.add(next_node)
                         to_visit.append(next_node)
-        
+
         return downstream_nodes
-    
+
     def _execute_node(self, node_name: str, input_data: Any):
         if node_name not in self.executable_functions:
             raise ValueError(f"Node {node_name} not found in executable functions")
-        
+
         node_info = self.executable_functions[node_name]
         func = node_info["function"]
+        tool = node_info["tool"]
 
         ## Set llm config for the specific node
         llm_config = node_info.get("llm_config")
@@ -128,11 +152,33 @@ class FlowExecutor:
 
         logger.info(f"Executing node: {node_name}")
 
+        # Create child execution record for this tool node
+        step_exec = create_execution(
+            self.session,
+            parent_id=self.root_execution.id,
+            user_id=self.user_id,
+            tool_id=tool.id,
+            execution_type='tool',
+            node_id=node_name,
+            name=tool.name,
+            sequence=self._next_sequence(),
+            input_data=input_data,
+            status='running',
+            started_at=datetime.now()
+        )
+
         try:
             #Execute function
             output = func(**input_data)
 
-            # Record
+            # Update DB record
+            update_execution(self.session, step_exec.id,
+                status='completed',
+                output_data=output,
+                completed_at=datetime.now()
+            )
+
+            # Keep in-memory trace for response compatibility
             self.execution_trace.append({
                 "node": node_name,
                 "input": input_data,
@@ -141,8 +187,13 @@ class FlowExecutor:
             })
             logger.info(f"Node {node_name} completed successfully")
             return output
-        
+
         except Exception as e:
+            update_execution(self.session, step_exec.id,
+                status='failed',
+                error_message=str(e),
+                completed_at=datetime.now()
+            )
             self.execution_trace.append({
                 "node": node_name,
                 "input": input_data,
@@ -187,7 +238,7 @@ class FlowExecutor:
             if base_url:
                 os.environ["AZURE_API_BASE"] = base_url
 
-        
+
 
     def _find_next_node(self, current_node: str) -> List[str]:
         """Find the next nodes in the flow"""
@@ -197,7 +248,7 @@ class FlowExecutor:
             if edge['from_node'] == current_node:
                 next_nodes.append(edge['to_node'])
         return next_nodes
-    
+
     def _apply_mapping(self, output_data: Any, mapping: Optional[Dict[str, str]], target_input_schema: Dict, base_input_values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Apply mapping form source output to target input
@@ -236,10 +287,104 @@ class FlowExecutor:
                     logger.warning(f"Output field '{output_field}' not found in output data")
 
         return result
-    
+
+    def _execute_agent_node(self, node_name: str, input_data: Any) -> str:
+        """
+        Execute an agent node by delegating to AgentExecutor.
+
+        Agent nodes receive text input and produce text output.
+        If input_data is a dict, it's serialized to a string for the agent.
+        """
+        from src.executors.agent_executor import AgentExecutor
+
+        node_config = self.graph_config["nodes"][node_name]
+        agent_id = node_config["id"]
+
+        # Convert dict input to text for agent consumption
+        if isinstance(input_data, dict):
+            input_text = json.dumps(input_data, indent=2)
+        else:
+            input_text = str(input_data)
+
+        logger.info(f"Executing agent node: {node_name} (agent_id={agent_id})")
+
+        # Create child execution record for this agent node
+        agent_exec = create_execution(
+            self.session,
+            parent_id=self.root_execution.id,
+            user_id=self.user_id,
+            agent_id=agent_id,
+            execution_type='agent',
+            node_id=node_name,
+            name=node_config.get('name', f'Agent {agent_id}'),
+            sequence=self._next_sequence(),
+            input_data={"input": input_text},
+            status='running',
+            started_at=datetime.now()
+        )
+
+        try:
+            executor = AgentExecutor(self.session)
+            # Run the async method synchronously, passing parent execution for sub-recording
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        future = pool.submit(
+                            asyncio.run,
+                            executor.execute_agent_node(agent_id, input_text, self.session, parent_execution=agent_exec)
+                        )
+                        result = future.result()
+                else:
+                    result = loop.run_until_complete(
+                        executor.execute_agent_node(agent_id, input_text, self.session, parent_execution=agent_exec)
+                    )
+            except RuntimeError:
+                result = asyncio.run(
+                    executor.execute_agent_node(agent_id, input_text, self.session, parent_execution=agent_exec)
+                )
+
+            update_execution(self.session, agent_exec.id,
+                status='completed',
+                output_data={"result": result},
+                completed_at=datetime.now()
+            )
+
+            self.execution_trace.append({
+                "node": node_name,
+                "input": input_data,
+                "output": result,
+                "status": "success"
+            })
+            logger.info(f"Agent node {node_name} completed successfully")
+            return result
+
+        except Exception as e:
+            update_execution(self.session, agent_exec.id,
+                status='failed',
+                error_message=str(e),
+                completed_at=datetime.now()
+            )
+            self.execution_trace.append({
+                "node": node_name,
+                "input": input_data,
+                "output": None,
+                "status": "failed",
+                "error": str(e)
+            })
+            logger.error(f"Agent node {node_name} failed: {e}")
+            raise
+
+    def _is_agent_node(self, node_name: str) -> bool:
+        """Check if a node is an agent node."""
+        node_config = self.graph_config["nodes"].get(node_name, {})
+        return node_config.get("node_type") == "agent"
+
     def _execute_from_node(self, start_node: str, initial_input: Any) -> Any:
         """
-        Execute flow from a specific node
+        Execute flow from a specific node.
+        Supports both tool nodes and agent nodes.
 
         Args:
             start_node: Node name to start from
@@ -251,41 +396,145 @@ class FlowExecutor:
         current_input = initial_input
 
         while True:
-            #Execute node
-            output = self._execute_node(current_node, current_input)
+            node_config = self.graph_config["nodes"].get(current_node, {})
 
-            #Find next nodes
+            # Trigger node: extract text value and pass to next node
+            if node_config.get('node_type') == 'trigger':
+                trigger_value = node_config.get('input_value', '')
+                if trigger_value:
+                    current_input = trigger_value
+
+                # Record trigger as child execution
+                create_execution(
+                    self.session,
+                    parent_id=self.root_execution.id,
+                    user_id=self.user_id,
+                    execution_type='trigger',
+                    node_id=current_node,
+                    name=node_config.get('name', 'Trigger'),
+                    sequence=self._next_sequence(),
+                    input_data=None,
+                    output_data={"value": current_input},
+                    status='completed',
+                    started_at=datetime.now(),
+                    completed_at=datetime.now()
+                )
+
+                self.execution_trace.append({
+                    "node": current_node,
+                    "input": None,
+                    "output": current_input,
+                    "status": "success"
+                })
+
+                next_nodes = self._find_next_node(current_node)
+                if not next_nodes:
+                    return current_input
+
+                next_node = next_nodes[0]
+
+                # Apply mapping from trigger to next node
+                edge_mapping = None
+                for edge in self.graph_config['edges']:
+                    if edge['from_node'] == current_node and edge['to_node'] == next_node:
+                        edge_mapping = edge.get('mapping')
+                        break
+
+                if edge_mapping:
+                    result = {}
+                    for output_field, input_param in edge_mapping.items():
+                        result[input_param] = current_input
+                    current_input = result
+                elif isinstance(current_input, str):
+                    # Auto-map: if next node expects named params, wrap in dict
+                    next_node_info = self.executable_functions.get(next_node, {})
+                    next_schema = next_node_info.get("input_schema", {})
+                    if next_schema:
+                        props = next_schema.get('properties', next_schema)
+                        params = list(props.keys())
+                        if len(params) == 1:
+                            current_input = {params[0]: current_input}
+
+                current_node = next_node
+                continue
+
+            # Execute node — dispatch based on node type
+            if self._is_agent_node(current_node):
+                output = self._execute_agent_node(current_node, current_input)
+            else:
+                output = self._execute_node(current_node, current_input)
+
+            # Find next nodes
             next_nodes = self._find_next_node(current_node)
 
-            #If there's not a next node, exit and return
+            # If there's not a next node, exit and return
             if not next_nodes:
                 logger.info(f"Reached exit at node: {current_node}")
                 return output
 
-            #Just for sequential nodes
-            #Implement parallelism for parallel processes
+            # Just for sequential nodes
             next_node = next_nodes[0]
             if len(next_nodes) > 1:
                 logger.warning(f"Multiple next nodes, just using first: {next_node}")
-            
-            #Find edge between current and next node
-            edge_mapping = None
-            for edge in self.graph_config['edges']:
-                if edge['from_node'] == current_node and edge['to_node'] == next_node:
-                    edge_mapping = edge.get('mapping')
-                    break
 
-            target_node_info = self.executable_functions[next_node]
-            target_input_schema = target_node_info.get("input_schema", {})
+            # Prepare input for next node based on node types
+            current_is_agent = self._is_agent_node(current_node)
+            next_is_agent = self._is_agent_node(next_node)
 
-            # Get base input values from the next node config (user-entered values)
-            next_node_config = self.graph_config['nodes'].get(next_node, {})
-            base_input_values = next_node_config.get('input_values', {})
+            if current_is_agent and next_is_agent:
+                # Agent→Agent: text passthrough
+                current_input = output
+            elif current_is_agent and not next_is_agent:
+                # Agent→Tool: assign agent text output to mapped input parameters
+                edge_mapping = None
+                for edge in self.graph_config['edges']:
+                    if edge['from_node'] == current_node and edge['to_node'] == next_node:
+                        edge_mapping = edge.get('mapping')
+                        break
 
-            #Apply mapping (merges base values with edge-connected values)
-            current_input = self._apply_mapping(output, edge_mapping, target_input_schema, base_input_values)
+                next_node_config = self.graph_config['nodes'].get(next_node, {})
+                base_input_values = next_node_config.get('input_values', {})
+                target_node_info = self.executable_functions.get(next_node, {})
+                target_input_schema = target_node_info.get("input_schema", {})
 
-            #Move to the next node
+                if edge_mapping:
+                    # Use mapping: agent output is text, map it to specified param(s)
+                    result = base_input_values.copy() if base_input_values else {}
+                    for output_field, input_param in edge_mapping.items():
+                        result[input_param] = output
+                    current_input = result
+                elif target_input_schema:
+                    # Auto-detect: assign to first string parameter
+                    result = base_input_values.copy() if base_input_values else {}
+                    props = target_input_schema.get("properties", target_input_schema)
+                    for param_name, param_info in props.items():
+                        if param_name not in result:
+                            result[param_name] = output
+                            break
+                    current_input = result
+                else:
+                    current_input = {"input": output}
+            elif not current_is_agent and next_is_agent:
+                # Tool→Agent: serialize tool output dict to text for agent
+                # Mapping is ignored — agent gets text
+                current_input = output
+            else:
+                # Tool→Tool: standard field-level mapping
+                edge_mapping = None
+                for edge in self.graph_config['edges']:
+                    if edge['from_node'] == current_node and edge['to_node'] == next_node:
+                        edge_mapping = edge.get('mapping')
+                        break
+
+                target_node_info = self.executable_functions[next_node]
+                target_input_schema = target_node_info.get("input_schema", {})
+
+                next_node_config = self.graph_config['nodes'].get(next_node, {})
+                base_input_values = next_node_config.get('input_values', {})
+
+                current_input = self._apply_mapping(output, edge_mapping, target_input_schema, base_input_values)
+
+            # Move to the next node
             current_node = next_node
 
     def _generate_combined_flow_script(self, initial_input: Any) -> str:
@@ -293,7 +542,7 @@ class FlowExecutor:
         edges_config = self.graph_config["edges"]
         entry_point = self.graph_config["entry_point"]
 
-        # Collect __fugure__ imports and tool ndoe
+        # Collect __future__ imports and tool nodes
         future_imports = []
         tool_code_blocks = []
         node_to_function = {}
@@ -319,12 +568,12 @@ class FlowExecutor:
         ## Put future imports at the top
         if future_imports:
             script_parts.extend(future_imports)
-        
+
         ## Add the tool code
         script_parts.append('# Tool functions')
         for code_block in tool_code_blocks:
             script_parts.append(code_block)
-        
+
         ## Flow execution
         script_parts.append('# Flow execution')
         script_parts.append(f'initial_input = {json.dumps(initial_input)}')
@@ -337,14 +586,14 @@ class FlowExecutor:
             execution_order.append(current_node)
             visited.add(current_node)
 
-            # Fine next node
+            # Find next node
             next_node = None
             for edge in edges_config:
                 if edge["from_node"] == current_node:
                     next_node = edge["to_node"]
                     break
             current_node = next_node
-        
+
         # Generate function calls
         for i, node_id in enumerate(execution_order):
             func_name = node_to_function[node_id]
@@ -371,15 +620,17 @@ class FlowExecutor:
         script_parts.append(f'final_output = output_{len(execution_order)-1}')
 
         return '\n'.join(script_parts)
-    
-    
+
+
     def execute_flow(self, initial_input: Any, conda_env: str):
         """
-        Execute a flow from the database
-        
+        Execute a flow from the database.
+        Creates a top-level Execution record and child records for each node.
+
         Returns:
             {
                 "flow_id": int,
+                "execution_id": int,
                 "status": "completed" | "failed",
                 "final_output": Any,
                 "execution_trace": [
@@ -391,7 +642,20 @@ class FlowExecutor:
         """
         try:
             self.execution_trace = []
+            self._step_sequence = 0
             self.conda_env = conda_env
+
+            # Create top-level execution record
+            self.root_execution = create_execution(
+                self.session,
+                user_id=self.user_id,
+                flow_id=self.flow_id,
+                execution_type='flow',
+                name=self.flow.name,
+                input_data=initial_input,
+                status='running',
+                started_at=datetime.now()
+            )
 
             #Prepare tools
             self._prepare_tools()
@@ -400,17 +664,32 @@ class FlowExecutor:
             entry_point = self.graph_config["entry_point"]
             final_output = self._execute_from_node(entry_point, initial_input)
 
+            # Mark execution as completed
+            update_execution(self.session, self.root_execution.id,
+                status='completed',
+                output_data=final_output,
+                completed_at=datetime.now()
+            )
+
             return {
                 "flow_id": self.flow_id,
+                "execution_id": self.root_execution.id,
                 "status": "completed",
                 "final_output": final_output,
                 "execution_trace": self.execution_trace
             }
-        
+
         except Exception as e:
             logger.error(f"Flow execution failed: {e}")
+            if self.root_execution:
+                update_execution(self.session, self.root_execution.id,
+                    status='failed',
+                    error_message=str(e),
+                    completed_at=datetime.now()
+                )
             return {
                 "flow_id": self.flow_id,
+                "execution_id": self.root_execution.id if self.root_execution else None,
                 "status": "failed",
                 "final_output": None,
                 "execution_trace": self.execution_trace,
@@ -419,17 +698,17 @@ class FlowExecutor:
 
 
 
-    
+
     def resume_flow(self, flow_id: int, execution_trace: List[Dict], resume_input: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         """
         Resume flow from the last successful node trace
-        Optinally provide a new input to the failed node
+        Optionally provide a new input to the failed node
 
         Args:
             execution_trace: Execution trace from run
             resume_input: [Optional] Input to override for the failed node
         Returns:
-            FlowExecutionResult dict (same as execution_flow)
+            FlowExecutionResult dict (same as execute_flow)
         """
         try:
             # Restore the execution trace
@@ -444,38 +723,63 @@ class FlowExecutor:
                     failed_node = record["node"]
                     failed_input = record["input"]
                     break
-                
+
             if not failed_node:
                 raise ValueError("No failed node found")
-            
+
             self.execution_trace = [r for r in self.execution_trace if r["status"] != "failed"]
-            
+
             #Inputs into node
             if resume_input is not None:
                 input_data = resume_input
             else:
                 input_data = failed_input
 
+            # Create a new top-level execution for the resume
+            self.root_execution = create_execution(
+                self.session,
+                user_id=self.user_id,
+                flow_id=self.flow_id,
+                execution_type='flow',
+                name=f"{self.flow.name} (resumed)",
+                input_data=input_data,
+                status='running',
+                started_at=datetime.now(),
+                execution_metadata={"resumed_from_node": failed_node}
+            )
+
             #Reload tools from the failed node onwards
             self._prepare_tools(start_node=failed_node)
 
             final_output = self._execute_from_node(failed_node, input_data)
 
+            update_execution(self.session, self.root_execution.id,
+                status='completed',
+                output_data=final_output,
+                completed_at=datetime.now()
+            )
+
             return {
                 "flow_id": self.flow_id,
+                "execution_id": self.root_execution.id,
                 "status": "completed",
                 "final_output": final_output,
                 "execution_trace": self.execution_trace
             }
-            
+
         except Exception as e:
             logger.error(f"Flow resume failed: {e}")
+            if self.root_execution:
+                update_execution(self.session, self.root_execution.id,
+                    status='failed',
+                    error_message=str(e),
+                    completed_at=datetime.now()
+                )
             return {
                 "flow_id": self.flow_id,
+                "execution_id": self.root_execution.id if self.root_execution else None,
                 "status": "failed",
                 "final_output": None,
                 "execution_trace": self.execution_trace,
                 "error": str(e)
             }
-        
-

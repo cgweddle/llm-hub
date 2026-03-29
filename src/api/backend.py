@@ -13,12 +13,15 @@ from src.database.database import (
     get_available_agents, get_available_tools, get_available_flows,
     get_public_agents, get_public_tools, get_public_flows,
     create_tool, get_user_tools, create_flow, get_user_flows,
-    get_tool_by_id, update_tool, get_flow_by_id, update_flow, delete_flow
+    get_tool_by_id, update_tool, delete_tool, get_flow_by_id, update_flow, delete_flow,
+    get_agent_by_id, update_agent, delete_agent,
+    get_execution_by_id, get_user_executions
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.executors.flow_executor import FlowExecutor
+from src.executors.agent_executor import AgentExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional, Dict, Any
@@ -57,21 +60,39 @@ def get_db():
 class AgentCreate(BaseModel):
     name: str
     description: str
-    agent_type: str
-    system_prompt: str
-    llm_config: dict
-    tools_config: dict
-    agent_metadata: Optional[dict] = None
+    graph_config: dict              # Required — unified agent graph
+    output_schema: Optional[dict] = None
+    is_public: bool = False
 
 class AgentResponse(BaseModel):
     id: int
     name: str
     description: str
-    agent_type: str
+    graph_config: dict
+    output_schema: Optional[dict] = None
+    is_public: bool = False
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+class AgentUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    graph_config: Optional[dict] = None
+    output_schema: Optional[dict] = None
+
+class AgentExecuteRequest(BaseModel):
+    user_id: int
+    input_data: str
+    stream: bool = False
+
+class AgentExecuteResponse(BaseModel):
+    execution_id: int
+    status: str
+    result: Any
+    messages: List[Dict[str, Any]]
+    cost: Optional[Dict[str, Any]] = None
 
 class UserCreate(BaseModel):
     username: str
@@ -176,8 +197,46 @@ class CondaEnvironmentResponse(BaseModel):
     environments: List[CondaEnvironment]
 
 class FlowExecuteRequest(BaseModel):
+    user_id: int
     initial_input: dict
     conda_env: Optional[str] = None
+
+class ExecutionResponse(BaseModel):
+    """Recursive execution tree node."""
+    id: int
+    parent_id: Optional[int] = None
+    execution_type: str
+    node_id: Optional[str] = None
+    name: Optional[str] = None
+    sequence: Optional[int] = None
+    input_data: Optional[Any] = None
+    output_data: Optional[Any] = None
+    status: str
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    execution_metadata: Optional[Dict[str, Any]] = None
+    children: List["ExecutionResponse"] = []
+
+    class Config:
+        from_attributes = True
+
+# Needed for the self-referencing model
+ExecutionResponse.model_rebuild()
+
+class ExecutionListItem(BaseModel):
+    """Lightweight execution summary for list endpoints."""
+    id: int
+    execution_type: str
+    name: Optional[str] = None
+    status: str
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    flow_id: Optional[int] = None
+    agent_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
 
 class PythonScriptToolCreate(BaseModel):
     name: str
@@ -185,6 +244,22 @@ class PythonScriptToolCreate(BaseModel):
     script_code: str
     main_function: str
     is_public: bool = False
+
+class SystemPromptGenerateRequest(BaseModel):
+    agent_name: str
+    agent_description: str
+    tool_names: List[str] = []
+    model: str
+    additional_instructions: Optional[str] = None
+
+class UserPromptGenerateRequest(BaseModel):
+    agent_name: str
+    agent_description: str
+    tool_names: List[str] = []
+    model: str
+    generated_system_prompt: str
+    additional_instructions: Optional[str] = None
+
 
 class CodeGenerateRequest(BaseModel):
     tool_name: str
@@ -232,11 +307,8 @@ def create_agent_endpoint(agent_data: AgentCreate, user_id: int, db: Session = D
             user_id=user_id,
             name=agent_data.name,
             description=agent_data.description,
-            agent_type=agent_data.agent_type,
-            system_prompt=agent_data.system_prompt,
-            llm_config=agent_data.llm_config,
-            tools_config=agent_data.tools_config,
-            agent_metadata=agent_data.agent_metadata
+            graph_config=agent_data.graph_config,
+            output_schema=agent_data.output_schema
         )
         return agent
     except Exception as e:
@@ -250,14 +322,184 @@ def get_user_agents_endpoint(user_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user agents: {str(e)}")
 
-@app.post("/agents/{agent_id}/execute")
-def execute_agent(agent_id: int, user_id: int, input_data: str, db: Session = Depends(get_db)):
-    """Execute an agent"""
-    agent_service = AgentService(db)
-    # You'll need to get the LLM instance here
-    llm = get_llm_instance()  # Implement this based on your LLM setup
-    result = agent_service.execute_agent(user_id, agent_id, input_data, llm)
-    return {"result": result}
+@app.post("/agents/{agent_id}/execute", response_model=AgentExecuteResponse)
+async def execute_agent_endpoint(
+    agent_id: int,
+    request: AgentExecuteRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Execute an agent (supports both Google ADK ReAct and PydanticAI agents).
+
+    This endpoint automatically detects the agent type and routes to the appropriate
+    executor. Supports both standard and streaming execution modes.
+
+    Args:
+        agent_id: ID of the agent to execute
+        request: AgentExecuteRequest with user_id, input_data, and optional stream flag
+        db: Database session (injected)
+
+    Returns:
+        AgentExecuteResponse with execution results
+
+    Example:
+        POST /agents/5/execute
+        {
+            "user_id": 1,
+            "input_data": "What is 2+2?",
+            "stream": false
+        }
+    """
+    try:
+        executor = AgentExecutor(db)
+
+        # Handle streaming requests
+        if request.stream:
+            async def stream_generator():
+                try:
+                    result = await executor.execute_agent(
+                        agent_id=agent_id,
+                        user_id=request.user_id,
+                        input_data=request.input_data,
+                        stream=True
+                    )
+
+                    # result is an async generator for streaming
+                    if hasattr(result, '__aiter__'):
+                        async for chunk in result:
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                    else:
+                        # Fallback if not streaming (shouldn't happen but handle it)
+                        yield f"data: {json.dumps(result)}\n\n"
+
+                except Exception as e:
+                    error_chunk = {
+                        "type": "error",
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+
+            return StreamingResponse(
+                stream_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                }
+            )
+
+        # Standard (non-streaming) execution
+        else:
+            result = await executor.execute_agent(
+                agent_id=agent_id,
+                user_id=request.user_id,
+                input_data=request.input_data,
+                stream=False
+            )
+            return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+@app.patch("/agents/{agent_id}", response_model=AgentResponse)
+def update_agent_endpoint(agent_id: int, agent_update: AgentUpdate, db: Session = Depends(get_db)):
+    """Update an agent's properties"""
+    agent = get_agent_by_id(db, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    update_data = agent_update.model_dump(exclude_unset=True)
+    if not update_data:
+        return agent
+
+    try:
+        updated_agent = update_agent(db, agent_id, **update_data)
+        return updated_agent
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
+
+@app.delete("/agents/{agent_id}")
+def delete_agent_endpoint(agent_id: int, db: Session = Depends(get_db)):
+    """Delete an agent"""
+    try:
+        success = delete_agent(db, agent_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return {"status": "success", "message": f"Agent {agent_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent deletion failed: {str(e)}")
+
+@app.post("/agents/generate-system-prompt")
+def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Session = Depends(get_db)):
+    """Generate a system prompt for an agent using AI with streaming"""
+    try:
+        from src.ai_integrations.generate_agent_system_prompt import generate_system_prompt_stream
+
+        def stream_generator():
+            try:
+                for chunk in generate_system_prompt_stream(
+                    session=db,
+                    agent_name=request.agent_name,
+                    agent_description=request.agent_description,
+                    tool_names=request.tool_names,
+                    llm_model=request.model,
+                    additional_instructions=request.additional_instructions
+                ):
+                    yield chunk
+            except Exception as e:
+                yield json.dumps({"error": f"Streaming error: {str(e)}"}) + "\n"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"System prompt generation failed: {str(e)}")
+
+@app.post("/agents/generate-user-prompt")
+def generate_user_prompt_endpoint(request: UserPromptGenerateRequest, db: Session = Depends(get_db)):
+    """Generate a task-specific user prompt for an agent using AI with streaming"""
+    try:
+        from src.ai_integrations.generate_agent_system_prompt import generate_user_prompt_stream
+
+        def stream_generator():
+            try:
+                for chunk in generate_user_prompt_stream(
+                    session=db,
+                    agent_name=request.agent_name,
+                    agent_description=request.agent_description,
+                    tool_names=request.tool_names,
+                    llm_model=request.model,
+                    generated_system_prompt=request.generated_system_prompt,
+                    additional_instructions=request.additional_instructions
+                ):
+                    yield chunk
+            except Exception as e:
+                yield json.dumps({"error": f"Streaming error: {str(e)}"}) + "\n"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"User prompt generation failed: {str(e)}")
 
 @app.post("/users/", response_model=UserResponse)
 def create_user_endpoint(user_data: UserCreate, db: Session = Depends(get_db)):
@@ -485,6 +727,19 @@ def update_tool_endpoint(tool_id: int, tool_update: ToolUpdate, db: Session = De
 
     return updated_tool
 
+@app.delete("/tools/{tool_id}")
+def delete_tool_endpoint(tool_id: int, db: Session = Depends(get_db)):
+    """Delete a tool"""
+    try:
+        success = delete_tool(db, tool_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Tool not found")
+        return {"status": "success", "message": f"Tool {tool_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tool deletion failed: {str(e)}")
+
 # Tool Validation endpoints
 @app.post("/tools/validate-two")
 def validate_two_tools_endpoint(request: ValidateTwoToolsRequest):
@@ -605,7 +860,7 @@ def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
 def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session = Depends(get_db)):
     """Execute a flow"""
     try:
-        executor = FlowExecutor(db, flow_id)
+        executor = FlowExecutor(db, flow_id, user_id=request.user_id)
         result = executor.execute_flow(request.initial_input, request.conda_env)
 
         # Update the flow's conda_env if provided
@@ -617,11 +872,11 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
         raise HTTPException(status_code=500, detail=f"Flow execution failed: {str(e)}")
 
 @app.post("/flows/{flow_id}/resume")
-def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, db: Session = Depends(get_db)):
+def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, user_id: int = 1, db: Session = Depends(get_db)):
     """Resume a failed flow"""
     try:
-        executor = FlowExecutor(db, flow_id)
-        result = executor.resume_flow(execution_trace, resume_input)
+        executor = FlowExecutor(db, flow_id, user_id=user_id)
+        result = executor.resume_flow(flow_id, execution_trace, resume_input)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow resume failed: {str(e)}")
@@ -658,6 +913,92 @@ def delete_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow deletion failed: {str(e)}")
+
+# ─── Execution Endpoints ───
+
+def _execution_to_tree(execution) -> dict:
+    """Recursively convert an Execution ORM object to a dict tree."""
+    return {
+        "id": execution.id,
+        "parent_id": execution.parent_id,
+        "execution_type": execution.execution_type,
+        "node_id": execution.node_id,
+        "name": execution.name,
+        "sequence": execution.sequence,
+        "input_data": execution.input_data,
+        "output_data": execution.output_data,
+        "status": execution.status,
+        "error_message": execution.error_message,
+        "started_at": execution.started_at,
+        "completed_at": execution.completed_at,
+        "execution_metadata": execution.execution_metadata,
+        "langfuse_trace_id": execution.langfuse_trace_id,
+        "children": [_execution_to_tree(child) for child in execution.children]
+    }
+
+@app.get("/executions", response_model=List[ExecutionListItem])
+def list_executions_endpoint(user_id: int, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+    """List top-level executions for a user, newest first."""
+    executions = get_user_executions(db, user_id, limit=limit, offset=offset)
+    return executions
+
+@app.get("/executions/{execution_id}")
+def get_execution_endpoint(execution_id: int, db: Session = Depends(get_db)):
+    """Get a full execution tree by ID (recursively includes all children)."""
+    execution = get_execution_by_id(db, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return _execution_to_tree(execution)
+
+@app.get("/executions/{execution_id}/trace")
+def get_execution_trace_endpoint(execution_id: int, db: Session = Depends(get_db)):
+    """Fetch the LangFuse trace for an execution's agent call."""
+    execution = get_execution_by_id(db, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if not execution.langfuse_trace_id:
+        raise HTTPException(status_code=404, detail="No LangFuse trace for this execution")
+
+    try:
+        from src.executors.agent_executor import langfuse_client, LANGFUSE_AVAILABLE
+        if not LANGFUSE_AVAILABLE or not langfuse_client:
+            raise HTTPException(status_code=503, detail="LangFuse not configured")
+
+        trace = langfuse_client.api.trace.get(execution.langfuse_trace_id)
+
+        # Convert observations to serializable dicts
+        observations = []
+        for obs in (trace.observations or []):
+            observations.append({
+                "id": obs.id,
+                "name": obs.name,
+                "type": obs.type,
+                "input": obs.input,
+                "output": obs.output,
+                "model": getattr(obs, 'model', None),
+                "start_time": str(obs.start_time) if obs.start_time else None,
+                "end_time": str(obs.end_time) if obs.end_time else None,
+                "usage": {
+                    "input": obs.usage.input if obs.usage else None,
+                    "output": obs.usage.output if obs.usage else None,
+                    "total": obs.usage.total if obs.usage else None,
+                } if obs.usage else None,
+                "level": getattr(obs, 'level', None),
+                "status_message": getattr(obs, 'status_message', None),
+            })
+
+        return {
+            "trace_id": trace.id,
+            "name": trace.name,
+            "input": trace.input,
+            "output": trace.output,
+            "observations": observations,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch LangFuse trace: {str(e)}")
 
 # Conda Environment Endpoint
 @app.get("/conda/environments", response_model=CondaEnvironmentResponse)
