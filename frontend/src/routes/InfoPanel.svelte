@@ -1,13 +1,22 @@
 <script lang="ts">
-  import { fetchExecution, fetchExecutionTrace, type ExecutionDetail, type TraceDetail } from '$lib/api';
+  import {
+    fetchExecution, fetchExecutionTrace, fetchExecutionScores,
+    type ExecutionDetail, type TraceDetail, type LangFuseScore
+  } from '$lib/api';
 
   let {
     executionId = null,
     flowName = '',
+    userId = 1,
+    evalsEnabled = false,
+    evalsRunning = false,
     onclose = () => {}
   }: {
     executionId: number | null;
     flowName: string;
+    userId?: number;
+    evalsEnabled?: boolean;
+    evalsRunning?: boolean;
     onclose: () => void;
   } = $props();
 
@@ -19,12 +28,38 @@
   let traceCache: Map<number, TraceDetail | null> = $state(new Map());
   let traceLoading: Set<number> = $state(new Set());
 
+  // Tab state
+  let activeTab: 'info' | 'evals' = $state('info');
+
+  // Evaluation scores state (used by Evals tab)
+  let scoresCache: Map<number, LangFuseScore[]> = $state(new Map());
+  let scoresLoading: Set<number> = $state(new Set());
+  let expandedScores: Set<string> = $state(new Set());
+  let evalsLoaded = $state(false);
+
   $effect(() => {
     if (executionId) {
       loadExecution(executionId);
+      // Reset evals tab state on new execution
+      scoresCache = new Map();
+      evalsLoaded = false;
     } else {
       execution = null;
     }
+  });
+
+  // Auto-switch to Evals tab when evals finish running
+  let prevEvalsRunning = $state(false);
+  $effect(() => {
+    // Only trigger when evalsRunning transitions from true → false
+    if (prevEvalsRunning && !evalsRunning && execution) {
+      activeTab = 'evals';
+      // Reset so scores reload fresh
+      evalsLoaded = false;
+      scoresCache = new Map();
+      loadAllEvalScores();
+    }
+    prevEvalsRunning = evalsRunning;
   });
 
   async function loadExecution(id: number) {
@@ -45,7 +80,6 @@
       next.delete(node.id);
     } else {
       next.add(node.id);
-      // Fetch LangFuse trace for agent nodes when expanding
       if (node.execution_type === 'agent' && node.langfuse_trace_id && !traceCache.has(node.id)) {
         loadTrace(node.id);
       }
@@ -69,6 +103,56 @@
       done.delete(executionId);
       traceLoading = done;
     }
+  }
+
+  async function loadScores(executionId: number) {
+    const nextLoading = new Set(scoresLoading);
+    nextLoading.add(executionId);
+    scoresLoading = nextLoading;
+    try {
+      const result = await fetchExecutionScores(executionId);
+      const nextCache = new Map(scoresCache);
+      nextCache.set(executionId, result?.scores || []);
+      scoresCache = nextCache;
+    } catch (e) {
+      console.error('Failed to load scores:', e);
+    } finally {
+      const done = new Set(scoresLoading);
+      done.delete(executionId);
+      scoresLoading = done;
+    }
+  }
+
+  async function loadAllEvalScores() {
+    if (!execution || evalsLoaded) return;
+    evalsLoaded = true;
+    const children = execution.children || [];
+    for (const child of children) {
+      if (child.execution_type === 'agent' && child.langfuse_trace_id && !scoresCache.has(child.id)) {
+        loadScores(child.id);
+      }
+    }
+  }
+
+  function handleEvalsTabClick() {
+    activeTab = 'evals';
+    // Always reload when user clicks the tab
+    evalsLoaded = false;
+    scoresCache = new Map();
+    loadAllEvalScores();
+  }
+
+  function toggleScoreExpand(scoreId: string) {
+    const next = new Set(expandedScores);
+    if (next.has(scoreId)) next.delete(scoreId);
+    else next.add(scoreId);
+    expandedScores = next;
+  }
+
+  function formatScoreValue(value: number | string | boolean): string {
+    if (typeof value === 'number') return value.toFixed(2);
+    if (typeof value === 'boolean') return value ? 'pass' : 'fail';
+    return String(value);
   }
 
   function formatDuration(start: string | null, end: string | null): string {
@@ -132,33 +216,97 @@
   </div>
   <div class="info-header">
     <button class="close-btn" onclick={onclose} title="Close">&times;</button>
-    <div class="info-title">
-      <span class="info-label">Info</span>
-      {#if execution}
-        <span class="info-separator">|</span>
-        <span class="info-flow-name">{flowName || execution.name || 'Execution'}</span>
-        <span class="status-dot {execution.status}"></span>
-        <span class="status-text">{execution.status}</span>
-        {#if execution.started_at && execution.completed_at}
-          <span class="duration">{formatDuration(execution.started_at, execution.completed_at)}</span>
+    <div class="info-tabs">
+      <button class="tab-btn" class:active={activeTab === 'info'} onclick={() => activeTab = 'info'}>Info</button>
+      <button class="tab-btn" class:active={activeTab === 'evals'} onclick={handleEvalsTabClick}>
+        Evals
+        {#if evalsRunning}
+          <span class="tab-loading">...</span>
         {/if}
-      {/if}
+      </button>
     </div>
+    {#if execution}
+      <span class="info-separator">|</span>
+      <span class="info-flow-name">{flowName || execution.name || 'Execution'}</span>
+      <span class="status-dot {execution.status}"></span>
+      <span class="status-text">{execution.status}</span>
+      {#if execution.started_at && execution.completed_at}
+        <span class="duration">{formatDuration(execution.started_at, execution.completed_at)}</span>
+      {/if}
+    {/if}
   </div>
 
   <div class="info-body">
-    {#if loading}
-      <div class="info-empty">Loading execution...</div>
-    {:else if !execution}
-      <div class="info-empty">No execution data. Run a flow to see results here.</div>
-    {:else if execution.children.length === 0}
-      <div class="info-empty">Execution completed with no recorded steps.</div>
-    {:else}
-      <div class="execution-tree">
-        {#each execution.children as child (child.id)}
-          {@render treeNode(child, 0)}
-        {/each}
-      </div>
+    {#if activeTab === 'info'}
+      {#if loading}
+        <div class="info-empty">Loading execution...</div>
+      {:else if !execution}
+        <div class="info-empty">No execution data. Run a flow to see results here.</div>
+      {:else if execution.children.length === 0}
+        <div class="info-empty">Execution completed with no recorded steps.</div>
+      {:else}
+        <div class="execution-tree">
+          {#each execution.children as child (child.id)}
+            {@render treeNode(child, 0)}
+          {/each}
+        </div>
+      {/if}
+    {:else if activeTab === 'evals'}
+      {#if !execution}
+        <div class="info-empty">No execution data.</div>
+      {:else if evalsRunning}
+        <div class="info-empty">Running evaluations...</div>
+      {:else}
+        {@const agentChildren = execution.children.filter(c => c.execution_type === 'agent' && c.langfuse_trace_id)}
+        {#if agentChildren.length === 0}
+          <div class="info-empty">No traced agent executions to evaluate.</div>
+        {:else}
+          <div class="evals-results">
+            {#each agentChildren as agent (agent.id)}
+              <div class="eval-agent-group">
+                <div class="eval-agent-header">
+                  <span class="node-type-badge" style="background: var(--info-type-agent)">agent</span>
+                  <span class="eval-agent-name">{agent.name || agent.node_id || 'unnamed'}</span>
+                  <span class="status-dot {agent.status}"></span>
+                  {#if agent.started_at && agent.completed_at}
+                    <span class="duration">{formatDuration(agent.started_at, agent.completed_at)}</span>
+                  {/if}
+                </div>
+                <div class="eval-agent-scores">
+                  {#if scoresLoading.has(agent.id)}
+                    <div class="trace-loading">Loading scores...</div>
+                  {:else if scoresCache.has(agent.id) && scoresCache.get(agent.id)!.length > 0}
+                    {@const scores = scoresCache.get(agent.id)!}
+                    <div class="scores-list">
+                      {#each scores as score (score.id)}
+                        <div class="score-item">
+                          <button class="score-header" onclick={() => toggleScoreExpand(score.id)}>
+                            <span class="score-name">{score.name}</span>
+                            <span class="score-value" class:score-pass={score.value === true || (typeof score.value === 'number' && score.value >= 0.7)}
+                              class:score-fail={score.value === false || (typeof score.value === 'number' && score.value < 0.3)}>
+                              {formatScoreValue(score.value)}
+                            </span>
+                            <span class="score-expand">{expandedScores.has(score.id) ? '▾' : '▸'}</span>
+                          </button>
+                          {#if expandedScores.has(score.id) && score.comment}
+                            <div class="score-reasoning">
+                              <pre class="detail-json">{score.comment}</pre>
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {:else if scoresCache.has(agent.id)}
+                    <div class="trace-loading">No evaluation scores found.</div>
+                  {:else}
+                    <div class="trace-loading">Click to load scores.</div>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {/if}
     {/if}
   </div>
 </div>
@@ -314,21 +462,36 @@
     flex-shrink: 0;
   }
 
-  .info-title {
+  .info-tabs {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    font-weight: 600;
+    gap: 0;
+  }
+
+  .tab-btn {
+    background: none;
+    border: none;
+    padding: 4px 12px;
     font-size: 11px;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    color: oklch(0.5 0 0);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    font-family: inherit;
+  }
+
+  .tab-btn.active {
+    color: oklch(0.85 0.12 200);
+    border-bottom-color: oklch(0.85 0.12 200);
+  }
+
+  .tab-btn:hover:not(.active) {
     color: oklch(0.7 0 0);
   }
 
-  .info-label {
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+  .tab-loading {
+    animation: pulse 1.5s infinite;
   }
 
   .info-separator {
@@ -340,6 +503,7 @@
     text-transform: none;
     letter-spacing: 0;
     font-weight: 500;
+    font-size: 11px;
   }
 
   .close-btn {
@@ -474,7 +638,6 @@
     word-break: break-word;
   }
 
-  /* CSS variables for type badge colors */
   .trace-badge {
     font-size: 9px;
     padding: 1px 4px;
@@ -554,6 +717,102 @@
   .error-json {
     border-color: oklch(0.5 0.1 25 / 0.3);
     color: oklch(0.75 0.1 25);
+  }
+
+  /* Evals tab styles */
+  .evals-results {
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .eval-agent-group {
+    border: 1px solid oklch(0.7 0 0 / 0.12);
+    border-radius: 4px;
+    background: oklch(0.14 0.005 260);
+    overflow: hidden;
+  }
+
+  .eval-agent-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: oklch(0.16 0.005 260);
+    border-bottom: 1px solid oklch(0.7 0 0 / 0.08);
+  }
+
+  .eval-agent-name {
+    color: oklch(0.85 0 0);
+    font-weight: 500;
+  }
+
+  .eval-agent-scores {
+    padding: 6px 10px;
+  }
+
+  .scores-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .score-item {
+    border: 1px solid oklch(0.7 0 0 / 0.1);
+    border-radius: 4px;
+    background: oklch(0.14 0.005 260);
+    overflow: hidden;
+  }
+
+  .score-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    width: 100%;
+    background: none;
+    border: none;
+    color: oklch(0.85 0 0);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    text-align: left;
+  }
+  .score-header:hover {
+    background: oklch(0.18 0.005 260);
+  }
+
+  .score-name {
+    font-weight: 500;
+  }
+
+  .score-value {
+    font-weight: 700;
+    color: oklch(0.7 0.05 200);
+    margin-left: auto;
+  }
+  .score-value.score-pass {
+    color: oklch(0.7 0.15 145);
+  }
+  .score-value.score-fail {
+    color: oklch(0.65 0.2 25);
+  }
+
+  .score-expand {
+    color: oklch(0.5 0 0);
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  .score-reasoning {
+    padding: 4px 8px;
+    border-top: 1px solid oklch(0.7 0 0 / 0.08);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
   }
 
   :global(:root) {

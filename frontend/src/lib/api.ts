@@ -148,6 +148,53 @@ export interface TraceDetail {
   observations: TraceObservation[];
 }
 
+// --- Evaluation interfaces ---
+
+export interface EvaluationCategory {
+  name: string;
+  description?: string;
+}
+
+export interface Evaluation {
+  id: number;
+  user_id: number;
+  name: string;
+  description: string | null;
+  judge_system_prompt: string;
+  judge_user_prompt: string | null;
+  scoring_rubric: string | null;
+  score_type: 'NUMERIC' | 'CATEGORICAL' | 'BOOLEAN';
+  score_categories: EvaluationCategory[] | null;
+  llm_provider: string;
+  input_variables: string[] | null;
+  return_fields: string[] | null;
+  is_public: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EvaluationResult {
+  id: number;
+  evaluation_id: number;
+  evaluation_name: string | null;
+  execution_id: number;
+  langfuse_trace_id: string | null;
+  langfuse_score_id: string | null;
+  status: string;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface LangFuseScore {
+  id: string;
+  name: string;
+  value: number | string | boolean;
+  comment: string | null;
+  data_type: string | null;
+  created_at: string | null;
+}
+
 export interface ExecutionListItem {
   id: number;
   execution_type: string;
@@ -1129,6 +1176,102 @@ export async function fetchExecutionTrace(executionId: number): Promise<TraceDet
     return await response.json();
   } catch (error) {
     console.error('Error fetching execution trace:', error);
+    return null;
+  }
+}
+
+
+// --- Evaluation API functions ---
+
+export async function fetchEvaluations(userId: number): Promise<Evaluation[]> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/evaluations/?user_id=${userId}`);
+    if (!response.ok) throw new Error(`Failed to fetch evaluations: ${response.statusText}`);
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching evaluations:', error);
+    return [];
+  }
+}
+
+export async function createEvaluation(userId: number, data: Omit<Evaluation, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Promise<Evaluation | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/evaluations/?user_id=${userId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) throw new Error(`Failed to create evaluation: ${response.statusText}`);
+    return await response.json();
+  } catch (error) {
+    console.error('Error creating evaluation:', error);
+    return null;
+  }
+}
+
+export async function updateEvaluation(evaluationId: number, data: Partial<Evaluation>): Promise<Evaluation | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/evaluations/${evaluationId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) throw new Error(`Failed to update evaluation: ${response.statusText}`);
+    return await response.json();
+  } catch (error) {
+    console.error('Error updating evaluation:', error);
+    return null;
+  }
+}
+
+export async function deleteEvaluation(evaluationId: number): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/evaluations/${evaluationId}`, { method: 'DELETE' });
+    return response.ok;
+  } catch (error) {
+    console.error('Error deleting evaluation:', error);
+    return false;
+  }
+}
+
+export async function evaluateExecution(executionId: number, userId: number, evaluationIds: number[], llmProvider?: string): Promise<EvaluationResult[]> {
+  try {
+    const body: any = { user_id: userId, evaluation_ids: evaluationIds };
+    if (llmProvider) body.llm_provider = llmProvider;
+    const response = await fetch(`${API_BASE_URL}/executions/${executionId}/evaluate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(`Failed to evaluate execution: ${response.statusText}`);
+    return await response.json();
+  } catch (error) {
+    console.error('Error evaluating execution:', error);
+    return [];
+  }
+}
+
+export async function fetchEvaluationResults(executionId: number): Promise<EvaluationResult[]> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/executions/${executionId}/evaluations`);
+    if (!response.ok) throw new Error(`Failed to fetch evaluation results: ${response.statusText}`);
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching evaluation results:', error);
+    return [];
+  }
+}
+
+export async function fetchExecutionScores(executionId: number): Promise<{ trace_id: string; scores: LangFuseScore[] } | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/executions/${executionId}/scores`);
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      throw new Error(`Failed to fetch scores: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching execution scores:', error);
     return null;
   }
 }

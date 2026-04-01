@@ -7,10 +7,11 @@
   import { onDestroy } from 'svelte';
   import { editToolCodeStream, updateAgent } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
-  import type { Tool } from '$lib/api';
+  import type { Tool, Evaluation } from '$lib/api';
 
   export let llmProviders: LLMProvider[] = [];
   export let allTools: Tool[] = [];
+  export let allEvaluations: Evaluation[] = [];
   export let onToolUpdated: ((nodeId: string, updatedData: any) => void) | undefined = undefined;
   export let onAgentUpdated: ((agentId: number, updatedData: any) => void) | undefined = undefined;
   export let onNodeDataUpdated: ((nodeId: string, updatedData: any) => void) | undefined = undefined;
@@ -35,6 +36,7 @@
   let editedAgentUserPrompt = '';
   let editedAgentLLMConfig = '';
   let editedAgentToolIds: number[] = [];
+  let editedAgentEvalIds: number[] = [];
   let editedOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
   let userPromptBackdrop: HTMLDivElement;
 
@@ -47,6 +49,7 @@
     editedAgentUserPrompt = nodeData.data.user_prompt || '';
     editedAgentLLMConfig = nodeData.data.llm_provider || '';
     editedAgentToolIds = [...(nodeData.data.tool_ids || [])];
+    editedAgentEvalIds = [...(nodeData.data.eval_ids || [])];
     // Load output paths as array of {name, description, return_behavior}
     const paths = nodeData.data.output_paths || {};
     editedOutputPaths = Object.entries(paths).map(([name, pathConfig]) => ({
@@ -75,6 +78,14 @@
       editedAgentToolIds = editedAgentToolIds.filter(id => id !== toolId);
     } else {
       editedAgentToolIds = [...editedAgentToolIds, toolId];
+    }
+  }
+
+  function toggleAgentEval(evalId: number) {
+    if (editedAgentEvalIds.includes(evalId)) {
+      editedAgentEvalIds = editedAgentEvalIds.filter(id => id !== evalId);
+    } else {
+      editedAgentEvalIds = [...editedAgentEvalIds, evalId];
     }
   }
 
@@ -107,6 +118,7 @@
         user_prompt: editedAgentUserPrompt,
         llm_provider: editedAgentLLMConfig,
         tool_ids: [...editedAgentToolIds],
+        eval_ids: [...editedAgentEvalIds],
         output_paths: buildOutputPathsFromEdited(),
       };
 
@@ -145,6 +157,7 @@
             user_prompt: editedAgentUserPrompt,
             llm_provider: editedAgentLLMConfig,
             tool_ids: editedAgentToolIds,
+            eval_ids: editedAgentEvalIds,
             ...(buildOutputPathsFromEdited() ? { output_paths: buildOutputPathsFromEdited() } : {})
           }
         }
@@ -164,6 +177,7 @@
       nodeData.data.system_prompt = updatedEntryNode.system_prompt || '';
       nodeData.data.llm_provider = updatedEntryNode.llm_provider || '';
       nodeData.data.tool_ids = updatedEntryNode.tool_ids || [];
+      nodeData.data.eval_ids = updatedEntryNode.eval_ids || [];
       nodeData.data.output_paths = updatedEntryNode.output_paths || undefined;
       nodeData.data.graph_config = updatedAgent.graph_config;
 
@@ -800,6 +814,44 @@
               </div>
             {:else}
               <p class="description-text no-data">No tools assigned</p>
+            {/if}
+          </div>
+
+          <!-- Assigned Evaluations -->
+          <div class="section">
+            <div class="section-label">Assigned Evaluations</div>
+            {#if isEditingAgent}
+              {#if allEvaluations.length === 0}
+                <p class="description-text no-data">No evaluations available</p>
+              {:else}
+                <div class="agent-tools-list">
+                  {#each allEvaluations as evaluation}
+                    <label class="agent-tool-item agent-tool-editable">
+                      <input
+                        type="checkbox"
+                        checked={editedAgentEvalIds.includes(evaluation.id)}
+                        on:change={() => toggleAgentEval(evaluation.id)}
+                      />
+                      <span class="agent-tool-name">{evaluation.name}</span>
+                      <span class="agent-tool-desc">{evaluation.score_type.toLowerCase()}</span>
+                    </label>
+                  {/each}
+                </div>
+              {/if}
+            {:else if nodeData.data.eval_ids?.length > 0}
+              <div class="agent-tools-list">
+                {#each nodeData.data.eval_ids as evalId}
+                  {@const evaluation = allEvaluations.find(e => e.id === evalId)}
+                  {#if evaluation}
+                    <div class="agent-tool-item">
+                      <span class="agent-tool-name">{evaluation.name}</span>
+                      <span class="agent-tool-desc">{evaluation.score_type.toLowerCase()}</span>
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+            {:else}
+              <p class="description-text no-data">No evaluations assigned</p>
             {/if}
           </div>
 

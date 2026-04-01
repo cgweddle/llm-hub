@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, Table, create_engine, text
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float, ForeignKey, JSON, Table, create_engine, text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from sqlalchemy.sql import func
@@ -147,6 +147,48 @@ class Prompts(Base):
     user_prompt = Column(Text)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class Evaluation(Base):
+    __tablename__ = 'evaluations'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    judge_system_prompt = Column(Text, nullable=False)
+    judge_user_prompt = Column(Text)
+    scoring_rubric = Column(Text)
+    score_type = Column(String(20), nullable=False)  # 'NUMERIC', 'CATEGORICAL', 'BOOLEAN'
+    score_categories = Column(JSON)  # [{"name": "good", "description": "..."}, ...]
+    llm_provider = Column(String(100), nullable=False)
+    input_variables = Column(JSON)  # ["output", "input", "tool_output"]
+    return_fields = Column(JSON)  # ["reasoning", "confidence"]
+    is_public = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    user = relationship("User")
+    results = relationship("EvaluationResult", back_populates="evaluation")
+
+
+class EvaluationResult(Base):
+    __tablename__ = 'evaluation_results'
+
+    id = Column(Integer, primary_key=True)
+    evaluation_id = Column(Integer, ForeignKey('evaluations.id'), nullable=False)
+    execution_id = Column(Integer, ForeignKey('executions.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    langfuse_trace_id = Column(String(200), nullable=True)
+    langfuse_score_id = Column(String(200), nullable=True)
+    status = Column(String(20), default='running')  # 'running', 'completed', 'failed'
+    error_message = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+    completed_at = Column(DateTime)
+
+    evaluation = relationship("Evaluation", back_populates="results")
+    execution = relationship("Execution")
+    user = relationship("User")
 
 
 class DatabaseManager:

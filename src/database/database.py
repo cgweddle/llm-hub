@@ -4,7 +4,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 import os
 import logging
-from .database_setup import User, Agent, Tool, Flow, Execution, Prompts
+from .database_setup import User, Agent, Tool, Flow, Execution, Prompts, Evaluation, EvaluationResult
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -339,3 +339,60 @@ def update_execution(session: Any, execution_id: int, **kwargs) -> Optional[Exec
         session.commit()
         session.refresh(execution)
     return execution
+
+
+## Evaluation database functions
+
+def create_evaluation(session: Any, **kwargs) -> Evaluation:
+    evaluation = Evaluation(**kwargs)
+    session.add(evaluation)
+    session.commit()
+    session.refresh(evaluation)
+    return evaluation
+
+def get_evaluations_by_user(session: Any, user_id: int) -> List[Evaluation]:
+    user_evals = session.query(Evaluation).filter(Evaluation.user_id == user_id).all()
+    public_evals = session.query(Evaluation).filter(Evaluation.is_public == True, Evaluation.user_id != user_id).all()
+    return user_evals + public_evals
+
+def get_evaluation_by_id(session: Any, evaluation_id: int) -> Optional[Evaluation]:
+    return session.query(Evaluation).filter(Evaluation.id == evaluation_id).first()
+
+def update_evaluation(session: Any, evaluation_id: int, **kwargs) -> Optional[Evaluation]:
+    evaluation = get_evaluation_by_id(session, evaluation_id)
+    if evaluation:
+        for key, value in kwargs.items():
+            setattr(evaluation, key, value)
+        session.commit()
+        session.refresh(evaluation)
+    return evaluation
+
+def delete_evaluation(session: Any, evaluation_id: int) -> bool:
+    evaluation = get_evaluation_by_id(session, evaluation_id)
+    if evaluation:
+        session.delete(evaluation)
+        session.commit()
+        return True
+    return False
+
+
+## Evaluation Result database functions
+
+def create_evaluation_result(session: Any, **kwargs) -> EvaluationResult:
+    result = EvaluationResult(**kwargs)
+    session.add(result)
+    session.commit()
+    session.refresh(result)
+    return result
+
+def get_evaluation_results_by_execution(session: Any, execution_id: int) -> List[EvaluationResult]:
+    return session.query(EvaluationResult).filter(EvaluationResult.execution_id == execution_id).all()
+
+def update_evaluation_result(session: Any, result_id: int, **kwargs) -> Optional[EvaluationResult]:
+    result = session.query(EvaluationResult).filter(EvaluationResult.id == result_id).first()
+    if result:
+        for key, value in kwargs.items():
+            setattr(result, key, value)
+        session.commit()
+        session.refresh(result)
+    return result

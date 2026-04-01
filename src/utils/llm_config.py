@@ -127,6 +127,34 @@ def get_llm_config_by_name(model_name: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         raise ValueError(f"Failed to get LLM config for '{model_name}': {e}")
 
+def resolve_model_name(llm_provider: str) -> str:
+    """Resolve an LLM provider name to a 'provider:model' string for PydanticAI.
+    Also sets api_key/base_url as env vars so PydanticAI can pick them up."""
+    model_config = get_llm_config_by_name(llm_provider)
+    if not model_config:
+        raise ValueError(f"LLM provider '{llm_provider}' not found in ~/.llm_hub/config.yaml")
+
+    provider = model_config.get("provider")
+    model = model_config.get("model")
+    api_key = model_config.get("api_key")
+    base_url = model_config.get("base_url")
+
+    if provider == "lmstudio":
+        api_key = api_key or "lm-studio"
+        base_url = base_url or "http://localhost:1234/v1"
+        provider = "openai"
+
+    if api_key:
+        if provider == "anthropic":
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+        else:
+            os.environ["OPENAI_API_KEY"] = api_key
+    if base_url:
+        os.environ["OPENAI_BASE_URL"] = base_url
+
+    return f"{provider}:{model}"
+
+
 MASKED_VALUE = "********"
 
 def mask_credentials(models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

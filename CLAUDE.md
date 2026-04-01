@@ -50,16 +50,19 @@ Start the backend first (`python start_backend.py`), then the frontend (`cd fron
   - `src/executors/tool_executor.py` — executes Python script tools (optionally in conda envs)
   - `src/executors/flow_executor.py` — traverses flow graph_config DAG, runs tool and agent nodes in sequence
   - `src/executors/agent_executor.py` — unified BFS graph executor for all agents (single-node and multi-agent), all nodes execute via PydanticAI, supports streaming and cyclic graphs
+  - `src/executors/evaluation_executor.py` — LLM-as-a-judge evaluator, runs a judge LLM via PydanticAI structured output and posts scores to LangFuse
 - **Agent factories**: `src/factories/pydanticai_agent_factory.py` (PydanticAI — sole execution path for all agent types)
 - **Tool factory**: `src/factories/python_script_tool_factory.py` — AST-parses Python scripts, extracts type schemas, creates Tool DB records
 - **AI integrations**: `src/ai_integrations/` — LLM-powered code generation and prompt generation with streaming. `generate_agent_system_prompt.py` has two generators: `generate_system_prompt_stream` (uses `agent_prompt_gen` DB template) and `generate_user_prompt_stream` (uses `agent_user_prompt_gen` DB template, receives the generated system prompt as context). Prompt templates live in `src/prompts/*.system.md` / `*.user.md` and are uploaded via `python src/prompts/upload_prompts.py`.
 
 ### Frontend Stack
 - **SvelteKit** with **Svelte 5**, **TypeScript**, **Tailwind CSS v4**, **shadcn-svelte** components
+- **Svelte 5 runes only** — all components must use `$state`, `$derived`, `$effect`, `$props`, `$bindable`. Do NOT use Svelte 4 patterns (`$:` reactive statements, `export let`, `on:click`, `svelte/store` writable/readable). Use `onclick` not `on:click`, `onchange` not `on:change`, etc.
 - **@xyflow/svelte** for the visual flow canvas (drag-and-drop nodes and edges)
 - **CodeMirror** for Python code editing in the browser
-- Main page is a single large file: `frontend/src/routes/+page.svelte`
-- Info panel: `frontend/src/routes/InfoPanel.svelte` — execution tree viewer with LangFuse trace integration
+- Main page is a single large file: `frontend/src/routes/+page.svelte` (note: this file still uses some Svelte 4 patterns — new code in this file should use Svelte 5 runes where possible, but be aware of the mixed context)
+- Info panel: `frontend/src/routes/InfoPanel.svelte` — execution tree viewer with LangFuse trace and evaluation score integration
+- Evaluation manager: `frontend/src/routes/EvaluationManager.svelte` — CRUD for LLM-as-a-judge evaluation types
 - API client: `frontend/src/lib/api.ts` — all backend communication, typed interfaces
 - Graph conversion: `frontend/src/lib/flowBuilder.ts` (XYFlow nodes/edges → graph_config for tool flows), `frontend/src/lib/agentGraphBuilder.ts` (for composed agents)
 - Auto-layout: `frontend/src/lib/elkLayout.ts` (uses elkjs for node positioning)
@@ -207,6 +210,35 @@ Standalone agent executions have `parent_id=NULL, type='agent'`. The `messages` 
 | created_at | DateTime | default now |
 | updated_at | DateTime | auto-updated |
 
+**evaluations** — reusable LLM-as-a-judge evaluation type definitions
+| Column | Type | Notes |
+|---|---|---|
+| id | Integer PK | |
+| user_id | Integer FK → users.id | not null |
+| name | String(100) | not null, e.g. "Helpfulness" |
+| description | Text | human-readable description |
+| judge_system_prompt | Text | not null — system prompt for the judge LLM |
+| scoring_rubric | Text | rubric text included in the judge's user message |
+| score_type | String(20) | `NUMERIC`, `CATEGORICAL`, or `BOOLEAN` |
+| score_categories | JSON | for CATEGORICAL, e.g. `["good","bad","neutral"]` |
+| llm_provider | String(100) | not null — name from `~/.llm_hub/config.yaml` |
+| is_public | Boolean | default False |
+| created_at / updated_at | DateTime | standard timestamps |
+
+**evaluation_results** — lightweight pointer to LangFuse (scores stored in LangFuse, not here)
+| Column | Type | Notes |
+|---|---|---|
+| id | Integer PK | |
+| evaluation_id | FK → evaluations.id | not null |
+| execution_id | FK → executions.id | not null |
+| user_id | FK → users.id | not null |
+| langfuse_trace_id | String(200) | the execution's trace ID |
+| langfuse_score_id | String(200) | ID from `langfuse_client.score()` — primary reference to result in LangFuse |
+| status | String(20) | `running` / `completed` / `failed` |
+| error_message | Text | only on failure |
+| created_at | DateTime | default now |
+| completed_at | DateTime | |
+
 ### Execution Recording & LangFuse Tracing
 
 **Execution tree** — Both `FlowExecutor` and `AgentExecutor` record executions to the self-referencing `executions` table:
@@ -234,6 +266,32 @@ Standalone agent executions have `parent_id=NULL, type='agent'`. The `messages` 
 - `GET /executions?user_id={id}&limit=50&offset=0` — list top-level executions
 - `GET /executions/{id}` — full execution tree (recursive children)
 - `GET /executions/{id}/trace` — LangFuse trace data for an agent execution
+- `GET /executions/{id}/scores` — LangFuse score data for an execution's trace (proxy)
+- `GET /executions/{id}/evaluations` — evaluation result records for an execution
+- `POST /executions/{id}/evaluate` — run evaluation(s) against an execution
+
+### LLM-as-a-Judge Evaluations
+
+Users define custom evaluation types (judge prompt + rubric + score type) and run them against agent executions. **LangFuse is the single source of truth for evaluation results** — the local `evaluation_results` table only stores a `langfuse_score_id` reference, not the actual score or reasoning.
+
+**Evaluation flow:**
+1. User creates an evaluation type via `EvaluationManager.svelte` (stored in `evaluations` table)
+2. User clicks "eval" on a traced execution node in `InfoPanel.svelte`, selects criteria, clicks "Run"
+3. `POST /executions/{id}/evaluate` calls `EvaluationExecutor.evaluate()` for each selected evaluation
+4. The executor builds a judge prompt from the evaluation's `judge_system_prompt` + execution input/output + `scoring_rubric`
+5. PydanticAI runs the judge LLM with structured output (`NumericJudgeResponse`, `BooleanJudgeResponse`, or `CategoricalJudgeResponse`)
+6. Score is posted to LangFuse via `langfuse_client.score(trace_id=..., name=..., value=..., comment=reasoning)`
+7. `evaluation_results` row updated with `langfuse_score_id` and `status='completed'`
+8. InfoPanel fetches scores from LangFuse via `GET /executions/{id}/scores` proxy endpoint
+
+**API endpoints for evaluations:**
+- `POST /evaluations/?user_id={id}` — create evaluation type
+- `GET /evaluations/?user_id={id}` — list user's evaluations (+ public ones)
+- `GET /evaluations/{id}` — get single evaluation
+- `PATCH /evaluations/{id}` — update evaluation
+- `DELETE /evaluations/{id}` — delete evaluation
+
+**LLM provider resolution:** `src/utils/llm_config.py` has `resolve_model_name(llm_provider)` — a shared utility that resolves a provider name from `~/.llm_hub/config.yaml` to a `"provider:model"` string for PydanticAI and sets API key env vars.
 
 ### Key Patterns
 - **graph_config** is the central data structure: a JSON object with `nodes` (dict), `edges` (list of from/to mappings), `entry_point`, and `exit_points`. The frontend builds it from the canvas; the backend traverses it for execution.

@@ -27,6 +27,7 @@
   import type { AgentTemplate } from '$lib/agentTemplates';
   import CondaEnvironmentsPanel from './CondaEnvironmentsPanel.svelte';
   import LLMProvidersPanel from './LLMProvidersPanel.svelte';
+  import EvaluationManager from './EvaluationManager.svelte';
   import FullscreenNodeModal from './FullscreenNodeModal.svelte';
   import InfoPanel from './InfoPanel.svelte';
   import { fullscreenNode } from '$lib/stores/fullscreenNode';
@@ -59,7 +60,9 @@
     type Flow as FlowType,
     type CodeGenerateRequest,
     type AgentCreateData,
-    type SystemPromptGenerateRequest
+    type SystemPromptGenerateRequest,
+    fetchExecution,
+    evaluateExecution
   } from '../lib/api';
   import { buildEnhancedGraphConfig } from '$lib/flowBuilder';
   import { autoLayoutNodes } from '$lib/elkLayout';
@@ -98,6 +101,8 @@
   // Info panel state
   let showInfoPanel = false;
   let lastExecutionId: number | null = null;
+  let evalsEnabled = false;
+  let evalsRunning = false;
 
   // Conda environment state
   let selectedCondaEnv: string | null = null;
@@ -136,6 +141,7 @@
   let newAgentSystemPrompt = '';
   let newAgentUserPrompt = '{input}';
   let newAgentSelectedTools: number[] = [];
+  let newAgentSelectedEvals: number[] = [];
   let newAgentLLMProvider = '';
   let isCreatingAgent = false;
   let showGeneratePromptAI = false;
@@ -572,6 +578,7 @@
                 system_prompt: entryNodeConfig.system_prompt || '',
                 llm_provider: entryNodeConfig.llm_provider || '',
                 tool_ids: entryNodeConfig.tool_ids || [],
+                eval_ids: entryNodeConfig.eval_ids || [],
                 output_paths: entryNodeConfig.output_paths || undefined,
                 script_code: '',
                 main_function: '',
@@ -696,8 +703,11 @@
 
       if (result.status === 'completed') {
         console.log('✓ Flow completed successfully');
-        console.log('Final output:', result.final_output);
-        console.log('Execution trace:', result.execution_trace);
+
+        // Auto-run evaluations if enabled
+        if (evalsEnabled && result.execution_id) {
+          runPostExecutionEvals(result.execution_id);
+        }
 
         // Show success
         validationSuccess = true;
@@ -718,6 +728,55 @@
       validationMessage = `Failed to execute flow: ${error}`;
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
+  /**
+   * Run evaluations for agent nodes after flow execution completes.
+   * Looks up eval_ids from each agent's graph_config and fires evaluateExecution calls.
+   */
+  async function runPostExecutionEvals(executionId: number) {
+    evalsRunning = true;
+    try {
+      const execution = await fetchExecution(executionId);
+      if (!execution || !execution.children) return;
+
+      const userId = data.user?.id || 1;
+      const evalPromises: Promise<any>[] = [];
+
+      for (const child of execution.children) {
+        if (child.execution_type !== 'agent' || !child.langfuse_trace_id) continue;
+
+        // Find the agent on the canvas to get its graph_config with eval_ids
+        const agentNode = nodes.find(n => n.data?.isAgent && n.data?.name === child.name);
+        if (!agentNode) continue;
+
+        // Per-node evals from the entry point
+        const graphConfig = agentNode.data.graph_config;
+        const entryPoint = graphConfig?.entry_point || 'main';
+        const nodeConfig = graphConfig?.nodes?.[entryPoint] || agentNode.data;
+        const evalIds: number[] = nodeConfig.eval_ids || agentNode.data.eval_ids || [];
+
+        // Top-level complex agent evals
+        const topLevelEvalIds: number[] = graphConfig?.eval_ids || [];
+        const allEvalIds = [...new Set([...evalIds, ...topLevelEvalIds])];
+
+        if (allEvalIds.length > 0) {
+          // Use the agent's LLM provider for the judge
+          const agentLlmProvider = nodeConfig.llm_provider || agentNode.data.llm_provider || '';
+          if (agentLlmProvider) {
+            evalPromises.push(evaluateExecution(child.id, userId, allEvalIds, agentLlmProvider));
+          }
+        }
+      }
+
+      if (evalPromises.length > 0) {
+        await Promise.all(evalPromises);
+      }
+    } catch (error) {
+      console.error('Post-execution evals failed:', error);
+    } finally {
+      evalsRunning = false;
     }
   }
 
@@ -1157,6 +1216,7 @@
               user_prompt: newAgentUserPrompt.trim(),
               llm_provider: newAgentLLMProvider || '',
               tool_ids: newAgentSelectedTools,
+              eval_ids: newAgentSelectedEvals,
               ...(newAgentOutputPaths.filter(p => p.name.trim()).length > 0 ? {
                 output_paths: Object.fromEntries(
                   newAgentOutputPaths
@@ -1305,6 +1365,14 @@
     }
   }
 
+  function toggleEvalSelection(evalId: number) {
+    if (newAgentSelectedEvals.includes(evalId)) {
+      newAgentSelectedEvals = newAgentSelectedEvals.filter(id => id !== evalId);
+    } else {
+      newAgentSelectedEvals = [...newAgentSelectedEvals, evalId];
+    }
+  }
+
   function addAgentOutputPath() {
     newAgentOutputPaths = [...newAgentOutputPaths, { name: '', description: '', return_behavior: 'node_output' }];
   }
@@ -1338,6 +1406,7 @@
         system_prompt: entryNode.system_prompt || '',
         llm_provider: entryNode.llm_provider || '',
         tool_ids: entryNode.tool_ids || [],
+        eval_ids: entryNode.eval_ids || [],
         output_schema: agent.output_schema || null
       }
     });
@@ -1350,6 +1419,7 @@
     newAgentSystemPrompt = '';
     newAgentUserPrompt = '{input}';
     newAgentSelectedTools = [];
+    newAgentSelectedEvals = [];
     newAgentLLMProvider = '';
     showGeneratePromptAI = false;
     promptAdditionalInstructions = '';
@@ -1396,6 +1466,7 @@
     newAgentSystemPrompt = template.defaultSystemPrompt;
     newAgentUserPrompt = template.defaultUserPrompt;
     newAgentSelectedTools = [];
+    newAgentSelectedEvals = [];
     newAgentLLMProvider = '';
     newAgentOutputPaths = [];
     showCreateAgentModal = true;
@@ -1430,6 +1501,7 @@
       user_prompt: newAgentUserPrompt.trim(),
       llm_provider: newAgentLLMProvider || '',
       tool_ids: newAgentSelectedTools,
+      eval_ids: newAgentSelectedEvals,
       output_paths: outputPaths,
       agentType: pendingAgentTemplate.type
     });
@@ -1476,6 +1548,8 @@
       <CondaEnvironmentsPanel bind:selectedEnv={selectedCondaEnv} />
 
       <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
+
+      <EvaluationManager userId={data.user?.id || 1} onchange={(evals) => data.evaluations = evals} />
 
       <div class="triggers-section">
         <h4>Triggers</h4>
@@ -1650,6 +1724,10 @@
         >
           ▶ Run
         </Button>
+        <label class="evals-toggle">
+          <input type="checkbox" bind:checked={evalsEnabled} />
+          <span>Evals</span>
+        </label>
       </div>
 
       <div class="canvas-area">
@@ -1687,6 +1765,9 @@
         <InfoPanel
           executionId={lastExecutionId}
           flowName={flowName}
+          userId={data.user?.id || 1}
+          evalsEnabled={evalsEnabled}
+          {evalsRunning}
           onclose={() => showInfoPanel = false}
         />
       {/if}
@@ -1697,6 +1778,7 @@
     <AgentBuilder
       bind:this={agentBuilderRef}
       agents={data.agents}
+      evaluations={data.evaluations}
       userId={data.user?.id || 1}
       on:back={handleAgentBuilderBack}
       on:agentCreated={handleAgentCreated}
@@ -1737,7 +1819,7 @@
   {/if}
 
   <!-- Fullscreen Node Modal -->
-  <FullscreenNodeModal {llmProviders} allTools={data.tools} onToolUpdated={handleToolUpdated} onAgentUpdated={handleAgentUpdated} onNodeDataUpdated={handleNodeDataUpdated} />
+  <FullscreenNodeModal {llmProviders} allTools={data.tools} allEvaluations={data.evaluations} onToolUpdated={handleToolUpdated} onAgentUpdated={handleAgentUpdated} onNodeDataUpdated={handleNodeDataUpdated} />
 
 
   <!-- Create Tool Modal -->
@@ -2131,6 +2213,31 @@
             {/if}
           </div>
 
+          <!-- Assign Evaluations Section -->
+          <div class="create-tool-section">
+            <div class="create-tool-section-label">Assign Evaluations</div>
+            <div class="create-tool-helper-text" style="margin-bottom: 12px;">
+              Choose which evaluations to run on this agent's output.
+            </div>
+            {#if data.evaluations.length === 0}
+              <div class="create-tool-helper-text" style="color: #94a3b8;">
+                No evaluations defined. Create one in the sidebar Evaluations panel.
+              </div>
+            {:else}
+              {#each data.evaluations as evaluation}
+                <label class="tool-checkbox-item">
+                  <input
+                    type="checkbox"
+                    checked={newAgentSelectedEvals.includes(evaluation.id)}
+                    onchange={() => toggleEvalSelection(evaluation.id)}
+                  />
+                  <span class="tool-checkbox-name">{evaluation.name}</span>
+                  <span class="tool-checkbox-desc">{evaluation.score_type.toLowerCase()}</span>
+                </label>
+              {/each}
+            {/if}
+          </div>
+
           <!-- Output Paths Section -->
           <div class="create-tool-section">
             <div class="create-tool-section-label">Output Paths</div>
@@ -2462,6 +2569,25 @@
     top: 20px;
     left: 20px;
     z-index: 10;
+    display: flex;
+    align-items: center;
+  }
+
+  .evals-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 12px;
+    font-size: 12px;
+    color: #ccc;
+    cursor: pointer;
+    user-select: none;
+  }
+  .evals-toggle input[type="checkbox"] {
+    cursor: pointer;
+  }
+  .evals-toggle span {
+    font-weight: 500;
   }
 
   /* Dialog Overlay */

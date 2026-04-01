@@ -24,7 +24,7 @@
   import { getAgentTemplatesList, getAgentTemplate, type AgentTypeKey } from '$lib/agentTemplates';
   import { buildAgentGraphConfig, validateAgentGraph } from '$lib/agentGraphBuilder';
   import { autoLayoutNodes } from '$lib/elkLayout';
-  import { createAgent, updateAgent, type Agent, type AgentCreateData } from '$lib/api';
+  import { createAgent, updateAgent, loadLLMProvidersConfig, type Agent, type AgentCreateData, type Evaluation } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
   import type { Viewport } from '@xyflow/svelte';
 
@@ -40,14 +40,16 @@
   // Props
   export let agents: Agent[] = [];
   export let userId: number = 1;
+  export let evaluations: Evaluation[] = [];
 
   // Sidebar section collapse state
-  let sectionsExpanded = {
+  let sectionsExpanded: Record<string, boolean> = {
     newAgent: false,
-    availableAgents: false
+    availableAgents: false,
+    evaluations: false
   };
 
-  function toggleSection(section: keyof typeof sectionsExpanded) {
+  function toggleSection(section: string) {
     sectionsExpanded[section] = !sectionsExpanded[section];
   }
 
@@ -98,6 +100,15 @@
   let composedAgentDescription = '';
   let maxLoopIterations = 5;
   let isSavingAgent = false;
+  let topLevelEvalIds: number[] = [];
+
+  function toggleTopLevelEval(evalId: number) {
+    if (topLevelEvalIds.includes(evalId)) {
+      topLevelEvalIds = topLevelEvalIds.filter(id => id !== evalId);
+    } else {
+      topLevelEvalIds = [...topLevelEvalIds, evalId];
+    }
+  }
 
 
   // Toast state
@@ -131,6 +142,7 @@
         system_prompt: template.defaultSystemPrompt,
         llm_provider: '',
         tool_ids: [],
+        eval_ids: [],
         graph_config: {},
         script_code: '',
         main_function: '',
@@ -156,6 +168,7 @@
     user_prompt?: string;
     llm_provider: string;
     tool_ids: number[];
+    eval_ids: number[];
     output_paths?: Record<string, string | { description: string; return_behavior: string }>;
     agentType: AgentTypeKey;
   }) {
@@ -179,6 +192,7 @@
         user_prompt: nodeData.user_prompt || '',
         llm_provider: nodeData.llm_provider,
         tool_ids: nodeData.tool_ids,
+        eval_ids: nodeData.eval_ids,
         output_paths: nodeData.output_paths,
         graph_config: {},
         script_code: '',
@@ -228,6 +242,7 @@
         system_prompt: nodeConfig?.system_prompt || '',
         llm_provider: nodeConfig?.llm_provider || '',
         tool_ids: nodeConfig?.tool_ids || [],
+        eval_ids: nodeConfig?.eval_ids || [],
         output_paths: nodeConfig?.output_paths || undefined,
         graph_config: agent.graph_config,
         script_code: '',
@@ -275,6 +290,7 @@
             user_prompt: nodeConfig.user_prompt || '',
             llm_provider: nodeConfig.llm_provider || '',
             tool_ids: nodeConfig.tool_ids || [],
+            eval_ids: nodeConfig.eval_ids || [],
             output_paths: nodeConfig.output_paths || undefined,
             graph_config: {},
             script_code: '',
@@ -335,6 +351,7 @@
       composedAgentName = agent.name || '';
       composedAgentDescription = agent.description || '';
       maxLoopIterations = config.max_loop_iterations || 5;
+      topLevelEvalIds = config.eval_ids || [];
 
       showToastMessage(`Agent "${agent.name}" loaded successfully!`, true);
     } catch (error) {
@@ -409,6 +426,9 @@
 
       const graphConfig = buildAgentGraphConfig(agentNodes, agentEdges);
       graphConfig.max_loop_iterations = maxLoopIterations;
+      if (topLevelEvalIds.length > 0) {
+        graphConfig.eval_ids = topLevelEvalIds;
+      }
 
       let savedAgent: Agent;
       const agentName = composedAgentName.trim();
@@ -438,6 +458,7 @@
       loadedAgentId = null;
       composedAgentName = '';
       composedAgentDescription = '';
+      topLevelEvalIds = [];
       agentNodes = [createStartNode()];
       agentEdges = [];
 
@@ -458,6 +479,7 @@
     if (agentCount === 0) return;
     if (!confirm('Clear all agent nodes? This cannot be undone.')) return;
     loadedAgentId = null;
+    topLevelEvalIds = [];
     agentNodes = [createStartNode()];
     agentEdges = [];
   }
@@ -546,6 +568,32 @@
     </div>
 
     <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
+
+    <!-- Agent-Level Evaluations -->
+    <div class="sidebar-section">
+      <button class="section-header" onclick={() => toggleSection('evaluations')}>
+        <span class="section-chevron" class:expanded={sectionsExpanded.evaluations}>&#9656;</span>
+        <h4>Evaluations</h4>
+      </button>
+      {#if sectionsExpanded.evaluations}
+        <div class="section-content">
+          {#if evaluations.length === 0}
+            <div class="hint">No evaluations defined</div>
+          {:else}
+            {#each evaluations as evaluation}
+              <label class="eval-item">
+                <input
+                  type="checkbox"
+                  checked={topLevelEvalIds.includes(evaluation.id)}
+                  onchange={() => toggleTopLevelEval(evaluation.id)}
+                />
+                <span class="eval-item-name">{evaluation.name}</span>
+              </label>
+            {/each}
+          {/if}
+        </div>
+      {/if}
+    </div>
 
     <div class="actions-section">
       <Button size="sm" onclick={() => showSaveAgentDialog = true} class="w-full mb-2 bg-purple-600 hover:bg-purple-700" disabled={agentNodes.filter(n => n.type !== 'startNode').length === 0}>
@@ -818,6 +866,29 @@
     font-size: 10px;
     color: #666;
     line-height: 1.3;
+  }
+
+  .eval-item {
+    padding: 5px 8px;
+    margin: 5px 0;
+    background: white;
+    border: 1px solid #ccc;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .eval-item:hover {
+    background: #e8f4f8;
+  }
+
+  .eval-item-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
   }
 
   .actions-section {
