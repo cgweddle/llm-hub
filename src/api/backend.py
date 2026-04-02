@@ -1152,9 +1152,10 @@ class EvalPromptGenerateRequest(BaseModel):
     return_fields: Optional[List[str]] = None
     input_variables: List[str] = ["output"]
     model: str = ""
+    additional_instructions: Optional[str] = None
 
 @app.post("/evaluations/generate-prompt")
-def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest):
+def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Session = Depends(get_db)):
     """Generate a judge system prompt for an evaluation using AI (streaming)."""
     from src.ai_integrations.generate_eval_prompt import generate_eval_prompt_stream
 
@@ -1163,6 +1164,7 @@ def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest):
 
     def stream():
         yield from generate_eval_prompt_stream(
+            session=db,
             eval_name=request.eval_name,
             eval_description=request.eval_description,
             score_type=request.score_type,
@@ -1170,6 +1172,7 @@ def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest):
             return_fields=request.return_fields,
             input_variables=request.input_variables,
             llm_model=request.model,
+            additional_instructions=request.additional_instructions,
         )
 
     return StreamingResponse(

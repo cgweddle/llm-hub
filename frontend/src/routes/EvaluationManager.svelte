@@ -43,6 +43,8 @@
 
   // AI generation state
   let isGeneratingPrompt = $state(false);
+  let showGeneratePromptAI = $state(false);
+  let formAdditionalInstructions = $state('');
 
   async function loadEvaluations() {
     evaluations = await fetchEvaluations(userId);
@@ -81,6 +83,8 @@
     formIsPublic = false;
     formLlmProvider = llmProviderNames[0] || '';
     formGenerationModel = llmProviderNames[0] || '';
+    formAdditionalInstructions = '';
+    showGeneratePromptAI = false;
     rebuildUserPrompt();
     showModal = true;
   }
@@ -100,6 +104,8 @@
     formInputVariables = evaluation.input_variables || ['output'];
     formReturnFields = evaluation.return_fields || [];
     formIsPublic = evaluation.is_public;
+    formAdditionalInstructions = '';
+    showGeneratePromptAI = false;
     showModal = true;
   }
 
@@ -171,6 +177,7 @@
           return_fields: formReturnFields.filter(f => f.trim()),
           input_variables: formInputVariables,
           model: formGenerationModel,
+          additional_instructions: formAdditionalInstructions.trim() || undefined,
         }),
       });
 
@@ -428,26 +435,7 @@
 
         <!-- Section 5: Judge Prompt -->
         <div class="space-y-2">
-          <div class="prompt-header">
-            <Label for="evalPrompt">Judge System Prompt</Label>
-            <div class="generate-row">
-              <select
-                bind:value={formGenerationModel}
-                class="generate-model-select"
-              >
-                {#each llmProviderNames as name}
-                  <option value={name}>{name}</option>
-                {/each}
-              </select>
-              <button
-                class="generate-btn"
-                onclick={generatePromptWithAI}
-                disabled={isGeneratingPrompt}
-              >
-                {isGeneratingPrompt ? 'Generating...' : 'Generate with AI'}
-              </button>
-            </div>
-          </div>
+          <Label for="evalPrompt">Judge System Prompt</Label>
           <textarea
             id="evalPrompt"
             bind:value={formJudgeSystemPrompt}
@@ -455,6 +443,56 @@
             class="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
             rows="8"
           ></textarea>
+        </div>
+
+        <!-- Generate with AI Section -->
+        <div class="space-y-2">
+          <button
+            class="generate-expand-header"
+            onclick={() => showGeneratePromptAI = !showGeneratePromptAI}
+            type="button"
+          >
+            <span class="expand-icon">{showGeneratePromptAI ? '∨' : '→'}</span>
+            <span>Generate with AI</span>
+          </button>
+
+          {#if showGeneratePromptAI}
+            <div class="generate-ai-expanded">
+              <div class="generate-ai-field">
+                <Label for="evalAdditionalInstructions">Additional Instructions (optional)</Label>
+                <textarea
+                  id="evalAdditionalInstructions"
+                  bind:value={formAdditionalInstructions}
+                  placeholder="Any additional requirements for the judge system prompt..."
+                  class="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  rows="4"
+                ></textarea>
+              </div>
+
+              <div class="generate-ai-actions">
+                <div class="generate-ai-field">
+                  <Label for="evalGenModel">Generation Model</Label>
+                  <select
+                    id="evalGenModel"
+                    bind:value={formGenerationModel}
+                    class="generate-model-select"
+                  >
+                    {#each llmProviderNames as name}
+                      <option value={name}>{name}</option>
+                    {/each}
+                  </select>
+                </div>
+
+                <button
+                  class="generate-btn"
+                  onclick={generatePromptWithAI}
+                  disabled={isGeneratingPrompt || !formName.trim() || !formGenerationModel}
+                >
+                  {isGeneratingPrompt ? 'Generating...' : 'Generate with AI'}
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
 
         <!-- User Prompt (built from input variables) -->
@@ -638,37 +676,73 @@
     border-radius: 3px;
   }
 
-  .prompt-header {
+  .generate-expand-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: #2563eb;
+  }
+  .generate-expand-header:hover { color: #1d4ed8; }
+
+  .expand-icon {
+    font-size: 11px;
+    width: 12px;
+    display: inline-block;
   }
 
-  .generate-row {
+  .generate-ai-expanded {
     display: flex;
-    gap: 6px;
-    align-items: center;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #f9fafb;
+  }
+
+  .generate-ai-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .generate-ai-actions {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  .generate-ai-actions .generate-ai-field {
+    flex: 1;
   }
 
   .generate-model-select {
-    height: 28px;
+    height: 32px;
     padding: 0 6px;
     border: 1px solid #ddd;
     border-radius: 4px;
-    font-size: 11px;
+    font-size: 12px;
     background: white;
-    max-width: 140px;
+    width: 100%;
   }
 
   .generate-btn {
     background: #2563eb;
     color: white;
     border: none;
-    padding: 4px 12px;
+    padding: 6px 14px;
     border-radius: 4px;
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
+    white-space: nowrap;
+    height: 32px;
   }
   .generate-btn:hover:not(:disabled) { background: #1d4ed8; }
   .generate-btn:disabled { opacity: 0.5; cursor: not-allowed; }

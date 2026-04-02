@@ -53,7 +53,7 @@ Start the backend first (`python start_backend.py`), then the frontend (`cd fron
   - `src/executors/evaluation_executor.py` — LLM-as-a-judge evaluator, runs a judge LLM via PydanticAI structured output and posts scores to LangFuse
 - **Agent factories**: `src/factories/pydanticai_agent_factory.py` (PydanticAI — sole execution path for all agent types)
 - **Tool factory**: `src/factories/python_script_tool_factory.py` — AST-parses Python scripts, extracts type schemas, creates Tool DB records
-- **AI integrations**: `src/ai_integrations/` — LLM-powered code generation and prompt generation with streaming. `generate_agent_system_prompt.py` has two generators: `generate_system_prompt_stream` (uses `agent_prompt_gen` DB template) and `generate_user_prompt_stream` (uses `agent_user_prompt_gen` DB template, receives the generated system prompt as context). Prompt templates live in `src/prompts/*.system.md` / `*.user.md` and are uploaded via `python src/prompts/upload_prompts.py`.
+- **AI integrations**: `src/ai_integrations/` — LLM-powered code generation and prompt generation with streaming. `generate_agent_system_prompt.py` has two generators: `generate_system_prompt_stream` (uses `agent_prompt_gen` DB template) and `generate_user_prompt_stream` (uses `agent_user_prompt_gen` DB template, receives the generated system prompt as context). `generate_eval_prompt.py` generates judge system prompts for evaluations (uses `eval_prompt_gen` DB template). All generators accept optional `additional_instructions` for user-provided guidance. Prompt templates live in `src/prompts/*.system.md` / `*.user.md` and are uploaded via `python src/prompts/upload_prompts.py`.
 
 ### Frontend Stack
 - **SvelteKit** with **Svelte 5**, **TypeScript**, **Tailwind CSS v4**, **shadcn-svelte** components
@@ -62,7 +62,7 @@ Start the backend first (`python start_backend.py`), then the frontend (`cd fron
 - **CodeMirror** for Python code editing in the browser
 - Main page is a single large file: `frontend/src/routes/+page.svelte` (note: this file still uses some Svelte 4 patterns — new code in this file should use Svelte 5 runes where possible, but be aware of the mixed context)
 - Info panel: `frontend/src/routes/InfoPanel.svelte` — execution tree viewer with LangFuse trace and evaluation score integration
-- Evaluation manager: `frontend/src/routes/EvaluationManager.svelte` — CRUD for LLM-as-a-judge evaluation types
+- Evaluation manager: `frontend/src/routes/EvaluationManager.svelte` — CRUD for LLM-as-a-judge evaluation types, with collapsible "Generate with AI" section for judge prompt generation (same pattern as agent modal)
 - API client: `frontend/src/lib/api.ts` — all backend communication, typed interfaces
 - Graph conversion: `frontend/src/lib/flowBuilder.ts` (XYFlow nodes/edges → graph_config for tool flows), `frontend/src/lib/agentGraphBuilder.ts` (for composed agents)
 - Auto-layout: `frontend/src/lib/elkLayout.ts` (uses elkjs for node positioning)
