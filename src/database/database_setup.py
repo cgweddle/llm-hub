@@ -8,18 +8,26 @@ from datetime import datetime
 import uuid
 import argparse
 import sys
+from dotenv import load_dotenv
+
+load_dotenv()
 
 Base = declarative_base()
 
 # Association table for many-to-many relationships
 agent_tool_association = Table('agent_tool_association', Base.metadata,
-    Column('agent_id', Integer, ForeignKey('agents.id')),
-    Column('tool_id', Integer, ForeignKey('tools.id'))
+    Column('agent_id', Integer, ForeignKey('agents.id', ondelete="CASCADE")),
+    Column('tool_id', Integer, ForeignKey('tools.id', ondelete="CASCADE"))
 )
 
 agent_flow_association = Table('agent_flow_association', Base.metadata,
-    Column('agent_id', Integer, ForeignKey('agents.id')),
-    Column('flow_id', Integer, ForeignKey('flows.id'))
+    Column('agent_id', Integer, ForeignKey('agents.id', ondelete="CASCADE")),
+    Column('flow_id', Integer, ForeignKey('flows.id', ondelete="CASCADE"))
+)
+
+flow_tool_association = Table('flow_tool_association', Base.metadata,
+    Column('flow_id', Integer, ForeignKey('flows.id', ondelete="CASCADE")),
+    Column('tool_id', Integer, ForeignKey('tools.id', ondelete="CASCADE"))
 )
 
 class User(Base):
@@ -79,6 +87,7 @@ class Tool(Base):
 
     # Relationships
     agents = relationship("Agent", secondary=agent_tool_association, back_populates="tools")
+    flows = relationship("Flow", secondary=flow_tool_association, back_populates="tools")
     executions = relationship("Execution", back_populates="tool")
 
 class Flow(Base):
@@ -99,6 +108,7 @@ class Flow(Base):
     # Relationships
     user = relationship("User", back_populates="flows")
     agents = relationship("Agent", secondary=agent_flow_association, back_populates="flows")
+    tools = relationship("Tool", secondary=flow_tool_association, back_populates="flows")
     executions = relationship("Execution", back_populates="flow")
 
 class Execution(Base):
@@ -150,25 +160,17 @@ class Prompts(Base):
 
 
 class DatabaseManager:
-    def __init__(self, environment=None):
+    def __init__(self):
         """
-        Initialize database manager with support for both SQLite and PostgreSQL
-        
-        Args:
-            environment: 'development', 'production', or None (auto-detect)
+        Initialize database manager with support for both SQLite and PostgreSQL.
+        Set DATABASE_URL to a PostgreSQL connection string for production,
+        or leave it unset to default to local SQLite.
         """
-            # Auto-detect environment if not specified
-        if environment is None:
-            environment = os.getenv('ENVIRONMENT', 'development')
-        
-        if environment == 'production':
-            # Production defaults to PostgreSQL
-            database_url = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost/llm_hub')
-        else:
-            # Development defaults to SQLite
-            default_sqlite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../database/llm_hub.db'))
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        default_sqlite_path = os.path.join(project_root, 'database', 'llm_hub.db')
+        database_url = os.getenv('DATABASE_URL', f'sqlite:///{default_sqlite_path}')
+        if database_url.startswith('sqlite'):
             os.makedirs(os.path.dirname(default_sqlite_path), exist_ok=True)
-            database_url = os.getenv('DATABASE_URL', f'sqlite:///{default_sqlite_path}')
     
         self.database_url = database_url
         self.is_sqlite = self.database_url.startswith('sqlite')
@@ -246,35 +248,31 @@ class DatabaseManager:
         }
 
 
-def get_database_manager(environment=None):
+def get_database_manager():
     """Get a database manager instance"""
-    return DatabaseManager(environment=environment)
+    return DatabaseManager()
 
-def setup_database(environment: str):
-    db_manager = get_database_manager(
-        environment=environment
-    )
-    
+def setup_database():
+    db_manager = get_database_manager()
+
     print("Creating tables...")
     db_manager.create_tables()
-    
+
     print("Database setup complete!")
     return True
 
 
-def show_info(environment: str):
+def show_info():
     """Show database information"""
     print("=== Database Information ===")
-    db_manager = get_database_manager(
-        environment=environment
-    )
+    db_manager = get_database_manager()
     info = db_manager.get_database_info()
-    
+
     print(f"Database Type: {info['type']}")
     print(f"Database URL: {info['url']}")
-    
-    if environment == 'development':
-        db_file = "llm_hub.db"
+
+    if db_manager.is_sqlite:
+        db_file = db_manager.database_url.replace('sqlite:///', '')
         if os.path.exists(db_file):
             size = os.path.getsize(db_file)
             print(f"Database file: {db_file}")
@@ -282,23 +280,24 @@ def show_info(environment: str):
             print(f"Location: {os.path.abspath(db_file)}")
         else:
             print("No SQLite database file found.")
-    
+
     # Test connection
     if db_manager.test_connection():
         print("✓ Database connection successful")
     else:
         print("✗ Database connection failed")
 
-def drop_database(environment, force):
+def drop_database(force):
     """Drop all tables from the database"""
+    db_manager = get_database_manager()
+    db_type = "SQLite" if db_manager.is_sqlite else "PostgreSQL"
     if not force:
-        confirm = input(f"Are you sure you want to drop ALL tables from {environment} environment? This action cannot be undone! (yes/no): ")
+        confirm = input(f"Are you sure you want to drop ALL tables from {db_type} database? This action cannot be undone! (yes/no): ")
         if confirm.lower() != 'yes':
             print("Operation cancelled.")
             return
-    
-    print(f"Dropping tables from {environment} environment...")
-    db_manager = get_database_manager(environment=environment)
+
+    print(f"Dropping tables from {db_type} database...")
     db_manager.drop_tables()
     print("✓ Tables dropped successfully!")
 
@@ -309,35 +308,19 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python database_setup.py                    # Set up SQLite database (development)
-  python database_setup.py development        # Set up SQLite database
-  python database_setup.py production         # Set up PostgreSQL database
+  python database_setup.py setup              # Create tables (uses DATABASE_URL)
   python database_setup.py info               # Show database information
   python database_setup.py drop               # Drop all tables (use with caution!)
-  python database_setup.py --url sqlite:///custom.db  # Use custom database URL
-  python database_setup.py --force            # Skip confirmation prompts
+  python database_setup.py drop --force       # Skip confirmation prompts
         """
     )
-    
+
     parser.add_argument(
         'action',
         nargs='?',
-        default='development',
+        default='setup',
         choices=['setup', 'info', 'drop'],
-        help='Action to perform (default: development)'
-    )
-    
-    parser.add_argument(
-        '--url',
-        type=str,
-        help='Custom database URL (overrides DATABASE_URL environment variable)'
-    )
-    
-    parser.add_argument(
-        '--environment',
-        type=str,
-        choices=['development', 'production'],
-        help='Force environment type (overrides ENVIRONMENT variable)'
+        help='Action to perform (default: setup)'
     )
     
     parser.add_argument(
@@ -361,20 +344,15 @@ def main():
     try:
         if args.verbose:
             print(f"Action: {args.action}")
-            if args.url:
-                print(f"Custom URL: {args.url}")
-            if args.environment:
-                print(f"Environment: {args.environment}")
-        
+            print(f"DATABASE_URL: {os.getenv('DATABASE_URL', '(not set, using SQLite default)')}")
+
         # Handle different actions
         if args.action == 'setup':
-            setup_database(args.environment)
-        elif args.action == 'production':
-            setup_database(args.environment)
+            setup_database()
         elif args.action == 'info':
-            show_info(args.environment)
+            show_info()
         elif args.action == 'drop':
-            drop_database(args.environment, args.force)
+            drop_database(args.force)
         else:
             print(f"Unknown action: {args.action}")
             return False

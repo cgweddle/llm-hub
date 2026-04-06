@@ -1,11 +1,10 @@
 import { lucia } from "$lib/server/auth";
 import { fail, redirect } from "@sveltejs/kit";
 import { verify } from "@node-rs/argon2";
-import Database from "better-sqlite3";
+import { db, users } from "$lib/server/db";
+import { eq } from "drizzle-orm";
 
 import type { Actions } from "./$types";
-
-const db = new Database("/Users/chris/Documents/repos/llm-hub/database/llm_hub.db");
 
 export const actions: Actions = {
 	default: async (event) => {
@@ -25,8 +24,15 @@ export const actions: Actions = {
 		}
 
 		// Find user by username
-		const stmt = db.prepare("SELECT id, username, email, password_hash FROM users WHERE username = ?");
-		const existingUser = stmt.get(username) as { id: number; username: string; email: string; password_hash: string } | undefined;
+		const [existingUser] = await db
+			.select({
+				id: users.id,
+				username: users.username,
+				email: users.email,
+				passwordHash: users.passwordHash
+			})
+			.from(users)
+			.where(eq(users.username, username));
 
 		if (!existingUser) {
 			return fail(400, {
@@ -34,7 +40,7 @@ export const actions: Actions = {
 			});
 		}
 
-		const validPassword = await verify(existingUser.password_hash, password, {
+		const validPassword = await verify(existingUser.passwordHash, password, {
 			memoryCost: 19456,
 			timeCost: 2,
 			outputLen: 32,

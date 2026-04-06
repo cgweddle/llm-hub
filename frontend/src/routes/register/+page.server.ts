@@ -1,11 +1,10 @@
 import { lucia } from "$lib/server/auth";
 import { fail, redirect } from "@sveltejs/kit";
 import { hash } from "@node-rs/argon2";
-import Database from "better-sqlite3";
+import { db, users } from "$lib/server/db";
+import { eq } from "drizzle-orm";
 
 import type { Actions } from "./$types";
-
-const db = new Database("/Users/chris/Documents/repos/llm-hub/database/llm_hub.db");
 
 export const actions: Actions = {
 	default: async (event) => {
@@ -44,31 +43,36 @@ export const actions: Actions = {
 		});
 
 		try {
-			// Insert user - SQLite will auto-increment the id
-			const stmt = db.prepare(`
-				INSERT INTO users (username, email, password_hash, created_at, updated_at, is_active)
-				VALUES (?, ?, ?, datetime('now'), datetime('now'), 1)
-			`);
-			const result = stmt.run(username, email, passwordHash);
-			const userId = result.lastInsertRowid as number;
+			// Insert user and retrieve the ID
+			await db.insert(users).values({
+				username,
+				email,
+				passwordHash
+			});
+
+			// Query back to get the auto-generated ID
+			const [newUser] = await db
+				.select({ id: users.id })
+				.from(users)
+				.where(eq(users.username, username));
 
 			// Create session with Lucia
-			const session = await lucia.createSession(userId, {});
+			const session = await lucia.createSession(newUser.id, {});
 			const sessionCookie = lucia.createSessionCookie(session.id);
 			event.cookies.set(sessionCookie.name, sessionCookie.value, {
 				path: ".",
 				...sessionCookie.attributes
 			});
 		} catch (e: any) {
-			if (e.code === "SQLITE_CONSTRAINT" && e.message.includes("username")) {
-				return fail(400, {
-					message: "Username already taken"
-				});
-			}
-			if (e.code === "SQLITE_CONSTRAINT" && e.message.includes("email")) {
-				return fail(400, {
-					message: "Email already registered"
-				});
+			// Handle unique constraint violations (works for both SQLite and PostgreSQL)
+			const msg = e.message?.toLowerCase() ?? "";
+			if (msg.includes("unique") || msg.includes("duplicate") || msg.includes("constraint")) {
+				if (msg.includes("username")) {
+					return fail(400, { message: "Username already taken" });
+				}
+				if (msg.includes("email")) {
+					return fail(400, { message: "Email already registered" });
+				}
 			}
 			return fail(500, {
 				message: "An error occurred during registration"

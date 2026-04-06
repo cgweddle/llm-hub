@@ -82,6 +82,31 @@ def get_session():
     return SessionLocal()
 
 
+## Association table sync helpers
+
+def _sync_agent_tools(session: Any, agent: Agent, graph_config: Dict):
+    """Sync agent_tool_association from tool_ids in graph_config nodes."""
+    tool_ids = set()
+    for node in graph_config.get("nodes", {}).values():
+        tool_ids.update(node.get("tool_ids", []))
+    agent.tools = session.query(Tool).filter(Tool.id.in_(tool_ids)).all() if tool_ids else []
+
+def _sync_flow_associations(session: Any, flow: Flow, graph_config: Dict):
+    """Sync agent_flow_association and flow_tool_association from graph_config nodes."""
+    agent_ids = set()
+    tool_ids = set()
+    for node in graph_config.get("nodes", {}).values():
+        if node.get("node_type") == "agent":
+            if agent_id := node.get("agent_id"):
+                agent_ids.add(agent_id)
+        elif node.get("node_type") != "trigger":
+            tool_id = node.get("tool_id") or node.get("id")
+            if tool_id:
+                tool_ids.add(tool_id)
+    flow.agents = session.query(Agent).filter(Agent.id.in_(agent_ids)).all() if agent_ids else []
+    flow.tools = session.query(Tool).filter(Tool.id.in_(tool_ids)).all() if tool_ids else []
+
+
 ## Agent database
 
 def create_agent(session: Any, user_id: int, name: str, description: str,
@@ -100,6 +125,7 @@ def create_agent(session: Any, user_id: int, name: str, description: str,
         output_schema=output_schema
     )
     session.add(agent)
+    _sync_agent_tools(session, agent, graph_config)
     session.commit()
     return agent
 
@@ -117,6 +143,8 @@ def update_agent(session: Any, agent_id: int, **kwargs) -> Optional[Agent]:
     if agent:
         for key, value in kwargs.items():
             setattr(agent, key, value)
+        if "graph_config" in kwargs:
+            _sync_agent_tools(session, agent, kwargs["graph_config"])
         session.commit()
         session.refresh(agent)
     return agent
@@ -146,6 +174,7 @@ def create_flow(session: Any, user_id: int, name: str, description: str,
         is_public=is_public
     )
     session.add(flow)
+    _sync_flow_associations(session, flow, graph_config)
     session.commit()
     return flow
     
@@ -163,6 +192,8 @@ def update_flow(session: Any, flow_id: int, **kwargs) -> Optional[Flow]:
     if flow:
         for key, value in kwargs.items():
             setattr(flow, key, value)
+        if "graph_config" in kwargs:
+            _sync_flow_associations(session, flow, kwargs["graph_config"])
         session.commit()
     return flow
 
