@@ -8,18 +8,26 @@ from datetime import datetime
 import uuid
 import argparse
 import sys
+from dotenv import load_dotenv
+
+load_dotenv()
 
 Base = declarative_base()
 
 # Association table for many-to-many relationships
 agent_tool_association = Table('agent_tool_association', Base.metadata,
-    Column('agent_id', Integer, ForeignKey('agents.id')),
-    Column('tool_id', Integer, ForeignKey('tools.id'))
+    Column('agent_id', Integer, ForeignKey('agents.id', ondelete="CASCADE")),
+    Column('tool_id', Integer, ForeignKey('tools.id', ondelete="CASCADE"))
 )
 
 agent_flow_association = Table('agent_flow_association', Base.metadata,
-    Column('agent_id', Integer, ForeignKey('agents.id')),
-    Column('flow_id', Integer, ForeignKey('flows.id'))
+    Column('agent_id', Integer, ForeignKey('agents.id', ondelete="CASCADE")),
+    Column('flow_id', Integer, ForeignKey('flows.id', ondelete="CASCADE"))
+)
+
+flow_tool_association = Table('flow_tool_association', Base.metadata,
+    Column('flow_id', Integer, ForeignKey('flows.id', ondelete="CASCADE")),
+    Column('tool_id', Integer, ForeignKey('tools.id', ondelete="CASCADE"))
 )
 
 class User(Base):
@@ -79,6 +87,7 @@ class Tool(Base):
 
     # Relationships
     agents = relationship("Agent", secondary=agent_tool_association, back_populates="tools")
+    flows = relationship("Flow", secondary=flow_tool_association, back_populates="tools")
     executions = relationship("Execution", back_populates="tool")
 
 class Flow(Base):
@@ -99,6 +108,7 @@ class Flow(Base):
     # Relationships
     user = relationship("User", back_populates="flows")
     agents = relationship("Agent", secondary=agent_flow_association, back_populates="flows")
+    tools = relationship("Tool", secondary=flow_tool_association, back_populates="flows")
     executions = relationship("Execution", back_populates="flow")
 
 class Execution(Base):
@@ -163,7 +173,7 @@ class DatabaseManager:
         
         if environment == 'production':
             # Production defaults to PostgreSQL
-            database_url = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost/llm_hub')
+            database_url = os.getenv('PROD_DATABASE_URL', 'postgresql://user:password@localhost/llm_hub')
         else:
             # Development defaults to SQLite
             default_sqlite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../database/llm_hub.db'))
