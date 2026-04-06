@@ -55,8 +55,8 @@ def scan_prompts(prompts_dir: str, verbose: bool = False):
     
     return prompts
 
-def upload_prompts(prompts: Dict[str, Dict[str, str]], verbose: bool = False, environment: str = "development"):
-    db_manager = get_database_manager(environment=environment)
+def upload_prompts(prompts: Dict[str, Dict[str, str]], verbose: bool = False):
+    db_manager = get_database_manager()
 
     session = db_manager.get_session()
 
@@ -99,17 +99,15 @@ def upload_prompts(prompts: Dict[str, Dict[str, str]], verbose: bool = False, en
 def main():
     parser = argparse.ArgumentParser(description="Upload prompts to database")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
-    parser.add_argument("--environment", type=str, default="development", help="Environment to upload prompts to")
     parser.add_argument("--prompts-dir", type=str, default=CURRENT_DIR, help="Directory containing prompt files")
 
     args = parser.parse_args()
 
     prompts_data = scan_prompts(args.prompts_dir, verbose=args.verbose)
-    
+
     upload_prompts(
         prompts_data,
-        verbose=args.verbose,
-        environment=args.environment
+        verbose=args.verbose
     )
 
 if __name__ == "__main__":
