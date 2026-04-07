@@ -141,7 +141,7 @@ Add these **repository secrets**:
 Every push to `main` triggers `.github/workflows/deploy.yml`:
 
 1. GitHub Actions SSHes into the VPS
-2. Pulls the latest code to `/opt/llm-hub`
+2. Pulls the latest code to `~/llm-hub`
 3. Writes `deploy/.env` from GitHub Secrets (never committed to git)
 4. Builds container images
 5. Restarts all services with `podman-compose up -d`
@@ -151,7 +151,7 @@ Every push to `main` triggers `.github/workflows/deploy.yml`:
 
 ```bash
 ssh deploy@<your-server>
-cd /opt/llm-hub/deploy
+cd ~/llm-hub/deploy
 
 # Create .env manually (normally done by GitHub Actions)
 cp .env.example .env   # if available, or write it by hand
