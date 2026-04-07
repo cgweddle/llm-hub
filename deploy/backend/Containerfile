@@ -1,0 +1,51 @@
+# ── Stage 1: Build ──
+FROM python:3.10-slim AS builder
+
+WORKDIR /app
+
+# System deps for psycopg2 (PostgreSQL driver) and compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ── Stage 2: Runtime ──
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN groupadd -r llmhub && useradd -r -g llmhub -m llmhub
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+COPY src/ ./src/
+COPY start_backend.py .
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/database /app/generated_scripts /home/llmhub/.llm_hub && \
+    chown -R llmhub:llmhub /app /home/llmhub/.llm_hub
+
+COPY deploy/backend/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER llmhub
+
+ENV PYTHONPATH=/app \
+    ENVIRONMENT=production \
+    UVICORN_HOST=0.0.0.0 \
+    UVICORN_PORT=8000 \
+    UVICORN_WORKERS=2 \
+    UVICORN_RELOAD=false
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/healthz || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]

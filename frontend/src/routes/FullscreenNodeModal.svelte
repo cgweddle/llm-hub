@@ -5,7 +5,7 @@
   import { oneDark } from '@codemirror/theme-one-dark';
   import { EditorState } from '@codemirror/state';
   import { onDestroy } from 'svelte';
-  import { editToolCodeStream, updateAgent } from '$lib/api';
+  import { editToolCodeStream, updateAgent, API_BASE_URL } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
   import type { Tool } from '$lib/api';
 
@@ -204,7 +204,7 @@
   // Fetch fresh tool data from database (only called after save)
   async function fetchFreshToolData(toolId: number) {
     try {
-      const response = await fetch(`http://localhost:8000/tools/${toolId}`);
+      const response = await fetch(`${API_BASE_URL}/tools/${toolId}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch tool: ${response.statusText}`);
       }
@@ -333,7 +333,7 @@
         updateData.main_function = mainFunction;
       }
 
-      const response = await fetch(`http://localhost:8000/tools/${nodeData.data.toolId}`, {
+      const response = await fetch(`${API_BASE_URL}/tools/${nodeData.data.toolId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',

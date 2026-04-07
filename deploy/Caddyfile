@@ -1,0 +1,24 @@
+{$PUBLIC_DOMAIN} {
+    # Backend API: /api/* is proxied to FastAPI, stripping the /api prefix
+    handle_path /api/* {
+        reverse_proxy backend:8000
+    }
+
+    # Frontend: all other requests go to SvelteKit
+    handle {
+        reverse_proxy frontend:3000
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+
+    log {
+        output file /data/access.log
+        format json
+    }
+}

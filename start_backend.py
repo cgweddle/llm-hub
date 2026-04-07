@@ -13,8 +13,9 @@ if __name__ == "__main__":
     # Start the uvicorn server
     uvicorn.run(
         "src.api.backend:app",
-        host="127.0.0.1",
-        port=8000,
-        reload=True,  # Auto-reload on code changes
-        log_level="info"
+        host=os.getenv("UVICORN_HOST", "127.0.0.1"),
+        port=int(os.getenv("UVICORN_PORT", "8000")),
+        reload=os.getenv("UVICORN_RELOAD", "true").lower() == "true",
+        log_level="info",
+        workers=int(os.getenv("UVICORN_WORKERS", "1")),
     )

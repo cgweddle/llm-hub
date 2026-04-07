@@ -1,0 +1,116 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: llmhub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: llm_hub
+      POSTGRES_USER: ${POSTGRES_USER:-llmhub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - llmhub-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-llmhub} -d llm_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  backend:
+    build:
+      context: ../
+      dockerfile: deploy/backend/Containerfile
+    container_name: llmhub-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      PROD_DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
+      DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
+      CORS_ORIGINS: https://${PUBLIC_DOMAIN}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+    volumes:
+      - llm-config:/home/llmhub/.llm_hub
+      - backend-logs:/app/logs
+      - generated-scripts:/app/generated_scripts
+    networks:
+      - llmhub-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+
+  frontend:
+    build:
+      context: ../
+      dockerfile: deploy/frontend/Containerfile
+      args:
+        PUBLIC_API_BASE_URL: https://${PUBLIC_DOMAIN}/api
+    container_name: llmhub-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
+      BACKEND_URL: http://backend:8000
+      ORIGIN: https://${PUBLIC_DOMAIN}
+      NODE_ENV: production
+      PORT: 3000
+    networks:
+      - llmhub-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  caddy:
+    image: docker.io/library/caddy:2-alpine
+    container_name: llmhub-caddy
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+    networks:
+      - llmhub-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+
+networks:
+  llmhub-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  llm-config:
+  backend-logs:
+  generated-scripts:
+  caddy-data:
+  caddy-config:
