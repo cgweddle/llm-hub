@@ -1,7 +1,8 @@
 import type { PageServerLoad } from "./$types";
+import { env } from '$env/dynamic/private';
 
 export const load: PageServerLoad = async (event) => {
-	const API_BASE = 'http://localhost:8000';
+	const API_BASE = env.BACKEND_URL || 'http://localhost:8000';
 
 	try {
 		let tools, flows, agents;

@@ -1,0 +1,57 @@
+name: Deploy LLM Hub
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            DEPLOY_DIR=/opt/llm-hub
+
+            # Clone on first deploy, pull on subsequent deploys
+            if [ ! -d "$DEPLOY_DIR" ]; then
+              git clone https://github.com/${{ github.repository }}.git "$DEPLOY_DIR"
+            fi
+            cd "$DEPLOY_DIR"
+
+            # Pull latest changes
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Write .env file from GitHub Secrets
+            cat > deploy/.env << ENVEOF
+            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            PUBLIC_DOMAIN=${{ secrets.PUBLIC_DOMAIN }}
+            LANGFUSE_SECRET_KEY=${{ secrets.LANGFUSE_SECRET_KEY }}
+            LANGFUSE_PUBLIC_KEY=${{ secrets.LANGFUSE_PUBLIC_KEY }}
+            LANGFUSE_HOST=${{ secrets.LANGFUSE_HOST }}
+            ENVEOF
+
+            # Build and deploy
+            cd deploy
+            podman-compose build \
+              --build-arg PUBLIC_API_BASE_URL=https://${{ secrets.PUBLIC_DOMAIN }}/api
+            podman-compose down
+            podman-compose up -d
+
+            # Wait for health checks to pass
+            sleep 15
+            podman-compose ps
+
+            # Verify backend is healthy
+            curl -sf http://localhost:8000/healthz || echo "WARNING: Backend health check failed"

@@ -1,0 +1,44 @@
+# ── Stage 1: Build ──
+FROM node:22-slim AS builder
+
+WORKDIR /app
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ .
+
+# Build-time env: the URL the browser will use to reach the backend API.
+# In production behind a reverse proxy, this is the public domain.
+ARG PUBLIC_API_BASE_URL=http://localhost:8000
+ENV PUBLIC_API_BASE_URL=$PUBLIC_API_BASE_URL
+
+RUN npm run build
+
+# ── Stage 2: Runtime ──
+FROM node:22-slim
+
+RUN groupadd -r llmhub && useradd -r -g llmhub -m llmhub
+
+WORKDIR /app
+
+# adapter-node outputs to /app/build by default
+COPY --from=builder /app/build ./build
+COPY --from=builder /app/package.json .
+COPY --from=builder /app/node_modules ./node_modules
+
+COPY deploy/frontend/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+RUN chown -R llmhub:llmhub /app
+USER llmhub
+
+ENV NODE_ENV=production \
+    PORT=3000
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+ENTRYPOINT ["/entrypoint.sh"]
