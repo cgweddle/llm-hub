@@ -15,7 +15,10 @@ from src.database.database import (
     create_tool, get_user_tools, create_flow, get_user_flows,
     get_tool_by_id, update_tool, delete_tool, get_flow_by_id, update_flow, delete_flow,
     get_agent_by_id, update_agent, delete_agent,
-    get_execution_by_id, get_user_executions
+    get_execution_by_id, get_user_executions,
+    create_evaluation, get_evaluations_by_user, get_evaluation_by_id,
+    update_evaluation, delete_evaluation,
+    create_evaluation_result, get_evaluation_results_by_execution,
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.database.database_setup import DatabaseManager
@@ -300,6 +303,73 @@ class LLMProvidersConfigRequest(BaseModel):
 
 class LLMProvidersConfigResponse(BaseModel):
     models: List[Dict[str, Any]]
+
+
+# --- Evaluation models ---
+
+class EvaluationCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    judge_system_prompt: str
+    judge_user_prompt: Optional[str] = None
+    scoring_rubric: Optional[str] = None
+    score_type: str  # 'NUMERIC', 'CATEGORICAL', 'BOOLEAN'
+    score_categories: Optional[List[Dict[str, Any]]] = None  # [{"name": "good", "description": "..."}]
+    llm_provider: str
+    input_variables: Optional[List[str]] = None  # ["output", "input", "tool_output"]
+    return_fields: Optional[List[str]] = None  # ["reasoning", "confidence"]
+    is_public: bool = False
+
+class EvaluationUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    judge_system_prompt: Optional[str] = None
+    judge_user_prompt: Optional[str] = None
+    scoring_rubric: Optional[str] = None
+    score_type: Optional[str] = None
+    score_categories: Optional[List[Dict[str, Any]]] = None
+    llm_provider: Optional[str] = None
+    input_variables: Optional[List[str]] = None
+    return_fields: Optional[List[str]] = None
+    is_public: Optional[bool] = None
+
+class EvaluationResponse(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    description: Optional[str]
+    judge_system_prompt: str
+    judge_user_prompt: Optional[str]
+    scoring_rubric: Optional[str]
+    score_type: str
+    score_categories: Optional[List[Dict[str, Any]]]
+    llm_provider: str
+    input_variables: Optional[List[str]]
+    return_fields: Optional[List[str]]
+    is_public: bool
+    created_at: datetime
+    updated_at: datetime
+    class Config:
+        from_attributes = True
+
+class EvaluateRequest(BaseModel):
+    user_id: int
+    evaluation_ids: List[int]
+    llm_provider: Optional[str] = None  # Optional override; defaults to evaluation's llm_provider
+
+class EvaluationResultResponse(BaseModel):
+    id: int
+    evaluation_id: int
+    evaluation_name: Optional[str] = None
+    execution_id: int
+    langfuse_trace_id: Optional[str]
+    langfuse_score_id: Optional[str]
+    status: str
+    error_message: Optional[str]
+    created_at: datetime
+    completed_at: Optional[datetime]
+    class Config:
+        from_attributes = True
 
 
 @app.post("/agents/", response_model=AgentResponse)
@@ -1074,3 +1144,186 @@ def save_llm_providers_config(config: LLMProvidersConfigRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save LLM config: {str(e)}")
+
+
+# --- Evaluation Endpoints ---
+
+class EvalPromptGenerateRequest(BaseModel):
+    eval_name: str
+    eval_description: str = ""
+    score_type: str
+    score_categories: Optional[List[Dict[str, Any]]] = None
+    return_fields: Optional[List[str]] = None
+    input_variables: List[str] = ["output"]
+    model: str = ""
+    additional_instructions: Optional[str] = None
+
+@app.post("/evaluations/generate-prompt")
+def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Session = Depends(get_db)):
+    """Generate a judge system prompt for an evaluation using AI (streaming)."""
+    from src.ai_integrations.generate_eval_prompt import generate_eval_prompt_stream
+
+    if not request.model:
+        raise HTTPException(status_code=400, detail="LLM model is required")
+
+    def stream():
+        yield from generate_eval_prompt_stream(
+            session=db,
+            eval_name=request.eval_name,
+            eval_description=request.eval_description,
+            score_type=request.score_type,
+            score_categories=request.score_categories,
+            return_fields=request.return_fields,
+            input_variables=request.input_variables,
+            llm_model=request.model,
+            additional_instructions=request.additional_instructions,
+        )
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+@app.post("/evaluations/", response_model=EvaluationResponse)
+def create_evaluation_endpoint(data: EvaluationCreate, user_id: int, db: Session = Depends(get_db)):
+    try:
+        evaluation = create_evaluation(
+            db,
+            user_id=user_id,
+            name=data.name,
+            description=data.description,
+            judge_system_prompt=data.judge_system_prompt,
+            judge_user_prompt=data.judge_user_prompt,
+            scoring_rubric=data.scoring_rubric,
+            score_type=data.score_type,
+            score_categories=data.score_categories,
+            llm_provider=data.llm_provider,
+            input_variables=data.input_variables,
+            return_fields=data.return_fields,
+            is_public=data.is_public,
+        )
+        return evaluation
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create evaluation: {str(e)}")
+
+@app.get("/evaluations/", response_model=List[EvaluationResponse])
+def list_evaluations_endpoint(user_id: int, db: Session = Depends(get_db)):
+    return get_evaluations_by_user(db, user_id)
+
+@app.get("/evaluations/{evaluation_id}", response_model=EvaluationResponse)
+def get_evaluation_endpoint(evaluation_id: int, db: Session = Depends(get_db)):
+    evaluation = get_evaluation_by_id(db, evaluation_id)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    return evaluation
+
+@app.patch("/evaluations/{evaluation_id}", response_model=EvaluationResponse)
+def update_evaluation_endpoint(evaluation_id: int, data: EvaluationUpdate, db: Session = Depends(get_db)):
+    update_data = data.model_dump(exclude_unset=True)
+    evaluation = update_evaluation(db, evaluation_id, **update_data)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    return evaluation
+
+@app.delete("/evaluations/{evaluation_id}")
+def delete_evaluation_endpoint(evaluation_id: int, db: Session = Depends(get_db)):
+    if not delete_evaluation(db, evaluation_id):
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    return {"status": "deleted"}
+
+@app.post("/executions/{execution_id}/evaluate", response_model=List[EvaluationResultResponse])
+async def evaluate_execution_endpoint(execution_id: int, data: EvaluateRequest, db: Session = Depends(get_db)):
+    """Run one or more evaluations against an execution."""
+    execution = get_execution_by_id(db, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if not execution.langfuse_trace_id:
+        raise HTTPException(status_code=400, detail="Execution has no LangFuse trace — cannot evaluate")
+
+    from src.executors.evaluation_executor import EvaluationExecutor
+    executor = EvaluationExecutor(db)
+
+    results = []
+    for eval_id in data.evaluation_ids:
+        result = await executor.evaluate(
+            evaluation_id=eval_id,
+            execution_id=execution_id,
+            user_id=data.user_id,
+            llm_provider=data.llm_provider,
+        )
+        # Reload the result from DB to get full object for response
+        from src.database.database import get_evaluation_results_by_execution
+        all_results = get_evaluation_results_by_execution(db, execution_id)
+        eval_result = next((r for r in all_results if r.id == result["id"]), None)
+        if eval_result:
+            eval_obj = get_evaluation_by_id(db, eval_result.evaluation_id)
+            results.append(EvaluationResultResponse(
+                id=eval_result.id,
+                evaluation_id=eval_result.evaluation_id,
+                evaluation_name=eval_obj.name if eval_obj else None,
+                execution_id=eval_result.execution_id,
+                langfuse_trace_id=eval_result.langfuse_trace_id,
+                langfuse_score_id=eval_result.langfuse_score_id,
+                status=eval_result.status,
+                error_message=eval_result.error_message,
+                created_at=eval_result.created_at,
+                completed_at=eval_result.completed_at,
+            ))
+
+    return results
+
+@app.get("/executions/{execution_id}/evaluations", response_model=List[EvaluationResultResponse])
+def get_execution_evaluations_endpoint(execution_id: int, db: Session = Depends(get_db)):
+    """Get all evaluation results for an execution."""
+    results = get_evaluation_results_by_execution(db, execution_id)
+    response = []
+    for r in results:
+        eval_obj = get_evaluation_by_id(db, r.evaluation_id)
+        response.append(EvaluationResultResponse(
+            id=r.id,
+            evaluation_id=r.evaluation_id,
+            evaluation_name=eval_obj.name if eval_obj else None,
+            execution_id=r.execution_id,
+            langfuse_trace_id=r.langfuse_trace_id,
+            langfuse_score_id=r.langfuse_score_id,
+            status=r.status,
+            error_message=r.error_message,
+            created_at=r.created_at,
+            completed_at=r.completed_at,
+        ))
+    return response
+
+@app.get("/executions/{execution_id}/scores")
+def get_execution_scores_endpoint(execution_id: int, db: Session = Depends(get_db)):
+    """Fetch actual score data from LangFuse for an execution's trace."""
+    execution = get_execution_by_id(db, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if not execution.langfuse_trace_id:
+        raise HTTPException(status_code=404, detail="No LangFuse trace for this execution")
+
+    try:
+        from src.executors.agent_executor import langfuse_client, LANGFUSE_AVAILABLE
+        if not LANGFUSE_AVAILABLE or not langfuse_client:
+            raise HTTPException(status_code=503, detail="LangFuse not configured")
+
+        trace = langfuse_client.api.trace.get(execution.langfuse_trace_id)
+
+        scores = []
+        for s in (trace.scores or []):
+            scores.append({
+                "id": s.id,
+                "name": s.name,
+                "value": s.value,
+                "comment": getattr(s, "comment", None),
+                "data_type": getattr(s, "data_type", None),
+                "created_at": str(s.created_at) if hasattr(s, "created_at") and s.created_at else None,
+            })
+
+        return {"trace_id": execution.langfuse_trace_id, "scores": scores}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch LangFuse scores: {str(e)}")
