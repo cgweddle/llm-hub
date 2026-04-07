@@ -2,7 +2,7 @@
 Utility modules for LLM Hub.
 """
 
-from src.utils.retry import (
+from .retry import (
     RetryConfig,
     RetryContext,
     retry_sync,
@@ -16,7 +16,7 @@ from src.utils.retry import (
     RETRYABLE_STATUS_CODES,
 )
 
-from src.utils.llm_config import (
+from .llm_config import (
     load_model_config,
     get_llm_hub_config_path,
     load_llm_provider_config,
