@@ -1,3 +1,12 @@
+# Database
+database/
+
+.DS_Store
+
+# Claude plans (local-only)
+claude_plans/
+
+!/src/database/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -5,6 +14,9 @@ __pycache__/
 
 # C extensions
 *.so
+
+
+.svelte-kit/
 
 # Distribution / packaging
 .Python
@@ -14,7 +26,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/

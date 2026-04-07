@@ -1,0 +1,16 @@
+name: llm-hub
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - fastapi
+  - uvicorn
+  - passlib
+  - mamba
+  - pip:
+      - langchain
+      - langgraph
+      - langchain-aws
+      - pydantic[email]
+      - google-adk
