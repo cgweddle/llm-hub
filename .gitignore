@@ -3,6 +3,9 @@ database/
 
 .DS_Store
 
+# Claude plans (local-only)
+claude_plans/
+
 !/src/database/
 # Byte-compiled / optimized / DLL files
 __pycache__/
