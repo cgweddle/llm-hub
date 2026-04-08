@@ -3,8 +3,8 @@ FROM node:25-slim AS builder
 
 WORKDIR /app
 
-COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
-RUN npm ci
+COPY frontend/package.json frontend/.npmrc ./
+RUN npm install
 
 COPY frontend/ .
 
@@ -16,7 +16,7 @@ ENV PUBLIC_API_BASE_URL=$PUBLIC_API_BASE_URL
 RUN npm run build
 
 # ── Stage 2: Runtime ──
-FROM node:22-slim
+FROM node:25-slim
 
 RUN groupadd -r llmhub && useradd -r -g llmhub -m llmhub
 
