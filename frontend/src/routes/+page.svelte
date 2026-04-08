@@ -72,13 +72,13 @@
   let { data } = $props<{ data: PageData }>();
 
   // Track viewport for coordinate conversion
-  let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
+  let viewport: Viewport = $state({ x: 0, y: 0, zoom: 1 });
 
   // Validation state
-  let validationMessage = '';
-  let showValidationToast = false;
-  let validationSuccess = false;
-  let previousEdgeCount = 0;
+  let validationMessage = $state('');
+  let showValidationToast = $state(false);
+  let validationSuccess = $state(false);
+  let previousEdgeCount = $state(0);
 
   // Watch for edge deletions and dismiss validation toast
   $effect(() => {
@@ -90,27 +90,27 @@
   });
 
   // Flow save state
-  let flowName = '';
-  let flowDescription = '';
-  let showSaveDialog = false;
-  let isSaving = false;
+  let flowName = $state('');
+  let flowDescription = $state('');
+  let showSaveDialog = $state(false);
+  let isSaving = $state(false);
 
   // Current flow tracking
-  let currentFlowId: number | null = null;
+  let currentFlowId: number | null = $state(null);
 
   // Info panel state
-  let showInfoPanel = false;
-  let lastExecutionId: number | null = null;
-  let evalsEnabled = false;
-  let evalsRunning = false;
+  let showInfoPanel = $state(false);
+  let lastExecutionId: number | null = $state(null);
+  let evalsEnabled = $state(false);
+  let evalsRunning = $state(false);
 
   // Conda environment state
-  let selectedCondaEnv: string | null = null;
+  let selectedCondaEnv: string | null = $state(null);
 
   // LLM provider state
   import type { LLMProvider } from '$lib/store';
-  let selectedLLMProvider: LLMProvider | null = null;
-  let llmProviders: LLMProvider[] = [];
+  let selectedLLMProvider: LLMProvider | null = $state(null);
+  let llmProviders: LLMProvider[] = $state([]);
 
   // Make llmProviders available to child components (ToolNode) as a writable store
   const llmProvidersStore = writable<LLMProvider[]>([]);
@@ -122,38 +122,38 @@
   });
 
   // Create Tool modal state
-  let showCreateToolModal = false;
-  let newToolName = '';
-  let newToolDescription = '';
-  let newToolCode = '';
-  let newToolMainFunction = '';
-  let newToolIsPublic = false;
-  let showWriteWithAI = false;
-  let additionalInstructions = '';
-  let showEditWithAI = false;
-  let editingInstructions = '';
-  let isCreatingTool = false;
-  let isGeneratingCode = false;
-  let isEditingCode = false;
+  let showCreateToolModal = $state(false);
+  let newToolName = $state('');
+  let newToolDescription = $state('');
+  let newToolCode = $state('');
+  let newToolMainFunction = $state('');
+  let newToolIsPublic = $state(false);
+  let showWriteWithAI = $state(false);
+  let additionalInstructions = $state('');
+  let showEditWithAI = $state(false);
+  let editingInstructions = $state('');
+  let isCreatingTool = $state(false);
+  let isGeneratingCode = $state(false);
+  let isEditingCode = $state(false);
 
   // Create Agent modal state
-  let showCreateAgentModal = false;
-  let newAgentName = '';
-  let newAgentDescription = '';
-  let newAgentSystemPrompt = '';
-  let newAgentUserPrompt = '{input}';
-  let newAgentSelectedTools: number[] = [];
-  let newAgentSelectedEvals: number[] = [];
-  let newAgentLLMProvider = '';
-  let isCreatingAgent = false;
-  let showGeneratePromptAI = false;
-  let promptAdditionalInstructions = '';
-  let isGeneratingPrompt = false;
-  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
-  let createAgentUserPromptBackdrop: HTMLDivElement;
-  let isConfiguringComplexNode = false;
-  let pendingAgentTemplate: AgentTemplate | null = null;
-  let agentBuilderRef: AgentBuilder;
+  let showCreateAgentModal = $state(false);
+  let newAgentName = $state('');
+  let newAgentDescription = $state('');
+  let newAgentSystemPrompt = $state('');
+  let newAgentUserPrompt = $state('{input}');
+  let newAgentSelectedTools: number[] = $state([]);
+  let newAgentSelectedEvals: number[] = $state([]);
+  let newAgentLLMProvider = $state('');
+  let isCreatingAgent = $state(false);
+  let showGeneratePromptAI = $state(false);
+  let promptAdditionalInstructions = $state('');
+  let isGeneratingPrompt = $state(false);
+  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string}> = $state([]);
+  let createAgentUserPromptBackdrop: HTMLDivElement = $state(undefined as any);
+  let isConfiguringComplexNode = $state(false);
+  let pendingAgentTemplate: AgentTemplate | null = $state(null);
+  let agentBuilderRef: AgentBuilder = $state(undefined as any);
 
   // Agent Builder mode
   let currentMode: BuilderMode = $state('flow');
@@ -180,8 +180,8 @@
   });
 
   // CodeMirror editor for Create Tool modal
-  let createToolEditorContainer: HTMLDivElement;
-  let createToolEditorView: EditorView | null = null;
+  let createToolEditorContainer: HTMLDivElement = $state(undefined as any);
+  let createToolEditorView: EditorView | null = $state(null);
 
   function initCreateToolEditor() {
     destroyCreateToolEditor();
@@ -250,9 +250,9 @@
   const connectionLineStyle = 'stroke: black; stroke-width: 3;';
 
   // Start with an empty canvas
-  let nodes: Node[] = [];
+  let nodes: Node[] = $state([]);
 
-  let edges: Edge[] = [];
+  let edges: Edge[] = $state([]);
 
   // Callback to update a node's data after tool is updated
   function handleToolUpdated(nodeId: string, updatedData: any) {
