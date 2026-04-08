@@ -69,7 +69,7 @@
   import '@xyflow/svelte/dist/style.css';
   import type { PageData } from './$types';
 
-  export let data: PageData;
+  let { data } = $props<{ data: PageData }>();
 
   // Track viewport for coordinate conversion
   let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
@@ -81,13 +81,13 @@
   let previousEdgeCount = 0;
 
   // Watch for edge deletions and dismiss validation toast
-  $: {
+  $effect(() => {
     if (edges.length < previousEdgeCount && showValidationToast && !validationSuccess) {
       console.log('Edge was deleted, dismissing validation toast');
       showValidationToast = false;
     }
     previousEdgeCount = edges.length;
-  }
+  });
 
   // Flow save state
   let flowName = '';
@@ -117,7 +117,9 @@
   setContext('llmProviders', llmProvidersStore);
 
   // Sync llmProviders array with the store
-  $: llmProvidersStore.set(llmProviders);
+  $effect(() => {
+    llmProvidersStore.set(llmProviders);
+  });
 
   // Create Tool modal state
   let showCreateToolModal = false;
@@ -154,22 +156,28 @@
   let agentBuilderRef: AgentBuilder;
 
   // Agent Builder mode
-  let currentMode: BuilderMode = 'flow';
+  let currentMode: BuilderMode = $state('flow');
   builderMode.subscribe(mode => currentMode = mode);
 
+  // Track fullscreen node state
+  let currentFullscreenNode = $state<import('$lib/stores/fullscreenNode').FullscreenNodeData | null>(null);
+  fullscreenNode.subscribe(value => currentFullscreenNode = value);
+
   // Intercept fullscreen opens for complex agents — redirect to AgentBuilder
-  $: if ($fullscreenNode?.nodeType === 'agent') {
-    const graphConfig = $fullscreenNode.data?.graph_config;
-    if (graphConfig && Object.keys(graphConfig.nodes || {}).length > 1) {
-      const agentId = $fullscreenNode.data?.agentId;
-      const agent = data.agents.find((a: Agent) => a.id === agentId);
-      fullscreenNode.close();
-      if (agent) {
-        builderMode.setAgent();
-        tick().then(() => agentBuilderRef.loadAgent(agent));
+  $effect(() => {
+    if (currentFullscreenNode?.nodeType === 'agent') {
+      const graphConfig = currentFullscreenNode.data?.graph_config;
+      if (graphConfig && Object.keys(graphConfig.nodes || {}).length > 1) {
+        const agentId = currentFullscreenNode.data?.agentId;
+        const agent = data.agents.find((a: Agent) => a.id === agentId);
+        fullscreenNode.close();
+        if (agent) {
+          builderMode.setAgent();
+          tick().then(() => agentBuilderRef.loadAgent(agent));
+        }
       }
     }
-  }
+  });
 
   // CodeMirror editor for Create Tool modal
   let createToolEditorContainer: HTMLDivElement;
@@ -209,9 +217,11 @@
   }
 
   // Initialize editor when modal opens
-  $: if (showCreateToolModal && createToolEditorContainer) {
-    initCreateToolEditor();
-  }
+  $effect(() => {
+    if (showCreateToolModal && createToolEditorContainer) {
+      initCreateToolEditor();
+    }
+  });
 
   // Cleanup on component destroy
   onDestroy(() => {
@@ -289,9 +299,9 @@
   }
 
   // Use tools and agents from database instead of hardcoded nodes
-  $: availableTools = data.tools.map(tool => tool.name);
-  $: availableAgents = data.agents.map(agent => agent.name);
-  $: availableFlows = data.flows;
+  let availableTools = $derived(data.tools.map(tool => tool.name));
+  let availableAgents = $derived(data.agents.map(agent => agent.name));
+  let availableFlows = $derived(data.flows);
 
   function addNode(nodeName: string, position: { x: number; y: number }) {
     // Check if it's an agent
