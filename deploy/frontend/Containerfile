@@ -13,6 +13,9 @@ COPY frontend/ .
 ARG PUBLIC_API_BASE_URL=http://localhost:8000
 ENV PUBLIC_API_BASE_URL=$PUBLIC_API_BASE_URL
 
+# SvelteKit's post-build analysis imports server modules, which require DATABASE_URL to not crash.
+# This is never used for an actual connection — the runtime container gets the real URL from compose.
+ENV DATABASE_URL=postgres://unused:unused@build-only:5432/unused
 RUN npm run build
 
 # ── Stage 2: Runtime ──
