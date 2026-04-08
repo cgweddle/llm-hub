@@ -3,8 +3,8 @@ FROM node:25-slim AS builder
 
 WORKDIR /app
 
-COPY frontend/package.json ./
-RUN npm install
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
 
 COPY frontend/ .
 
