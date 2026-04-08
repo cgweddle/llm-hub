@@ -69,111 +69,119 @@
   import '@xyflow/svelte/dist/style.css';
   import type { PageData } from './$types';
 
-  export let data: PageData;
+  let { data } = $props<{ data: PageData }>();
 
   // Track viewport for coordinate conversion
-  let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
+  let viewport: Viewport = $state({ x: 0, y: 0, zoom: 1 });
 
   // Validation state
-  let validationMessage = '';
-  let showValidationToast = false;
-  let validationSuccess = false;
-  let previousEdgeCount = 0;
+  let validationMessage = $state('');
+  let showValidationToast = $state(false);
+  let validationSuccess = $state(false);
+  let previousEdgeCount = $state(0);
 
   // Watch for edge deletions and dismiss validation toast
-  $: {
+  $effect(() => {
     if (edges.length < previousEdgeCount && showValidationToast && !validationSuccess) {
       console.log('Edge was deleted, dismissing validation toast');
       showValidationToast = false;
     }
     previousEdgeCount = edges.length;
-  }
+  });
 
   // Flow save state
-  let flowName = '';
-  let flowDescription = '';
-  let showSaveDialog = false;
-  let isSaving = false;
+  let flowName = $state('');
+  let flowDescription = $state('');
+  let showSaveDialog = $state(false);
+  let isSaving = $state(false);
 
   // Current flow tracking
-  let currentFlowId: number | null = null;
+  let currentFlowId: number | null = $state(null);
 
   // Info panel state
-  let showInfoPanel = false;
-  let lastExecutionId: number | null = null;
-  let evalsEnabled = false;
-  let evalsRunning = false;
+  let showInfoPanel = $state(false);
+  let lastExecutionId: number | null = $state(null);
+  let evalsEnabled = $state(false);
+  let evalsRunning = $state(false);
 
   // Conda environment state
-  let selectedCondaEnv: string | null = null;
+  let selectedCondaEnv: string | null = $state(null);
 
   // LLM provider state
   import type { LLMProvider } from '$lib/store';
-  let selectedLLMProvider: LLMProvider | null = null;
-  let llmProviders: LLMProvider[] = [];
+  let selectedLLMProvider: LLMProvider | null = $state(null);
+  let llmProviders: LLMProvider[] = $state([]);
 
   // Make llmProviders available to child components (ToolNode) as a writable store
   const llmProvidersStore = writable<LLMProvider[]>([]);
   setContext('llmProviders', llmProvidersStore);
 
   // Sync llmProviders array with the store
-  $: llmProvidersStore.set(llmProviders);
+  $effect(() => {
+    llmProvidersStore.set(llmProviders);
+  });
 
   // Create Tool modal state
-  let showCreateToolModal = false;
-  let newToolName = '';
-  let newToolDescription = '';
-  let newToolCode = '';
-  let newToolMainFunction = '';
-  let newToolIsPublic = false;
-  let showWriteWithAI = false;
-  let additionalInstructions = '';
-  let showEditWithAI = false;
-  let editingInstructions = '';
-  let isCreatingTool = false;
-  let isGeneratingCode = false;
-  let isEditingCode = false;
+  let showCreateToolModal = $state(false);
+  let newToolName = $state('');
+  let newToolDescription = $state('');
+  let newToolCode = $state('');
+  let newToolMainFunction = $state('');
+  let newToolIsPublic = $state(false);
+  let showWriteWithAI = $state(false);
+  let additionalInstructions = $state('');
+  let showEditWithAI = $state(false);
+  let editingInstructions = $state('');
+  let isCreatingTool = $state(false);
+  let isGeneratingCode = $state(false);
+  let isEditingCode = $state(false);
 
   // Create Agent modal state
-  let showCreateAgentModal = false;
-  let newAgentName = '';
-  let newAgentDescription = '';
-  let newAgentSystemPrompt = '';
-  let newAgentUserPrompt = '{input}';
-  let newAgentSelectedTools: number[] = [];
-  let newAgentSelectedEvals: number[] = [];
-  let newAgentLLMProvider = '';
-  let isCreatingAgent = false;
-  let showGeneratePromptAI = false;
-  let promptAdditionalInstructions = '';
-  let isGeneratingPrompt = false;
-  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
-  let createAgentUserPromptBackdrop: HTMLDivElement;
-  let isConfiguringComplexNode = false;
-  let pendingAgentTemplate: AgentTemplate | null = null;
-  let agentBuilderRef: AgentBuilder;
+  let showCreateAgentModal = $state(false);
+  let newAgentName = $state('');
+  let newAgentDescription = $state('');
+  let newAgentSystemPrompt = $state('');
+  let newAgentUserPrompt = $state('{input}');
+  let newAgentSelectedTools: number[] = $state([]);
+  let newAgentSelectedEvals: number[] = $state([]);
+  let newAgentLLMProvider = $state('');
+  let isCreatingAgent = $state(false);
+  let showGeneratePromptAI = $state(false);
+  let promptAdditionalInstructions = $state('');
+  let isGeneratingPrompt = $state(false);
+  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string}> = $state([]);
+  let createAgentUserPromptBackdrop: HTMLDivElement = $state(undefined as any);
+  let isConfiguringComplexNode = $state(false);
+  let pendingAgentTemplate: AgentTemplate | null = $state(null);
+  let agentBuilderRef: AgentBuilder = $state(undefined as any);
 
   // Agent Builder mode
-  let currentMode: BuilderMode = 'flow';
+  let currentMode: BuilderMode = $state('flow');
   builderMode.subscribe(mode => currentMode = mode);
 
+  // Track fullscreen node state
+  let currentFullscreenNode = $state<import('$lib/stores/fullscreenNode').FullscreenNodeData | null>(null);
+  fullscreenNode.subscribe(value => currentFullscreenNode = value);
+
   // Intercept fullscreen opens for complex agents — redirect to AgentBuilder
-  $: if ($fullscreenNode?.nodeType === 'agent') {
-    const graphConfig = $fullscreenNode.data?.graph_config;
-    if (graphConfig && Object.keys(graphConfig.nodes || {}).length > 1) {
-      const agentId = $fullscreenNode.data?.agentId;
-      const agent = data.agents.find((a: Agent) => a.id === agentId);
-      fullscreenNode.close();
-      if (agent) {
-        builderMode.setAgent();
-        tick().then(() => agentBuilderRef.loadAgent(agent));
+  $effect(() => {
+    if (currentFullscreenNode?.nodeType === 'agent') {
+      const graphConfig = currentFullscreenNode.data?.graph_config;
+      if (graphConfig && Object.keys(graphConfig.nodes || {}).length > 1) {
+        const agentId = currentFullscreenNode.data?.agentId;
+        const agent = data.agents.find((a: Agent) => a.id === agentId);
+        fullscreenNode.close();
+        if (agent) {
+          builderMode.setAgent();
+          tick().then(() => agentBuilderRef.loadAgent(agent));
+        }
       }
     }
-  }
+  });
 
   // CodeMirror editor for Create Tool modal
-  let createToolEditorContainer: HTMLDivElement;
-  let createToolEditorView: EditorView | null = null;
+  let createToolEditorContainer: HTMLDivElement = $state(undefined as any);
+  let createToolEditorView: EditorView | null = $state(null);
 
   function initCreateToolEditor() {
     destroyCreateToolEditor();
@@ -209,9 +217,11 @@
   }
 
   // Initialize editor when modal opens
-  $: if (showCreateToolModal && createToolEditorContainer) {
-    initCreateToolEditor();
-  }
+  $effect(() => {
+    if (showCreateToolModal && createToolEditorContainer) {
+      initCreateToolEditor();
+    }
+  });
 
   // Cleanup on component destroy
   onDestroy(() => {
@@ -240,9 +250,9 @@
   const connectionLineStyle = 'stroke: black; stroke-width: 3;';
 
   // Start with an empty canvas
-  let nodes: Node[] = [];
+  let nodes: Node[] = $state([]);
 
-  let edges: Edge[] = [];
+  let edges: Edge[] = $state([]);
 
   // Callback to update a node's data after tool is updated
   function handleToolUpdated(nodeId: string, updatedData: any) {
@@ -289,9 +299,9 @@
   }
 
   // Use tools and agents from database instead of hardcoded nodes
-  $: availableTools = data.tools.map(tool => tool.name);
-  $: availableAgents = data.agents.map(agent => agent.name);
-  $: availableFlows = data.flows;
+  let availableTools = $derived(data.tools.map(tool => tool.name));
+  let availableAgents = $derived(data.agents.map(agent => agent.name));
+  let availableFlows = $derived(data.flows);
 
   function addNode(nodeName: string, position: { x: number; y: number }) {
     // Check if it's an agent

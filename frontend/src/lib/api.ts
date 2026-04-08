@@ -1,6 +1,6 @@
 // API service for communicating with the backend
-import { PUBLIC_API_BASE_URL } from '$env/static/public';
-export const API_BASE_URL = PUBLIC_API_BASE_URL || 'http://localhost:8000';
+import { env } from '$env/dynamic/public';
+export const API_BASE_URL = env.PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 export interface Agent {
   id: number;
