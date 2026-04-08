@@ -251,6 +251,10 @@ def get_tool_by_id(session: Any, tool_id: int) -> Optional[Tool]:
     """Get tool by ID"""
     return session.query(Tool).filter(Tool.id == tool_id).first()
 
+def get_public_tool_by_name(session: Any, name: str) -> Optional[Tool]:
+    """Get a public tool by name"""
+    return session.query(Tool).filter(Tool.name == name, Tool.is_public == True).first()
+
 def update_tool(session: Any, tool_id: int, **kwargs) -> Optional[Tool]:
     """Update a tool"""
     tool = get_tool_by_id(session, tool_id)
