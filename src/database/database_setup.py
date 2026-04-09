@@ -296,7 +296,7 @@ def get_database_manager():
 
 def seed_admin_user(db_manager):
     """Create the admin user if it doesn't already exist."""
-    from passlib.hash import bcrypt
+    from argon2 import PasswordHasher
 
     admin_password = os.getenv('ADMIN_PASSWORD')
     if not admin_password:
@@ -310,10 +310,12 @@ def seed_admin_user(db_manager):
             print("Admin user already exists, skipping.")
             return
 
+        # Must match frontend's @node-rs/argon2 parameters (login/+page.server.ts)
+        ph = PasswordHasher(memory_cost=19456, time_cost=2, hash_len=32, parallelism=1)
         admin = User(
             username='admin',
             email='chris@endstation.ai',
-            password_hash=bcrypt.hash(admin_password),
+            password_hash=ph.hash(admin_password),
             is_active=True
         )
         session.add(admin)
