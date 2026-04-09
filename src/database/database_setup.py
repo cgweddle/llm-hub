@@ -46,6 +46,15 @@ class User(Base):
     flows = relationship("Flow", back_populates="user")
     executions = relationship("Execution", back_populates="user")
 
+class Session(Base):
+    """Lucia auth sessions (used by the SvelteKit frontend, matches schema.pg.ts)"""
+    __tablename__ = 'sessions'
+
+    id = Column(Text, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class Agent(Base):
     __tablename__ = 'agents'
 
