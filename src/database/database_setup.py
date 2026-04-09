@@ -294,11 +294,46 @@ def get_database_manager():
     """Get a database manager instance"""
     return DatabaseManager()
 
+def seed_admin_user(db_manager):
+    """Create the admin user if it doesn't already exist."""
+    from passlib.hash import bcrypt
+
+    admin_password = os.getenv('ADMIN_PASSWORD')
+    if not admin_password:
+        print("ADMIN_PASSWORD not set, skipping admin user creation.")
+        return
+
+    session = db_manager.get_session()
+    try:
+        existing = session.query(User).filter(User.username == 'admin').first()
+        if existing:
+            print("Admin user already exists, skipping.")
+            return
+
+        admin = User(
+            username='admin',
+            email='chris@endstation.ai',
+            password_hash=bcrypt.hash(admin_password),
+            is_active=True
+        )
+        session.add(admin)
+        session.commit()
+        print("Admin user created.")
+    except Exception as e:
+        session.rollback()
+        print(f"Error creating admin user: {e}")
+    finally:
+        session.close()
+
+
 def setup_database():
     db_manager = get_database_manager()
 
     print("Creating tables...")
     db_manager.create_tables()
+
+    print("Seeding admin user...")
+    seed_admin_user(db_manager)
 
     print("Database setup complete!")
     return True
