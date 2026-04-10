@@ -17,7 +17,7 @@
   import { python } from '@codemirror/lang-python';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { EditorState } from '@codemirror/state';
-  import { onDestroy, setContext, tick } from 'svelte';
+  import { onDestroy, setContext, tick, untrack } from 'svelte';
 
   import ColorSelectorNode from './ColorSelectorNode.svelte';
   import ToolNode from './ToolNode.svelte';
@@ -181,7 +181,7 @@
 
   // CodeMirror editor for Create Tool modal
   let createToolEditorContainer: HTMLDivElement = $state(undefined as any);
-  let createToolEditorView: EditorView | null = $state(null);
+  let createToolEditorView: EditorView | null = null;
 
   function initCreateToolEditor() {
     destroyCreateToolEditor();
@@ -219,7 +219,7 @@
   // Initialize editor when modal opens
   $effect(() => {
     if (showCreateToolModal && createToolEditorContainer) {
-      initCreateToolEditor();
+      untrack(() => initCreateToolEditor());
     }
   });
 
