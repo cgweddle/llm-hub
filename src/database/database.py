@@ -4,7 +4,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
 import os
 import logging
-from .database_setup import User, Agent, Tool, Flow, Execution, Prompts, Evaluation, EvaluationResult
+from .database_setup import User, Agent, Tool, Flow, Execution, Prompts, Evaluation, EvaluationResult, LLMProviderConfig
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -431,3 +431,81 @@ def update_evaluation_result(session: Any, result_id: int, **kwargs) -> Optional
         session.commit()
         session.refresh(result)
     return result
+
+
+## LLM Provider Config database functions (hosted mode only)
+
+def _get_fernet():
+    """Get Fernet cipher for encrypting/decrypting API keys."""
+    from cryptography.fernet import Fernet
+    key = os.environ.get("LLM_CONFIG_ENCRYPTION_KEY")
+    if not key:
+        raise ValueError("LLM_CONFIG_ENCRYPTION_KEY environment variable is not set")
+    return Fernet(key.encode())
+
+def _encrypt_api_key(api_key: Optional[str]) -> Optional[str]:
+    if not api_key:
+        return None
+    return _get_fernet().encrypt(api_key.encode()).decode()
+
+def _decrypt_api_key(encrypted_key: Optional[str]) -> Optional[str]:
+    if not encrypted_key:
+        return None
+    return _get_fernet().decrypt(encrypted_key.encode()).decode()
+
+def _llm_config_to_dict(config: LLMProviderConfig) -> Dict[str, Any]:
+    """Convert a LLMProviderConfig ORM object to the same dict shape as YAML config."""
+    return {
+        "id": config.id,
+        "name": config.name,
+        "provider": config.provider,
+        "model": config.model,
+        "api_key": _decrypt_api_key(config.api_key_encrypted),
+        "base_url": config.base_url,
+    }
+
+def create_llm_provider_config(session: Any, user_id: int, name: str, provider: str,
+                                model: str, api_key: str = None, base_url: str = None) -> LLMProviderConfig:
+    config = LLMProviderConfig(
+        user_id=user_id,
+        name=name,
+        provider=provider,
+        model=model,
+        api_key_encrypted=_encrypt_api_key(api_key),
+        base_url=base_url,
+    )
+    session.add(config)
+    session.commit()
+    session.refresh(config)
+    return config
+
+def get_user_llm_provider_configs(session: Any, user_id: int) -> List[Dict[str, Any]]:
+    configs = session.query(LLMProviderConfig).filter(LLMProviderConfig.user_id == user_id).all()
+    return [_llm_config_to_dict(c) for c in configs]
+
+def get_llm_provider_config_by_name(session: Any, user_id: int, name: str) -> Optional[Dict[str, Any]]:
+    config = session.query(LLMProviderConfig).filter(
+        LLMProviderConfig.user_id == user_id,
+        LLMProviderConfig.name == name
+    ).first()
+    return _llm_config_to_dict(config) if config else None
+
+def update_llm_provider_config(session: Any, config_id: int, **kwargs) -> Optional[LLMProviderConfig]:
+    config = session.query(LLMProviderConfig).filter(LLMProviderConfig.id == config_id).first()
+    if config:
+        # Handle api_key → api_key_encrypted conversion
+        if "api_key" in kwargs:
+            kwargs["api_key_encrypted"] = _encrypt_api_key(kwargs.pop("api_key"))
+        for key, value in kwargs.items():
+            setattr(config, key, value)
+        session.commit()
+        session.refresh(config)
+    return config
+
+def delete_llm_provider_config(session: Any, config_id: int) -> bool:
+    config = session.query(LLMProviderConfig).filter(LLMProviderConfig.id == config_id).first()
+    if config:
+        session.delete(config)
+        session.commit()
+        return True
+    return False

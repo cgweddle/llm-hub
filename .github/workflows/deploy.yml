@@ -44,6 +44,7 @@ jobs:
             LANGFUSE_SECRET_KEY=${{ secrets.LANGFUSE_SECRET_KEY }}
             LANGFUSE_PUBLIC_KEY=${{ secrets.LANGFUSE_PUBLIC_KEY }}
             LANGFUSE_HOST=${{ secrets.LANGFUSE_HOST }}
+            LLM_CONFIG_ENCRYPTION_KEY=${{ secrets.LLM_CONFIG_ENCRYPTION_KEY }}
             ENVEOF
 
             # Build and deploy

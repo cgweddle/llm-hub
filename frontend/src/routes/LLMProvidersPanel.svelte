@@ -49,9 +49,10 @@
   interface Props {
     selectedProvider?: LLMProvider | null;
     providers?: LLMProvider[];
+    userId?: number;
   }
 
-  let { selectedProvider = $bindable(null), providers = $bindable([]) }: Props = $props();
+  let { selectedProvider = $bindable(null), providers = $bindable([]), userId }: Props = $props();
 
   // State using Svelte 5 runes
   let showModal = $state(false);
@@ -185,7 +186,7 @@
   // Load config on mount
   onMount(async () => {
     try {
-      const config = await loadLLMProvidersConfig();
+      const config = await loadLLMProvidersConfig(userId);
 
       if (config.models && config.models.length > 0) {
         // Map loaded config to LLMProvider format (adjusting for snake_case)
@@ -235,7 +236,7 @@
 
         await saveLLMProvidersConfig({
           models: modelsToSave
-        });
+        }, userId);
 
         console.log('LLM providers config saved to ~/.llm_hub/config.yaml');
       } catch (error) {

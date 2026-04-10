@@ -988,11 +988,9 @@
         {
           tool_name: newToolName.trim(),
           tool_description: newToolDescription.trim(),
-          provider: selectedLLMProvider.provider,
-          model: selectedLLMProvider.model,
-          api_key: selectedLLMProvider.apiKey,
-          base_url: selectedLLMProvider.baseUrl,
-          additional_instructions: additionalInstructions.trim() || undefined
+          model: selectedLLMProvider.name,
+          additional_instructions: additionalInstructions.trim() || undefined,
+          user_id: data.user?.id,
         },
         // onChunk: append text to editor as it arrives
         (chunk: string) => {
@@ -1110,10 +1108,8 @@
           editing_instructions: editingInstructions.trim(),
           tool_name: newToolName.trim() || 'tool',
           tool_description: newToolDescription.trim() || '',
-          provider: selectedLLMProvider.provider,
-          model: selectedLLMProvider.model,
-          api_key: selectedLLMProvider.apiKey,
-          base_url: selectedLLMProvider.baseUrl
+          model: selectedLLMProvider.name,
+          user_id: data.user?.id,
         },
         // onChunk: append text to editor as it arrives
         (chunk: string) => {
@@ -1310,7 +1306,8 @@
         agent_description: newAgentDescription.trim(),
         tool_names: selectedToolNames,
         model: selectedLLMProvider.name,
-        additional_instructions: promptAdditionalInstructions.trim() || undefined
+        additional_instructions: promptAdditionalInstructions.trim() || undefined,
+        user_id: data.user?.id,
       };
 
       // Pass 1: Generate system prompt
@@ -1557,7 +1554,7 @@
 
       <CondaEnvironmentsPanel bind:selectedEnv={selectedCondaEnv} />
 
-      <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} />
+      <LLMProvidersPanel bind:selectedProvider={selectedLLMProvider} bind:providers={llmProviders} userId={data.user?.id} />
 
       <EvaluationManager userId={data.user?.id || 1} onchange={(evals) => data.evaluations = evals} />
 

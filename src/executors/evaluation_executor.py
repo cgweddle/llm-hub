@@ -13,7 +13,7 @@ from src.database.database import (
     create_evaluation_result,
     update_evaluation_result,
 )
-from src.utils.llm_config import resolve_model_name
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +121,9 @@ def _to_numeric(score_type: str, score_value) -> Optional[float]:
 
 
 class EvaluationExecutor:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, llm_config: Optional[Dict[str, Any]] = None):
         self.session = session
+        self.llm_config = llm_config or {"models": []}
 
     async def evaluate(
         self,
@@ -156,7 +157,7 @@ class EvaluationExecutor:
 
         try:
             provider = llm_provider or evaluation.llm_provider
-            model_name = resolve_model_name(provider)
+            model_name = self._resolve_model_name(provider)
 
             response_model = _get_response_model(
                 evaluation.score_type,
@@ -246,3 +247,29 @@ class EvaluationExecutor:
                 "status": "failed",
                 "error_message": str(e),
             }
+
+    def _resolve_model_name(self, llm_provider: str) -> str:
+        """Resolve an LLM provider name using the pre-loaded config dict."""
+        for model_config in self.llm_config.get("models", []):
+            if model_config.get("name") == llm_provider:
+                provider = model_config.get("provider")
+                model = model_config.get("model")
+                api_key = model_config.get("api_key")
+                base_url = model_config.get("base_url")
+
+                if provider == "lmstudio":
+                    api_key = api_key or "lm-studio"
+                    base_url = base_url or "http://localhost:1234/v1"
+                    provider = "openai"
+
+                if api_key:
+                    if provider == "anthropic":
+                        os.environ["ANTHROPIC_API_KEY"] = api_key
+                    else:
+                        os.environ["OPENAI_API_KEY"] = api_key
+                if base_url:
+                    os.environ["OPENAI_BASE_URL"] = base_url
+
+                return f"{provider}:{model}"
+
+        raise ValueError(f"LLM provider '{llm_provider}' not found in config")

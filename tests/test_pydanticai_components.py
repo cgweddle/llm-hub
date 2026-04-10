@@ -556,18 +556,26 @@ class TestPydanticAIAgentFactory:
     """Tests for PydanticAI agent factory"""
 
     @patch('factories.pydanticai_agent_factory.get_agent_by_id')
-    @patch('factories.pydanticai_agent_factory.get_llm_config_by_name')
-    def test_validate_agent_config_valid(self, mock_get_llm_config, mock_get_agent):
+    def test_validate_agent_config_valid(self, mock_get_agent):
         """Test validation of valid agent configuration"""
         mock_agent = MockAgent(
             id=1,
             agent_type="pydanticai",
             llm_config={"model_name": "test_model"}
         )
+        mock_agent.graph_config = {
+            "entry_point": "main",
+            "nodes": {
+                "main": {
+                    "llm_provider": "test_model",
+                    "tool_ids": [1],
+                }
+            },
+        }
         mock_get_agent.return_value = mock_agent
-        mock_get_llm_config.return_value = {"provider": "openai", "model": "gpt-4"}
 
-        factory = PydanticAIAgentFactory(session=MockSession())
+        llm_config = {"models": [{"name": "test_model", "provider": "openai", "model": "gpt-4"}]}
+        factory = PydanticAIAgentFactory(session=MockSession(), llm_config=llm_config)
         validation = factory.validate_agent_config(1)
 
         assert validation["valid"] is True
@@ -597,8 +605,7 @@ class TestPydanticAIAgentFactory:
         assert "pydanticai" in validation["errors"][0]
 
     @patch('factories.pydanticai_agent_factory.get_agent_by_id')
-    @patch('factories.pydanticai_agent_factory.get_llm_config_by_name')
-    def test_validate_agent_config_no_tools_warning(self, mock_get_llm_config, mock_get_agent):
+    def test_validate_agent_config_no_tools_warning(self, mock_get_agent):
         """Test validation warns when no tools configured"""
         mock_agent = MockAgent(
             id=1,
@@ -606,10 +613,19 @@ class TestPydanticAIAgentFactory:
             tools=[],
             tools_config={}
         )
+        mock_agent.graph_config = {
+            "entry_point": "main",
+            "nodes": {
+                "main": {
+                    "llm_provider": "test_model",
+                    "tool_ids": [],
+                }
+            },
+        }
         mock_get_agent.return_value = mock_agent
-        mock_get_llm_config.return_value = {"provider": "openai", "model": "gpt-4"}
 
-        factory = PydanticAIAgentFactory(session=MockSession())
+        llm_config = {"models": [{"name": "test_model", "provider": "openai", "model": "gpt-4"}]}
+        factory = PydanticAIAgentFactory(session=MockSession(), llm_config=llm_config)
         validation = factory.validate_agent_config(1)
 
         assert "no tools" in validation["warnings"][0].lower()
