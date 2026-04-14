@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Deploy to server via SSH
         uses: appleboy/ssh-action@v1
@@ -45,6 +45,7 @@ jobs:
             LANGFUSE_PUBLIC_KEY=${{ secrets.LANGFUSE_PUBLIC_KEY }}
             LANGFUSE_HOST=${{ secrets.LANGFUSE_HOST }}
             LLM_CONFIG_ENCRYPTION_KEY=${{ secrets.LLM_CONFIG_ENCRYPTION_KEY }}
+            ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
             ENVEOF
 
             # Build and deploy

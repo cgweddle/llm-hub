@@ -65,6 +65,15 @@ class LLMProviderConfig(Base):
 
     user = relationship("User", back_populates="llm_configs")
 
+class Session(Base):
+    """Lucia auth sessions (used by the SvelteKit frontend, matches schema.pg.ts)"""
+    __tablename__ = 'sessions'
+
+    id = Column(Text, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class Agent(Base):
     __tablename__ = 'agents'
 
@@ -326,11 +335,48 @@ def get_database_manager():
     """Get a database manager instance"""
     return DatabaseManager()
 
+def seed_admin_user(db_manager):
+    """Create the admin user if it doesn't already exist."""
+    from argon2 import PasswordHasher
+
+    admin_password = os.getenv('ADMIN_PASSWORD')
+    if not admin_password:
+        print("ADMIN_PASSWORD not set, skipping admin user creation.")
+        return
+
+    session = db_manager.get_session()
+    try:
+        existing = session.query(User).filter(User.username == 'admin').first()
+        if existing:
+            print("Admin user already exists, skipping.")
+            return
+
+        # Must match frontend's @node-rs/argon2 parameters (login/+page.server.ts)
+        ph = PasswordHasher(memory_cost=19456, time_cost=2, hash_len=32, parallelism=1)
+        admin = User(
+            username='admin',
+            email='chris@endstation.ai',
+            password_hash=ph.hash(admin_password),
+            is_active=True
+        )
+        session.add(admin)
+        session.commit()
+        print("Admin user created.")
+    except Exception as e:
+        session.rollback()
+        print(f"Error creating admin user: {e}")
+    finally:
+        session.close()
+
+
 def setup_database():
     db_manager = get_database_manager()
 
     print("Creating tables...")
     db_manager.create_tables()
+
+    print("Seeding admin user...")
+    seed_admin_user(db_manager)
 
     print("Database setup complete!")
     return True

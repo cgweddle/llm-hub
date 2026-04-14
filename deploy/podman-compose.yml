@@ -43,6 +43,7 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}
       LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     volumes:
       - llm-config:/home/llmhub/.llm_hub
       - backend-logs:/app/logs
