@@ -26,7 +26,7 @@ from src.database.database import (
     update_evaluation, delete_evaluation,
     create_evaluation_result, get_evaluation_results_by_execution,
 )
-from src.utils import load_llm_provider_config, save_llm_provider_config, get_llm_config_by_name
+from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.executors.flow_executor import FlowExecutor
