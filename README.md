@@ -88,3 +88,57 @@ Data bridging between node types is handled automatically:
 - **Agent Frameworks**: PydanticAI and Google ADK (ReAct), selected per-node via `agent_type`
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
+
+## Production Deployment
+
+Behavior switches on the `ENVIRONMENT` variable (default `local`). Local development is unchanged — flows execute synchronously in the API process. `ENVIRONMENT=production` enables async dispatch and sandboxed execution.
+
+### Local vs Production
+
+|  | `ENVIRONMENT=local` (default) | `ENVIRONMENT=production` |
+|---|---|---|
+| Flow dispatch | Synchronous, blocks the HTTP request | Celery task, API returns HTTP 202 immediately |
+| Flow execution | Runs in the API process | Runs in an ephemeral per-flow Podman container |
+| Tool subprocess | On the host | Inside the flow-runner container |
+| External services needed | None | Redis (broker), Podman socket |
+| LLM credentials | `~/.llm_hub/config.yaml` | Postgres (per-user) |
+
+### Production Components
+
+Added to `deploy/podman-compose.yml` alongside the existing postgres / backend / frontend / caddy services:
+
+- **`redis`** — Celery broker and result backend
+- **`worker`** — Long-running Celery worker built from the same image as the backend. Pulls tasks off Redis, spawns a flow-runner container per flow, streams its logs, and updates the Execution row on completion.
+
+Plus a new image built outside compose (per-flow, ephemeral — never runs as a service):
+
+- **`llmhub-flow-runner`** — Minimal Python 3.10 image that hosts `FlowExecutor` for one flow execution. Spawned via the host's Podman socket with `--read-only`, `--tmpfs /tmp`, memory/CPU limits, and `--rm`. Deleted after each flow.
+
+### Execution Flow (production)
+
+```
+Frontend → POST /flows/{id}/execute
+              ↓
+Backend    pre-creates Execution row (status=pending)
+           dispatches execute_flow_task to Redis
+           returns HTTP 202 with execution_id
+              ↓
+Worker     picks up task from Redis
+           spawns llmhub-flow-runner container on llmhub-net
+           streams container logs, waits for exit
+              ↓
+Flow-runner  runs FlowExecutor.execute_flow()
+             writes execution tree to postgres
+             exits; container is removed
+              ↓
+Frontend polls GET /executions/{id} → sees pending → running → completed
+```
+
+### Key Design Decisions
+
+- **One Celery task per flow** (not per node): DAG traversal stays in one process, avoiding distributed-transaction complexity.
+- **Podman wraps the whole flow**, not individual tools: `FlowExecutor` and `subprocess.run()` for tools work identically inside or outside the container — no code branching on environment.
+- **Unrestricted network on the flow-runner**: tools and agents legitimately need outbound access for external APIs. Sandbox is resource + filesystem isolation only.
+- **Credentials in Postgres (production)**: no credential files mounted into containers; the flow-runner gets `DATABASE_URL` and reads per-user LLM credentials at runtime.
+
+See [deploy/DEPLOY.md](deploy/DEPLOY.md) for the hosting / CI-CD setup.

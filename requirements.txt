@@ -13,3 +13,6 @@ psycopg2-binary==2.9.11
 cryptography>=44.0.0
 argon2-cffi==21.3.0
 pytest==9.0.3
+celery==5.4.0
+redis==5.2.1
+podman==5.2.0

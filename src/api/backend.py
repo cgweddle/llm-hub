@@ -21,7 +21,7 @@ from src.database.database import (
     create_tool, get_user_tools, create_flow, get_user_flows,
     get_tool_by_id, update_tool, delete_tool, get_flow_by_id, update_flow, delete_flow,
     get_agent_by_id, update_agent, delete_agent,
-    get_execution_by_id, get_user_executions,
+    get_execution_by_id, get_user_executions, create_execution,
     create_evaluation, get_evaluations_by_user, get_evaluation_by_id,
     update_evaluation, delete_evaluation,
     create_evaluation_result, get_evaluation_results_by_execution,
@@ -940,19 +940,57 @@ def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
         "updated_at": flow.updated_at
     }
 
+def _is_production() -> bool:
+    return os.getenv("ENVIRONMENT", "local").lower() == "production"
+
+
 @app.post("/flows/{flow_id}/execute")
 def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session = Depends(get_db)):
-    """Execute a flow"""
-    try:
-        llm_config = load_llm_provider_config(user_id=request.user_id)
-        executor = FlowExecutor(db, flow_id, user_id=request.user_id, llm_config=llm_config)
-        result = executor.execute_flow(request.initial_input, request.conda_env)
+    """Execute a flow.
 
-        # Update the flow's conda_env if provided
+    LOCAL: runs synchronously, returns the full result.
+    PRODUCTION: dispatches to Celery, returns 202 with execution_id for polling.
+    """
+    try:
+        # Persist conda_env on the flow if provided (same in both modes)
         if request.conda_env:
             update_flow(db, flow_id, conda_env=request.conda_env)
 
+        if _is_production():
+            flow = get_flow_by_id(db, flow_id)
+            if not flow:
+                raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+
+            execution = create_execution(
+                db,
+                user_id=request.user_id,
+                flow_id=flow_id,
+                execution_type='flow',
+                name=flow.name,
+                input_data=request.initial_input,
+                status='pending',
+                started_at=datetime.now(),
+            )
+
+            # Import lazily so local mode doesn't require celery/redis installed
+            from src.tasks.flow_tasks import execute_flow_task
+            execute_flow_task.delay(
+                flow_id,
+                request.user_id,
+                request.initial_input,
+                request.conda_env,
+                execution.id,
+            )
+
+            return {"execution_id": execution.id, "status": "pending"}
+
+        # Local: synchronous path (unchanged behavior)
+        llm_config = load_llm_provider_config(user_id=request.user_id)
+        executor = FlowExecutor(db, flow_id, user_id=request.user_id)
+        result = executor.execute_flow(request.initial_input, request.conda_env)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow execution failed: {str(e)}")
 
