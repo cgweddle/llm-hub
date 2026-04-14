@@ -22,7 +22,7 @@ if PROJECT_ROOT not in sys.path:
 
 from src.llm_setup import create_llm
 from src.database.database import get_prompt_by_name
-from src.utils import get_llm_config_by_name
+from typing import Dict
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
@@ -35,8 +35,8 @@ def generate_system_prompt_stream(
     agent_name: str,
     agent_description: str,
     tool_names: List[str],
-    llm_model: str,
-    additional_instructions: Optional[str] = None
+    llm_config: Dict,
+    additional_instructions: Optional[str] = None,
 ) -> Iterator[str]:
     """
     Generate an agent system prompt using LLM with streaming.
@@ -69,12 +69,7 @@ def generate_system_prompt_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Load LLM config from ~/.llm_hub/config.yaml
-    llm_config = get_llm_config_by_name(llm_model)
-    if not llm_config:
-        yield json.dumps({"error": f"LLM config '{llm_model}' not found in ~/.llm_hub/config.yaml"}) + "\n"
-        return
-
+    # 2. Extract LLM config fields
     provider = llm_config["provider"]
     model = llm_config["model"]
     api_key = llm_config.get("api_key")
@@ -149,9 +144,9 @@ def generate_user_prompt_stream(
     agent_name: str,
     agent_description: str,
     tool_names: List[str],
-    llm_model: str,
+    llm_config: Dict,
     generated_system_prompt: str,
-    additional_instructions: Optional[str] = None
+    additional_instructions: Optional[str] = None,
 ) -> Iterator[str]:
     """
     Generate a task-specific user prompt for an agent using LLM with streaming.
@@ -188,12 +183,7 @@ def generate_user_prompt_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Load LLM config from ~/.llm_hub/config.yaml
-    llm_config = get_llm_config_by_name(llm_model)
-    if not llm_config:
-        yield json.dumps({"error": f"LLM config '{llm_model}' not found in ~/.llm_hub/config.yaml"}) + "\n"
-        return
-
+    # 2. Extract LLM config fields
     provider = llm_config["provider"]
     model = llm_config["model"]
     api_key = llm_config.get("api_key")

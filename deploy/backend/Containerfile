@@ -42,7 +42,7 @@ RUN chmod +x /entrypoint.sh /start_worker.sh
 USER llmhub
 
 ENV PYTHONPATH=/app \
-    ENVIRONMENT=production \
+    ENVIRONMENT=HOSTED \
     UVICORN_HOST=0.0.0.0 \
     UVICORN_PORT=8000 \
     UVICORN_WORKERS=2 \

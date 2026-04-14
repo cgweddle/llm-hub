@@ -21,7 +21,6 @@ if PROJECT_ROOT not in sys.path:
 
 from src.llm_setup import create_llm
 from src.database.database import get_prompt_by_name
-from src.utils import get_llm_config_by_name
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
@@ -100,7 +99,7 @@ def generate_eval_prompt_stream(
     score_categories: Optional[List[Dict[str, str]]],
     return_fields: Optional[List[str]],
     input_variables: List[str],
-    llm_model: str,
+    llm_config: Dict,
     additional_instructions: Optional[str] = None,
 ) -> Iterator[str]:
     """
@@ -125,12 +124,7 @@ def generate_eval_prompt_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Load LLM config
-    llm_config = get_llm_config_by_name(llm_model)
-    if not llm_config:
-        yield json.dumps({"error": f"LLM config '{llm_model}' not found in ~/.llm_hub/config.yaml"}) + "\n"
-        return
-
+    # 2. Extract LLM config fields
     provider = llm_config["provider"]
     model = llm_config["model"]
     api_key = llm_config.get("api_key")

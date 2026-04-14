@@ -291,7 +291,25 @@ Users define custom evaluation types (judge prompt + rubric + score type) and ru
 - `PATCH /evaluations/{id}` — update evaluation
 - `DELETE /evaluations/{id}` — delete evaluation
 
-**LLM provider resolution:** `src/utils/llm_config.py` has `resolve_model_name(llm_provider)` — a shared utility that resolves a provider name from `~/.llm_hub/config.yaml` to a `"provider:model"` string for PydanticAI and sets API key env vars.
+**LLM provider resolution:** `src/utils/llm_config.py` has `resolve_model_name(llm_provider)` — a shared utility that resolves a provider name to a `"provider:model"` string for PydanticAI and sets API key env vars. The source it reads from depends on deployment mode (see below).
+
+### LLM Provider Configuration (Local vs Hosted)
+
+The system supports two mutually-exclusive config backends, selected by the `ENVIRONMENT` env var:
+
+- **LOCAL** (default, unset or `ENVIRONMENT=LOCAL`) — providers are read from and written to `~/.llm_hub/config.yaml` (YAML file, plaintext API keys). Used for local dev. The `llm_provider_configs` DB table is **not created** in this mode — `DatabaseManager.create_tables()` filters it out via `is_local()` so dev SQLite DBs stay lean.
+- **HOSTED** (`ENVIRONMENT=HOSTED`, set in `deploy/podman-compose.yml`) — providers are stored per-user in the `llm_provider_configs` Postgres table with API keys encrypted at rest via Fernet (symmetric). Enables multi-tenant production where each user manages their own credentials through the UI.
+
+**Environment detection:** `src/utils/environment.py` exposes `is_hosted()` / `is_local()` — both `llm_config.py` and `database_setup.py` branch on these.
+
+**Encryption (HOSTED only):** `src/database/database.py` has `_get_fernet()`, `_encrypt_api_key()`, `_decrypt_api_key()` using `cryptography.fernet.Fernet` with key from the `LLM_CONFIG_ENCRYPTION_KEY` env var. The key is a base64-encoded 32-byte Fernet key (generate with `Fernet.generate_key()`). Passed through via GitHub Actions secret → `podman-compose.yml` → backend container. API keys are encrypted on write and decrypted on read; the plaintext never touches disk.
+
+**Data model:** `LLMProviderConfig` (in `database_setup.py`) — per-user row with `name`, `provider`, `model`, `api_key_encrypted` (Text), `base_url`. Related to `User` via `llm_configs` back-reference.
+
+**Caveats:**
+- Do NOT mount the `llm-config` volume or forward provider API keys as env vars into the HOSTED backend container — credentials must come from the DB.
+- Rotating `LLM_CONFIG_ENCRYPTION_KEY` invalidates all existing encrypted rows; plan a re-encryption migration if the key ever changes.
+- `resolve_model_name()` transparently picks the right backend, so caller code (executors, factories) does not need to branch on environment.
 
 ### Production Execution (Celery + Podman)
 
@@ -329,6 +347,7 @@ Single gate in `_is_production()` at `src/api/backend.py:934`. The Celery task i
 - **graph_config** is the central data structure: a JSON object with `nodes` (dict), `edges` (list of from/to mappings), `entry_point`, and `exit_points`. The frontend builds it from the canvas; the backend traverses it for execution.
 - **Streaming** uses SSE (Server-Sent Events) via FastAPI `StreamingResponse`. The frontend reads streams with `ReadableStream` reader pattern. Used for agent execution, code generation, and system prompt generation.
 - **LLM provider config** in **local dev** is stored in `~/.llm_hub/config.yaml` (not in the repo). Supports Anthropic, OpenAI, Gemini, and LM Studio. The backend masks API keys before sending to the frontend. **Production** (`ENVIRONMENT=production`) stores per-user credentials in Postgres instead — don't assume the YAML file exists in production code paths and don't mount `llm-config` volumes into production-only containers.
+- **LLM provider config** has two backends selected by `ENVIRONMENT`: LOCAL reads/writes `~/.llm_hub/config.yaml`; HOSTED reads/writes the `llm_provider_configs` Postgres table with Fernet-encrypted API keys. See "LLM Provider Configuration (Local vs Hosted)" above. Supports Anthropic, OpenAI, Gemini, and LM Studio. The backend masks API keys before sending to the frontend.
 - **Agent types**: All agents use `graph_config` — simple agents are single-node graphs, multi-agent workflows are multi-node graphs. Per-node `agent_type` is a behavioral template (`pydanticai`, `planning`, `react`, `reflection`, `custom`) — all execute via PydanticAI; the type determines the default system prompt, not the execution engine. Cyclic edges (`is_loop: true`) enable reflection loops with `max_loop_iterations` safety limit. Nodes can define `output_paths` for conditional routing (e.g., `{"approve": "...", "revise": "..."}`).
 - **Agent Builder UI**: The AgentBuilder (`frontend/src/routes/AgentBuilder.svelte`) presents template types as clickable buttons. Clicking opens the same Create Agent modal from `+page.svelte` pre-filled with the template's default system prompt and user prompt. The modal supports both simple agent creation and complex agent node configuration. Agent templates with `defaultSystemPrompt` and `defaultUserPrompt` are defined in `frontend/src/lib/agentTemplates.ts`. The "Generate with AI" button generates both prompts sequentially — first the system prompt, then the user prompt (with awareness of the system prompt to avoid overlap). Opening an existing complex agent enables "Update Agent" mode (vs "Save Complex Agent" for new ones).
 - **Tool types**: Python scripts with AST-parsed input/output schemas for flow compatibility validation (`src/validate/tool_compatibility.py`)
@@ -338,6 +357,8 @@ Single gate in `_is_production()` at `src/api/backend.py:934`. The Celery task i
 - Node v25.6.0 (see `frontend/.nvmrc`)
 - Backend `.env` requires `DATABASE_URL` (defaults to `sqlite:///database/llm_hub.db`)
 - Backend `.env` LangFuse config: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` (e.g. `http://localhost:3000` for self-hosted)
+- `ENVIRONMENT`: `LOCAL` (default) or `HOSTED` — toggles LLM config backend between YAML file and encrypted DB rows
+- `LLM_CONFIG_ENCRYPTION_KEY`: required in HOSTED mode only — Fernet key used to encrypt/decrypt per-user API keys in `llm_provider_configs`
 - Frontend `.env` has its own `DATABASE_URL` for Drizzle/better-sqlite3 (Lucia auth)
 - LangFuse runs locally via Podman (`podman compose up` in the langfuse repo)
 - `ENVIRONMENT` env var (default `local`) gates production behavior — see "Production Execution (Celery + Podman)" above. Only `production` enables Celery dispatch and Podman sandboxing. Unset or `local` for dev.
