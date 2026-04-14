@@ -13,19 +13,19 @@ from datetime import datetime
 from typing import Dict, Any, Callable, Optional, List
 from sqlalchemy.orm import Session
 from src.database.database_setup import Flow, Tool, Execution
-from src.database.database import create_execution, update_execution
-from src.executors.tool_executor import create_executable_function, create_conda_executable_function
-from src.utils import get_llm_config_by_name
+from src.database.database import create_execution, update_execution, get_execution_by_id
+from src.executors.tool_executor import create_executable_function
 
 
 
 logger = logging.getLogger(__name__)
 
 class FlowExecutor:
-    def __init__(self, session: Session, flow_id: int, user_id: int):
+    def __init__(self, session: Session, flow_id: int, user_id: int, llm_config: Optional[Dict] = None):
         self.session = session
         self.flow_id = flow_id
         self.user_id = user_id
+        self.llm_config = llm_config or {"models": []}
 
         #Load flow from the database
         flow = self.session.query(Flow).filter(Flow.id == flow_id).first()
@@ -86,26 +86,21 @@ class FlowExecutor:
             if not tool:
                 raise ValueError(f"Tool with ID {tool_id} not found in database")
 
-            # If there is a conda environment associated with the flow, run with that
-            if self.conda_env:
-                func = create_conda_executable_function(tool, self.conda_env)
-            else:
-                func = create_executable_function(tool)
+            func = create_executable_function(tool, conda_env=self.conda_env)
 
             # Load LLM configuration if specified for this node
-            llm_config = None
+            node_llm_config = None
             model_name = node_info.get('model_name')
             if model_name:
-                try:
-                    llm_config = get_llm_config_by_name(model_name)
-                    if llm_config:
-                        # Store the config name for lookup in subprocess
-                        llm_config['config_name'] = model_name
+                # Look up from the pre-loaded llm_config dict
+                for m in self.llm_config.get("models", []):
+                    if m.get("name") == model_name:
+                        node_llm_config = m.copy()
+                        node_llm_config['config_name'] = model_name
                         logger.info(f"Loaded LLM config '{model_name}' for node {node_name}")
-                    else:
-                        logger.warning(f"LLM config '{model_name}' not found in ~/.llm_hub/config.yaml for node {node_name}")
-                except Exception as e:
-                    logger.error(f"Failed to load LLM config '{model_name}': {e}")
+                        break
+                if not node_llm_config:
+                    logger.warning(f"LLM config '{model_name}' not found for node {node_name}")
 
             self.tools_cache[tool_id] = tool
             self.executable_functions[node_name] = {
@@ -113,11 +108,11 @@ class FlowExecutor:
                 "tool": tool,
                 "input_schema": tool.input_schema,
                 "output_schema": tool.output_schema,
-                "llm_config": llm_config  # Store LLM config for tools that need it
+                "llm_config": node_llm_config  # Store LLM config for tools that need it
             }
 
-            if llm_config:
-                logger.info(f"Prepared tool: {tool.name} for node {node_name} with LLM: {llm_config.get('name')}")
+            if node_llm_config:
+                logger.info(f"Prepared tool: {tool.name} for node {node_name} with LLM: {node_llm_config.get('name')}")
             else:
                 logger.info(f"Prepared tool: {tool.name} for node {node_name}")
 
@@ -324,7 +319,7 @@ class FlowExecutor:
         )
 
         try:
-            executor = AgentExecutor(self.session)
+            executor = AgentExecutor(self.session, llm_config=self.llm_config)
             # Run the async method synchronously, passing parent execution for sub-recording
             try:
                 loop = asyncio.get_event_loop()
@@ -622,10 +617,18 @@ class FlowExecutor:
         return '\n'.join(script_parts)
 
 
-    def execute_flow(self, initial_input: Any, conda_env: str):
+    def execute_flow(self, initial_input: Any, conda_env: str, execution_id: Optional[int] = None):
         """
         Execute a flow from the database.
         Creates a top-level Execution record and child records for each node.
+
+        Args:
+            initial_input: Trigger input for the flow
+            conda_env: Optional conda environment path for tool nodes
+            execution_id: Optional pre-existing Execution row ID. When provided
+                (e.g. by a Celery task dispatched from the API), the flow
+                reuses that row and transitions it to 'running' instead of
+                creating a new one.
 
         Returns:
             {
@@ -645,17 +648,28 @@ class FlowExecutor:
             self._step_sequence = 0
             self.conda_env = conda_env
 
-            # Create top-level execution record
-            self.root_execution = create_execution(
-                self.session,
-                user_id=self.user_id,
-                flow_id=self.flow_id,
-                execution_type='flow',
-                name=self.flow.name,
-                input_data=initial_input,
-                status='running',
-                started_at=datetime.now()
-            )
+            if execution_id is not None:
+                existing = get_execution_by_id(self.session, execution_id)
+                if not existing:
+                    raise ValueError(f"Execution {execution_id} not found")
+                update_execution(
+                    self.session,
+                    execution_id,
+                    status='running',
+                    started_at=datetime.now(),
+                )
+                self.root_execution = existing
+            else:
+                self.root_execution = create_execution(
+                    self.session,
+                    user_id=self.user_id,
+                    flow_id=self.flow_id,
+                    execution_type='flow',
+                    name=self.flow.name,
+                    input_data=initial_input,
+                    status='running',
+                    started_at=datetime.now()
+                )
 
             #Prepare tools
             self._prepare_tools()

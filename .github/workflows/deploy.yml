@@ -44,10 +44,25 @@ jobs:
             LANGFUSE_SECRET_KEY=${{ secrets.LANGFUSE_SECRET_KEY }}
             LANGFUSE_PUBLIC_KEY=${{ secrets.LANGFUSE_PUBLIC_KEY }}
             LANGFUSE_HOST=${{ secrets.LANGFUSE_HOST }}
+            LLM_CONFIG_ENCRYPTION_KEY=${{ secrets.LLM_CONFIG_ENCRYPTION_KEY }}
             ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
             ENVEOF
 
-            # Build and deploy
+            # XDG_RUNTIME_DIR may not be set over non-interactive SSH.
+            # podman-compose references it when mounting the user's
+            # rootless podman socket into the worker container.
+            export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+
+            # Ensure the rootless Podman API socket is enabled so the
+            # worker container can spawn flow-runner containers through it.
+            systemctl --user enable --now podman.socket || true
+
+            # Build the flow-runner image used by the Celery worker.
+            # Not part of podman-compose because it's spawned per flow,
+            # not as a long-running service.
+            podman build -t llmhub-flow-runner -f deploy/flow-runner/Containerfile .
+
+            # Build and deploy the long-running services
             cd deploy
             podman-compose build \
               --build-arg PUBLIC_API_BASE_URL=https://${{ secrets.PUBLIC_DOMAIN }}/api
@@ -60,3 +75,6 @@ jobs:
 
             # Verify backend is healthy
             curl -sf http://localhost:8000/healthz || echo "WARNING: Backend health check failed"
+
+            # Verify the worker is running (depends on redis + postgres)
+            podman-compose ps worker | grep -q "Up" || echo "WARNING: Worker not running"

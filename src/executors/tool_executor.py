@@ -5,7 +5,6 @@ Executes database tools by converting them to callable Python functions
 
 import sys
 import os
-import json
 import logging
 import subprocess
 import tempfile
@@ -111,27 +110,26 @@ def eval_type_string(type_str: str, namespace: Dict[str, Any] = None):
         return Any
 
 
-def create_conda_executable_function(tool, conda_env: str) -> Callable:
+def create_executable_function(tool, conda_env: Optional[str] = None) -> Callable:
     """
-    Create an executable function that runs a subprocess with a conda environment
+    Create an executable function that runs a tool in a subprocess.
+
     Args:
-        tool: Tool with function_code and main_function
-        conda_env: Path to the conda environment to use
+        tool: Database Tool object with script_code and main_function
+        conda_env: Optional path to a conda environment to run in
 
     Returns:
         Callable function that executes tool in subprocess
     """
 
     def subprocess_wrapper(**kwargs):
-        # Get environment variables from parent process
-        model_name = os.environ.get('LLMHUB_MODEL_NAME', '')
-        config_name = os.environ.get('LLMHUB_CONFIG_NAME', '')
+        # Build the script preamble — conda needs explicit config loading
+        # since conda run may not inherit parent env vars reliably
+        if conda_env:
+            model_name = os.environ.get('LLMHUB_MODEL_NAME', '')
+            config_name = os.environ.get('LLMHUB_CONFIG_NAME', '')
 
-        script_template = '''
-import pickle
-import sys
-import os
-
+            preamble = '''
 # Set environment variables from parent process
 os.environ["LLMHUB_MODEL_NAME"] = {model_name_repr}
 os.environ["LLMHUB_CONFIG_NAME"] = {config_name_repr}
@@ -173,6 +171,16 @@ if os.environ.get("LLMHUB_CONFIG_NAME"):
                     break
     except Exception as e:
         pass  # Silently fail if config loading fails
+'''.format(model_name_repr=repr(model_name), config_name_repr=repr(config_name))
+        else:
+            preamble = ''
+
+        script_template = '''
+import pickle
+import sys
+import os
+
+{preamble}
 
 # Prevent __name__ == "__main__" blocks from executing
 __name__ = "__tool_execution__"
@@ -196,27 +204,28 @@ except Exception as e:
 
 # Output result as pickle to stdout
 sys.stdout.buffer.write(pickle.dumps(output))
-        '''
+'''
 
         script = script_template.format(
-            model_name_repr = repr(model_name),
-            config_name_repr = repr(config_name),
-            script_code = tool.script_code,
-            function_name = tool.main_function
+            preamble=preamble,
+            script_code=tool.script_code,
+            function_name=tool.main_function
         )
 
         # Write script to temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix = '.py', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             script_path = f.name
             f.write(script)
         try:
             # Pickle the input arguments
             input_pickle = pickle.dumps(kwargs)
 
-            # Build conda run command
-            cmd = ['conda', 'run', '--no-capture-output', '-p', conda_env, 'python', script_path]
-
-            logger.info(f"Executing tool {tool.main_function} in conda env: {conda_env}")
+            if conda_env:
+                cmd = ['conda', 'run', '--no-capture-output', '-p', conda_env, 'python', script_path]
+                logger.info(f"Executing tool {tool.main_function} in conda env: {conda_env}")
+            else:
+                cmd = [sys.executable, script_path]
+                logger.info(f"Executing tool {tool.main_function} in subprocess")
 
             result = subprocess.run(
                 cmd,
@@ -245,7 +254,7 @@ sys.stdout.buffer.write(pickle.dumps(output))
                 if 'traceback' in output:
                     error_msg += f"\n{output['traceback']}"
                 raise RuntimeError(error_msg)
-            
+
             return output["result"]
 
         finally:
@@ -254,56 +263,8 @@ sys.stdout.buffer.write(pickle.dumps(output))
                 os.unlink(script_path)
             except Exception as e:
                 logger.warning(f"Failed to delete temp script {script_path}: {e}")
-            
+
     return subprocess_wrapper
-
-
-
-def create_executable_function(tool) -> Callable:
-    """
-    Create an executable function from database tool
-
-    Args:
-        tool: Database Tool object with function_code, main_function, and helper_functions
-
-    Returns:
-        Callable function that can be invoked
-
-    Raises:
-        ValueError: If function cannot be created
-    """
-    # Prepare the execution environment
-    exec_globals = {
-        '__builtins__': __builtins__,
-        'json': json,
-        'os': os,
-        'sys': sys
-    }
-
-    # Add helper functions to the execution environment
-    if hasattr(tool, 'helper_functions') and tool.helper_functions:
-        for helper_name, helper_code in tool.helper_functions.items():
-            try:
-                exec(helper_code, exec_globals)
-                logger.debug(f"Added helper function: {helper_name}")
-            except Exception as e:
-                logger.error(f"Failed to execute helper function {helper_name}: {e}")
-                raise
-
-    # Execute the main function code
-    try:
-        exec(tool.function_code, exec_globals)
-        main_function = exec_globals.get(tool.main_function)
-
-        if not main_function:
-            raise ValueError(f"Main function '{tool.main_function}' not found after execution")
-
-        logger.info(f"Successfully created executable function: {tool.main_function}")
-        return main_function
-
-    except Exception as e:
-        logger.error(f"Failed to create executable function: {e}")
-        raise
 
 
 def execute_tool(tool, **kwargs) -> Any:
@@ -330,12 +291,11 @@ if __name__ == "__main__":
     class MockTool:
         def __init__(self):
             self.main_function = "add_numbers"
-            self.function_code = """
+            self.script_code = """
 def add_numbers(a, b):
     '''Add two numbers together'''
     return a + b
 """
-            self.helper_functions = {}
 
     # Create executable function
     mock_tool = MockTool()

@@ -32,7 +32,7 @@ flow_tool_association = Table('flow_tool_association', Base.metadata,
 
 class User(Base):
     __tablename__ = 'users'
-    
+
     id = Column(Integer, primary_key=True)
     username = Column(String(50), unique=True, nullable=False)
     email = Column(String(120), unique=True, nullable=False)
@@ -40,11 +40,30 @@ class User(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     is_active = Column(Boolean, default=True)
-    
+
     # Relationships
     agents = relationship("Agent", back_populates="user")
     flows = relationship("Flow", back_populates="user")
     executions = relationship("Execution", back_populates="user")
+    llm_configs = relationship("LLMProviderConfig", back_populates="user")
+
+
+class LLMProviderConfig(Base):
+    """Per-user LLM provider configuration. Only used in hosted deployments
+    (ENVIRONMENT=HOSTED). In local mode, config is read from ~/.llm_hub/config.yaml."""
+    __tablename__ = 'llm_provider_configs'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    name = Column(String(100), nullable=False)
+    provider = Column(String(50), nullable=False)
+    model = Column(String(200), nullable=False)
+    api_key_encrypted = Column(Text, nullable=True)
+    base_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="llm_configs")
 
 class Session(Base):
     """Lucia auth sessions (used by the SvelteKit frontend, matches schema.pg.ts)"""
@@ -249,9 +268,22 @@ class DatabaseManager:
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
     
     def create_tables(self):
-        """Create all tables in the database"""
+        """Create all tables in the database.
+
+        In LOCAL mode, the llm_provider_configs table is skipped since
+        LLM config is read from ~/.llm_hub/config.yaml instead.
+        """
         try:
-            Base.metadata.create_all(bind=self.engine)
+            from src.utils.environment import is_local
+            if is_local():
+                # Create all tables except llm_provider_configs
+                tables_to_create = [
+                    t for t in Base.metadata.sorted_tables
+                    if t.name != 'llm_provider_configs'
+                ]
+                Base.metadata.create_all(bind=self.engine, tables=tables_to_create)
+            else:
+                Base.metadata.create_all(bind=self.engine)
             db_type = "SQLite" if self.is_sqlite else "PostgreSQL"
             print(f"Database tables created successfully using {db_type}!")
         except Exception as e:
