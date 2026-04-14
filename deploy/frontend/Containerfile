@@ -8,10 +8,10 @@ RUN npm ci
 
 COPY frontend/ .
 
-# Build-time env: the URL the browser will use to reach the backend API.
-# In production behind a reverse proxy, this is the public domain.
-ARG PUBLIC_API_BASE_URL=http://localhost:8000
-ENV PUBLIC_API_BASE_URL=$PUBLIC_API_BASE_URL
+# NOTE: PUBLIC_API_BASE_URL is deliberately NOT set here. The frontend uses
+# SvelteKit's $env/dynamic/public, which reads env vars at runtime from the
+# running Node process, not at build time. The value is injected via the
+# frontend service's environment block in deploy/podman-compose.yml.
 
 # SvelteKit's post-build analysis imports server modules, which require DATABASE_URL to not crash.
 # This is never used for an actual connection — the runtime container gets the real URL from compose.

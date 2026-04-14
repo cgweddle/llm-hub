@@ -9,6 +9,7 @@
     updateEvaluation,
     deleteEvaluation,
     loadLLMProvidersConfig,
+    API_BASE_URL,
     type Evaluation,
     type EvaluationCategory,
   } from '$lib/api';
@@ -166,7 +167,7 @@
     formJudgeSystemPrompt = '';
 
     try {
-      const response = await fetch('http://localhost:8000/evaluations/generate-prompt', {
+      const response = await fetch(`${API_BASE_URL}/evaluations/generate-prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

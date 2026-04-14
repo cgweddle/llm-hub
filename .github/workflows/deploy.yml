@@ -62,10 +62,12 @@ jobs:
             # not as a long-running service.
             podman build -t llmhub-flow-runner -f deploy/flow-runner/Containerfile .
 
-            # Build and deploy the long-running services
+            # Build and deploy the long-running services.
+            # PUBLIC_API_BASE_URL is a runtime env var (via $env/dynamic/public),
+            # not a build arg — it's set in the frontend service's environment
+            # block in podman-compose.yml, so no --build-arg needed here.
             cd deploy
-            podman-compose build \
-              --build-arg PUBLIC_API_BASE_URL=https://${{ secrets.PUBLIC_DOMAIN }}/api
+            podman-compose build
             podman-compose down
             podman-compose up -d
 
