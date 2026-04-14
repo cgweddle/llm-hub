@@ -14,7 +14,7 @@ from typing import Dict, Any, Callable, Optional, List
 from sqlalchemy.orm import Session
 from src.database.database_setup import Flow, Tool, Execution
 from src.database.database import create_execution, update_execution
-from src.executors.tool_executor import create_executable_function, create_conda_executable_function
+from src.executors.tool_executor import create_executable_function
 from src.utils import get_llm_config_by_name
 
 
@@ -86,11 +86,7 @@ class FlowExecutor:
             if not tool:
                 raise ValueError(f"Tool with ID {tool_id} not found in database")
 
-            # If there is a conda environment associated with the flow, run with that
-            if self.conda_env:
-                func = create_conda_executable_function(tool, self.conda_env)
-            else:
-                func = create_executable_function(tool)
+            func = create_executable_function(tool, conda_env=self.conda_env)
 
             # Load LLM configuration if specified for this node
             llm_config = None
