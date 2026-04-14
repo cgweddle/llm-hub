@@ -124,8 +124,6 @@ services:
     build:
       context: ../
       dockerfile: deploy/frontend/Containerfile
-      args:
-        PUBLIC_API_BASE_URL: https://${PUBLIC_DOMAIN}/api
     container_name: llmhub-frontend
     restart: unless-stopped
     depends_on:
@@ -137,6 +135,9 @@ services:
       ORIGIN: https://${PUBLIC_DOMAIN}
       NODE_ENV: production
       PORT: 3000
+      # Read at runtime by SvelteKit's $env/dynamic/public and served to the
+      # browser. This is the URL the browser uses to reach the backend API.
+      PUBLIC_API_BASE_URL: https://${PUBLIC_DOMAIN}/api
     networks:
       - llmhub-net
     deploy:
