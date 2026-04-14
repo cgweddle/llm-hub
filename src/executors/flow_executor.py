@@ -14,8 +14,7 @@ from typing import Dict, Any, Callable, Optional, List
 from sqlalchemy.orm import Session
 from src.database.database_setup import Flow, Tool, Execution
 from src.database.database import create_execution, update_execution, get_execution_by_id
-from src.utils import get_llm_config_by_name
-from src.executors.tool_executor import create_executable_function, create_conda_executable_function
+from src.executors.tool_executor import create_executable_function
 
 
 

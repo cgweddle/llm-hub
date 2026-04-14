@@ -986,7 +986,7 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
 
         # Local: synchronous path (unchanged behavior)
         llm_config = load_llm_provider_config(user_id=request.user_id)
-        executor = FlowExecutor(db, flow_id, user_id=request.user_id)
+        executor = FlowExecutor(db, flow_id, user_id=request.user_id, llm_config=llm_config)
         result = executor.execute_flow(request.initial_input, request.conda_env)
         return result
     except HTTPException:
