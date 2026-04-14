@@ -242,7 +242,7 @@ Standalone agent executions have `parent_id=NULL, type='agent'`. The `messages` 
 ### Execution Recording & LangFuse Tracing
 
 **Execution tree** — Both `FlowExecutor` and `AgentExecutor` record executions to the self-referencing `executions` table:
-- `FlowExecutor.execute_flow()` creates a top-level `Execution(type='flow')` and child records for each node (trigger, tool, agent) as it traverses the DAG
+- `FlowExecutor.execute_flow(initial_input, conda_env, execution_id=None)` creates a top-level `Execution(type='flow')` and child records for each node (trigger, tool, agent) as it traverses the DAG. The optional `execution_id` parameter reuses a pre-existing row (used by the Celery task path — see "Production Execution" below) instead of creating a new one.
 - `AgentExecutor.execute_agent()` creates a top-level `Execution(type='agent')` for standalone agent runs
 - `AgentExecutor.execute_agent_node()` is called by FlowExecutor with a `parent_execution` — records agent details under the flow's tree
 - For single-node agents, no redundant child is created; the parent execution record suffices
@@ -293,10 +293,42 @@ Users define custom evaluation types (judge prompt + rubric + score type) and ru
 
 **LLM provider resolution:** `src/utils/llm_config.py` has `resolve_model_name(llm_provider)` — a shared utility that resolves a provider name from `~/.llm_hub/config.yaml` to a `"provider:model"` string for PydanticAI and sets API key env vars.
 
+### Production Execution (Celery + Podman)
+
+Execution behavior splits on `ENVIRONMENT` (default `local`):
+
+- **`ENVIRONMENT=local`** (dev default): `POST /flows/{id}/execute` runs `FlowExecutor.execute_flow()` synchronously in the API process. No Redis, no Celery, no Podman required. This is the existing behavior and all dev workflows assume it.
+- **`ENVIRONMENT=production`**: The endpoint pre-creates an `Execution(status='pending')` row, dispatches `execute_flow_task.delay(...)` to Redis, and returns HTTP 202 with `{execution_id, status}`. Frontend polls `GET /executions/{id}` for status transitions (`pending` → `running` → `completed`).
+
+Single gate in `_is_production()` at `src/api/backend.py:934`. The Celery task import is **lazy** (inside the production branch) so local dev doesn't require celery/redis installed.
+
+**Celery app** (`src/celery_app.py`) — shared between API and worker. Reads `CELERY_BROKER_URL` (default `redis://localhost:6379/0`). Configured with `task_acks_late=True`, `worker_prefetch_multiplier=1`, JSON serialization. Autodiscovers tasks from `src.tasks`.
+
+**Celery task** (`src/tasks/flow_tasks.py::execute_flow_task`) — receives `(flow_id, user_id, initial_input, conda_env, execution_id)`. Default behavior: spawns an `llmhub-flow-runner` Podman container via `podman-py` bound to `CONTAINER_HOST` (the host's rootless socket). Falls back to in-worker execution when `FLOW_RUNNER_USE_PODMAN=false` (useful for testing the Celery layer without Podman).
+
+**Flow-runner container** (`deploy/flow-runner/Containerfile`, image `llmhub-flow-runner`):
+- Minimal `python:3.10-slim` with `src/` and `requirements.txt` only
+- Entrypoint: `python -m src.tasks.run_flow` (`src/tasks/run_flow.py`)
+- Reads `FLOW_RUNNER_FLOW_ID`, `FLOW_RUNNER_USER_ID`, `FLOW_RUNNER_EXECUTION_ID`, `FLOW_RUNNER_INITIAL_INPUT` (JSON), `FLOW_RUNNER_CONDA_ENV` from env vars set by the worker's `podman run -e`
+- Opens its own DB session via `DatabaseManager().get_session()` and calls `FlowExecutor.execute_flow(..., execution_id=...)` — **exactly the same code path as local mode**. Tools still run as host-style subprocesses; they don't know they're in a container.
+- Spawned with `--rm`, `--read-only`, `--tmpfs /tmp:size=100M`, `--memory=1g`, `--cpus=2`, on the `llmhub-net` network. Unrestricted network (tools/agents need outbound access for external APIs).
+- Image is built outside `podman-compose.yml` (via `podman build` in `.github/workflows/deploy.yml`) because it's ephemeral, not a long-running service.
+
+**Services in `deploy/podman-compose.yml`** (production-only additions):
+- `redis` — broker/result backend
+- `worker` — same image as `backend`, entrypoint `/start_worker.sh` (`deploy/backend/start_worker.sh`) running `celery -A src.celery_app:celery_app worker`. Mounts host's rootless Podman socket (`${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock`) so it can spawn flow-runner containers.
+- `llmhub-net` and `llm-config` are pinned with explicit `name:` in compose (no project prefix) so the dynamically-spawned flow-runner can reference them by stable name.
+
+**Env var forwarding** (`_FORWARDED_ENV_VARS` in `flow_tasks.py`): worker → flow-runner only forwards `DATABASE_URL`, `SQL_DEBUG`, `ENVIRONMENT`, `LANGFUSE_*`. LLM provider credentials are NOT forwarded — in production they live in Postgres (per-user), looked up at runtime via `DATABASE_URL`. Local dev still uses `~/.llm_hub/config.yaml`.
+
+**Safety net**: if the flow-runner container crashes or exits non-zero without updating the DB, `_mark_failed_if_still_running(execution_id, reason)` updates the Execution row to `status='failed'` so the frontend doesn't see it stuck.
+
+**When modifying flow execution**: any change to `FlowExecutor`, `ToolExecutor`, or `AgentExecutor` automatically applies to both local and production — the flow-runner runs the same code. No branching on environment inside the executors.
+
 ### Key Patterns
 - **graph_config** is the central data structure: a JSON object with `nodes` (dict), `edges` (list of from/to mappings), `entry_point`, and `exit_points`. The frontend builds it from the canvas; the backend traverses it for execution.
 - **Streaming** uses SSE (Server-Sent Events) via FastAPI `StreamingResponse`. The frontend reads streams with `ReadableStream` reader pattern. Used for agent execution, code generation, and system prompt generation.
-- **LLM provider config** is stored in `~/.llm_hub/config.yaml` (not in the repo). Supports Anthropic, OpenAI, Gemini, and LM Studio. The backend masks API keys before sending to the frontend.
+- **LLM provider config** in **local dev** is stored in `~/.llm_hub/config.yaml` (not in the repo). Supports Anthropic, OpenAI, Gemini, and LM Studio. The backend masks API keys before sending to the frontend. **Production** (`ENVIRONMENT=production`) stores per-user credentials in Postgres instead — don't assume the YAML file exists in production code paths and don't mount `llm-config` volumes into production-only containers.
 - **Agent types**: All agents use `graph_config` — simple agents are single-node graphs, multi-agent workflows are multi-node graphs. Per-node `agent_type` is a behavioral template (`pydanticai`, `planning`, `react`, `reflection`, `custom`) — all execute via PydanticAI; the type determines the default system prompt, not the execution engine. Cyclic edges (`is_loop: true`) enable reflection loops with `max_loop_iterations` safety limit. Nodes can define `output_paths` for conditional routing (e.g., `{"approve": "...", "revise": "..."}`).
 - **Agent Builder UI**: The AgentBuilder (`frontend/src/routes/AgentBuilder.svelte`) presents template types as clickable buttons. Clicking opens the same Create Agent modal from `+page.svelte` pre-filled with the template's default system prompt and user prompt. The modal supports both simple agent creation and complex agent node configuration. Agent templates with `defaultSystemPrompt` and `defaultUserPrompt` are defined in `frontend/src/lib/agentTemplates.ts`. The "Generate with AI" button generates both prompts sequentially — first the system prompt, then the user prompt (with awareness of the system prompt to avoid overlap). Opening an existing complex agent enables "Update Agent" mode (vs "Save Complex Agent" for new ones).
 - **Tool types**: Python scripts with AST-parsed input/output schemas for flow compatibility validation (`src/validate/tool_compatibility.py`)
@@ -308,3 +340,5 @@ Users define custom evaluation types (judge prompt + rubric + score type) and ru
 - Backend `.env` LangFuse config: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` (e.g. `http://localhost:3000` for self-hosted)
 - Frontend `.env` has its own `DATABASE_URL` for Drizzle/better-sqlite3 (Lucia auth)
 - LangFuse runs locally via Podman (`podman compose up` in the langfuse repo)
+- `ENVIRONMENT` env var (default `local`) gates production behavior — see "Production Execution (Celery + Podman)" above. Only `production` enables Celery dispatch and Podman sandboxing. Unset or `local` for dev.
+- Production-only env vars (set in `deploy/podman-compose.yml`, not `.env`): `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `CONTAINER_HOST`, `FLOW_RUNNER_IMAGE`, `FLOW_RUNNER_NETWORK`, `FLOW_RUNNER_USE_PODMAN`, optional `FLOW_RUNNER_MEMORY`, `FLOW_RUNNER_CPUS`, `FLOW_RUNNER_TIMEOUT_SECONDS`.

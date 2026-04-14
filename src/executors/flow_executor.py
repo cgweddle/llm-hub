@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Dict, Any, Callable, Optional, List
 from sqlalchemy.orm import Session
 from src.database.database_setup import Flow, Tool, Execution
-from src.database.database import create_execution, update_execution
+from src.database.database import create_execution, update_execution, get_execution_by_id
 from src.executors.tool_executor import create_executable_function
 from src.utils import get_llm_config_by_name
 
@@ -618,10 +618,18 @@ class FlowExecutor:
         return '\n'.join(script_parts)
 
 
-    def execute_flow(self, initial_input: Any, conda_env: str):
+    def execute_flow(self, initial_input: Any, conda_env: str, execution_id: Optional[int] = None):
         """
         Execute a flow from the database.
         Creates a top-level Execution record and child records for each node.
+
+        Args:
+            initial_input: Trigger input for the flow
+            conda_env: Optional conda environment path for tool nodes
+            execution_id: Optional pre-existing Execution row ID. When provided
+                (e.g. by a Celery task dispatched from the API), the flow
+                reuses that row and transitions it to 'running' instead of
+                creating a new one.
 
         Returns:
             {
@@ -641,17 +649,28 @@ class FlowExecutor:
             self._step_sequence = 0
             self.conda_env = conda_env
 
-            # Create top-level execution record
-            self.root_execution = create_execution(
-                self.session,
-                user_id=self.user_id,
-                flow_id=self.flow_id,
-                execution_type='flow',
-                name=self.flow.name,
-                input_data=initial_input,
-                status='running',
-                started_at=datetime.now()
-            )
+            if execution_id is not None:
+                existing = get_execution_by_id(self.session, execution_id)
+                if not existing:
+                    raise ValueError(f"Execution {execution_id} not found")
+                update_execution(
+                    self.session,
+                    execution_id,
+                    status='running',
+                    started_at=datetime.now(),
+                )
+                self.root_execution = existing
+            else:
+                self.root_execution = create_execution(
+                    self.session,
+                    user_id=self.user_id,
+                    flow_id=self.flow_id,
+                    execution_type='flow',
+                    name=self.flow.name,
+                    input_data=initial_input,
+                    status='running',
+                    started_at=datetime.now()
+                )
 
             #Prepare tools
             self._prepare_tools()

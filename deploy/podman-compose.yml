@@ -25,6 +25,24 @@ services:
           memory: 512M
           cpus: "1.0"
 
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: llmhub-redis
+    restart: unless-stopped
+    networks:
+      - llmhub-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
   backend:
     build:
       context: ../
@@ -34,10 +52,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       ENVIRONMENT: production
       PROD_DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
       DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
       CORS_ORIGINS: https://${PUBLIC_DOMAIN}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
@@ -53,6 +75,48 @@ services:
       resources:
         limits:
           memory: 1G
+          cpus: "2.0"
+
+  worker:
+    build:
+      context: ../
+      dockerfile: deploy/backend/Containerfile
+    container_name: llmhub-worker
+    restart: unless-stopped
+    entrypoint: ["/start_worker.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      # Flow-runner configuration — the worker spawns these per flow execution
+      FLOW_RUNNER_USE_PODMAN: "true"
+      FLOW_RUNNER_IMAGE: llmhub-flow-runner
+      FLOW_RUNNER_NETWORK: llmhub-net
+      CONTAINER_HOST: unix:///run/podman/podman.sock
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+    volumes:
+      - llm-config:/home/llmhub/.llm_hub
+      - backend-logs:/app/logs
+      - generated-scripts:/app/generated_scripts
+      # Host's (rootless) Podman socket — lets the worker spawn sibling
+      # containers. XDG_RUNTIME_DIR resolves to /run/user/<uid> for the
+      # deploy user. Inside the container we always expose it at the
+      # rootful path so the app code is agnostic to host layout.
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock
+    networks:
+      - llmhub-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
           cpus: "2.0"
 
   frontend:
@@ -105,7 +169,10 @@ services:
           cpus: "0.5"
 
 networks:
+  # Pinned name (no project prefix) so spawned flow-runner containers can
+  # attach to it by the stable name "llmhub-net".
   llmhub-net:
+    name: llmhub-net
     driver: bridge
 
 volumes:
