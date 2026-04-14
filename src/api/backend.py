@@ -1,12 +1,18 @@
 # api.py
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
 import sys
 import os
 import json
 import subprocess
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+
+from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, EmailStr
+from passlib.hash import bcrypt
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.database.database import (
     get_session, create_agent, get_user_agents, create_user,
@@ -20,16 +26,21 @@ from src.database.database import (
     update_evaluation, delete_evaluation,
     create_evaluation_result, get_evaluation_results_by_execution,
 )
-from src.utils import load_llm_provider_config, save_llm_provider_config
+from src.utils import load_llm_provider_config, save_llm_provider_config, get_llm_config_by_name
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.executors.flow_executor import FlowExecutor
 from src.executors.agent_executor import AgentExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
-from pydantic import BaseModel, EmailStr
-from typing import List, Optional, Dict, Any
-from datetime import datetime
-from passlib.hash import bcrypt
+
+
+def _resolve_llm_config(model_name: str, user_id: Optional[int] = None) -> Dict[str, Any]:
+    """Resolve a single LLM config dict by name for the given user."""
+    config = load_llm_provider_config(user_id=user_id)
+    for m in config.get("models", []):
+        if m.get("name") == model_name:
+            return m
+    raise ValueError(f"LLM config '{model_name}' not found")
 
 app = FastAPI()
 
@@ -258,6 +269,7 @@ class SystemPromptGenerateRequest(BaseModel):
     tool_names: List[str] = []
     model: str
     additional_instructions: Optional[str] = None
+    user_id: Optional[int] = None
 
 class UserPromptGenerateRequest(BaseModel):
     agent_name: str
@@ -266,16 +278,15 @@ class UserPromptGenerateRequest(BaseModel):
     model: str
     generated_system_prompt: str
     additional_instructions: Optional[str] = None
+    user_id: Optional[int] = None
 
 
 class CodeGenerateRequest(BaseModel):
     tool_name: str
     tool_description: str
-    provider: str  # e.g., 'anthropic', 'openai', 'gemini', 'lmstudio'
-    model: str     # e.g., 'claude-3-5-sonnet-20241022'
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
+    model: str
     additional_instructions: Optional[str] = None
+    user_id: Optional[int] = None
 
 class CodeGenerateResponse(BaseModel):
     script_code: str
@@ -286,10 +297,8 @@ class CodeEditRequest(BaseModel):
     editing_instructions: str
     tool_name: str
     tool_description: str
-    provider: str  # e.g., 'anthropic', 'openai', 'gemini', 'lmstudio'
-    model: str     # e.g., 'claude-3-5-sonnet-20241022'
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
+    model: str
+    user_id: Optional[int] = None
 
 class LLMProviderConfig(BaseModel):
     name: str
@@ -425,7 +434,9 @@ async def execute_agent_endpoint(
         }
     """
     try:
-        executor = AgentExecutor(db)
+        # Load the user's LLM config once for this request
+        llm_config = load_llm_provider_config(user_id=request.user_id)
+        executor = AgentExecutor(db, llm_config=llm_config)
 
         # Handle streaming requests
         if request.stream:
@@ -516,6 +527,8 @@ def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Se
     try:
         from src.ai_integrations.generate_agent_system_prompt import generate_system_prompt_stream
 
+        llm_config = _resolve_llm_config(request.model, request.user_id)
+
         def stream_generator():
             try:
                 for chunk in generate_system_prompt_stream(
@@ -523,8 +536,8 @@ def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Se
                     agent_name=request.agent_name,
                     agent_description=request.agent_description,
                     tool_names=request.tool_names,
-                    llm_model=request.model,
-                    additional_instructions=request.additional_instructions
+                    llm_config=llm_config,
+                    additional_instructions=request.additional_instructions,
                 ):
                     yield chunk
             except Exception as e:
@@ -547,6 +560,7 @@ def generate_user_prompt_endpoint(request: UserPromptGenerateRequest, db: Sessio
     """Generate a task-specific user prompt for an agent using AI with streaming"""
     try:
         from src.ai_integrations.generate_agent_system_prompt import generate_user_prompt_stream
+        llm_config = _resolve_llm_config(request.model, request.user_id)
 
         def stream_generator():
             try:
@@ -555,9 +569,9 @@ def generate_user_prompt_endpoint(request: UserPromptGenerateRequest, db: Sessio
                     agent_name=request.agent_name,
                     agent_description=request.agent_description,
                     tool_names=request.tool_names,
-                    llm_model=request.model,
+                    llm_config=llm_config,
                     generated_system_prompt=request.generated_system_prompt,
-                    additional_instructions=request.additional_instructions
+                    additional_instructions=request.additional_instructions,
                 ):
                     yield chunk
             except Exception as e:
@@ -660,6 +674,7 @@ def generate_tool_code_endpoint(request: CodeGenerateRequest, db: Session = Depe
     """Generate Python tool code using AI with user-selected LLM (streaming)"""
     try:
         from src.ai_integrations.generate_python_tools import generate_tool_code_stream
+        llm_config = _resolve_llm_config(request.model, request.user_id)
 
         def stream_generator():
             try:
@@ -667,11 +682,8 @@ def generate_tool_code_endpoint(request: CodeGenerateRequest, db: Session = Depe
                     session=db,
                     tool_name=request.tool_name,
                     tool_description=request.tool_description,
-                    provider=request.provider,
-                    model=request.model,
-                    api_key=request.api_key,
-                    base_url=request.base_url,
-                    additional_instructions=request.additional_instructions
+                    llm_config=llm_config,
+                    additional_instructions=request.additional_instructions,
                 ):
                     yield chunk
             except Exception as e:
@@ -698,6 +710,7 @@ def edit_tool_code_endpoint(request: CodeEditRequest, db: Session = Depends(get_
     """Edit existing Python tool code using AI with user-selected LLM (streaming)"""
     try:
         from src.ai_integrations.generate_python_tools import edit_tool_code_stream
+        llm_config = _resolve_llm_config(request.model, request.user_id)
 
         def stream_generator():
             try:
@@ -707,10 +720,7 @@ def edit_tool_code_endpoint(request: CodeEditRequest, db: Session = Depends(get_
                     editing_instructions=request.editing_instructions,
                     tool_name=request.tool_name,
                     tool_description=request.tool_description,
-                    provider=request.provider,
-                    model=request.model,
-                    api_key=request.api_key,
-                    base_url=request.base_url
+                    llm_config=llm_config,
                 ):
                     yield chunk
             except Exception as e:
@@ -934,7 +944,8 @@ def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
 def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session = Depends(get_db)):
     """Execute a flow"""
     try:
-        executor = FlowExecutor(db, flow_id, user_id=request.user_id)
+        llm_config = load_llm_provider_config(user_id=request.user_id)
+        executor = FlowExecutor(db, flow_id, user_id=request.user_id, llm_config=llm_config)
         result = executor.execute_flow(request.initial_input, request.conda_env)
 
         # Update the flow's conda_env if provided
@@ -949,7 +960,8 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
 def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, user_id: int = 1, db: Session = Depends(get_db)):
     """Resume a failed flow"""
     try:
-        executor = FlowExecutor(db, flow_id, user_id=user_id)
+        llm_config = load_llm_provider_config(user_id=user_id)
+        executor = FlowExecutor(db, flow_id, user_id=user_id, llm_config=llm_config)
         result = executor.resume_flow(flow_id, execution_trace, resume_input)
         return result
     except Exception as e:
@@ -1104,12 +1116,16 @@ def get_conda_environments():
 
 # LLM Provider Config Endpoints
 @app.get("/llm-providers/config", response_model=LLMProvidersConfigResponse)
-def get_llm_providers_config():
-    """Load LLM provider configuration from ~/.llm_hub/config.yaml with masked credentials"""
+def get_llm_providers_config(user_id: Optional[int] = Query(None)):
+    """Load LLM provider configuration with masked credentials.
+
+    In hosted mode, loads per-user config from the database.
+    In local mode, loads from ~/.llm_hub/config.yaml (user_id ignored).
+    """
     try:
         from src.utils import mask_credentials
 
-        config = load_llm_provider_config()
+        config = load_llm_provider_config(user_id=user_id)
 
         # Mask sensitive credentials before sending to frontend
         config['models'] = mask_credentials(config.get('models', []))
@@ -1119,28 +1135,31 @@ def get_llm_providers_config():
         raise HTTPException(status_code=500, detail=f"Failed to load LLM config: {str(e)}")
 
 @app.post("/llm-providers/config")
-def save_llm_providers_config(config: LLMProvidersConfigRequest):
-    """Save LLM provider configuration to ~/.llm_hub/config.yaml"""
+def save_llm_providers_config(config: LLMProvidersConfigRequest, user_id: Optional[int] = Query(None)):
+    """Save LLM provider configuration.
+
+    In hosted mode, saves per-user config to the database.
+    In local mode, saves to ~/.llm_hub/config.yaml (user_id ignored).
+    """
     try:
-        from src.utils import get_llm_hub_config_path, restore_masked_credentials
+        from src.utils import restore_masked_credentials
 
         # Convert Pydantic models to dictionaries
         models_list = [model.model_dump() for model in config.models]
 
         # Load existing config to restore any masked credentials
-        existing_config = load_llm_provider_config()
+        existing_config = load_llm_provider_config(user_id=user_id)
         existing_models = existing_config.get('models', [])
 
         # Restore masked credentials (if any)
         models_list = restore_masked_credentials(models_list, existing_models)
 
-        # Save to config file
-        save_llm_provider_config(models=models_list)
+        # Save config
+        save_llm_provider_config(models=models_list, user_id=user_id)
 
         return {
             "status": "success",
             "message": "LLM provider configuration saved successfully",
-            "config_path": str(get_llm_hub_config_path())
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save LLM config: {str(e)}")
@@ -1157,6 +1176,7 @@ class EvalPromptGenerateRequest(BaseModel):
     input_variables: List[str] = ["output"]
     model: str = ""
     additional_instructions: Optional[str] = None
+    user_id: Optional[int] = None
 
 @app.post("/evaluations/generate-prompt")
 def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Session = Depends(get_db)):
@@ -1165,6 +1185,8 @@ def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Sessio
 
     if not request.model:
         raise HTTPException(status_code=400, detail="LLM model is required")
+
+    llm_config = _resolve_llm_config(request.model, request.user_id)
 
     def stream():
         yield from generate_eval_prompt_stream(
@@ -1175,7 +1197,7 @@ def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Sessio
             score_categories=request.score_categories,
             return_fields=request.return_fields,
             input_variables=request.input_variables,
-            llm_model=request.model,
+            llm_config=llm_config,
             additional_instructions=request.additional_instructions,
         )
 
@@ -1242,7 +1264,8 @@ async def evaluate_execution_endpoint(execution_id: int, data: EvaluateRequest, 
         raise HTTPException(status_code=400, detail="Execution has no LangFuse trace — cannot evaluate")
 
     from src.executors.evaluation_executor import EvaluationExecutor
-    executor = EvaluationExecutor(db)
+    llm_config = load_llm_provider_config(user_id=data.user_id)
+    executor = EvaluationExecutor(db, llm_config=llm_config)
 
     results = []
     for eval_id in data.evaluation_ids:

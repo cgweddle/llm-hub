@@ -16,7 +16,6 @@ from pydantic_ai.models.openai import OpenAIModel
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from database.database import get_session, get_tool_by_id, get_agent_by_id
-from utils import get_llm_config_by_name
 from utils.prompt_template import resolve_system_prompt_template
 from converters.pydanticai_tool_converter import PydanticAIToolConverter
 
@@ -36,9 +35,10 @@ class PydanticAIAgentFactory:
     or from node config dicts (used by the graph executor).
     """
 
-    def __init__(self, session=None):
+    def __init__(self, session=None, llm_config: Optional[Dict[str, Any]] = None):
         self.session = session or get_session()
         self.tool_converter = PydanticAIToolConverter(self.session)
+        self.llm_config = llm_config or {"models": []}
 
     def create_from_node_config(
         self,
@@ -113,7 +113,7 @@ class PydanticAIAgentFactory:
 
     def _get_llm_config_by_name(self, llm_provider: str) -> Dict[str, Any]:
         """
-        Get LLM configuration by provider name from ~/.llm_hub/config.yaml.
+        Get LLM configuration by provider name from the pre-loaded config dict.
         """
         if not llm_provider:
             raise ValueError(
@@ -121,16 +121,17 @@ class PydanticAIAgentFactory:
                 "Please configure an LLM in the LLM Providers panel."
             )
 
-        full_config = get_llm_config_by_name(llm_provider)
-        if not full_config:
-            raise ValueError(
-                f"LLM config '{llm_provider}' not found in ~/.llm_hub/config.yaml. "
-                f"Please configure it in the LLM Providers panel."
-            )
+        for model_config in self.llm_config.get("models", []):
+            if model_config.get("name") == llm_provider:
+                full_config = model_config.copy()
+                full_config['config_name'] = llm_provider
+                logger.debug(f"Loaded LLM config: {llm_provider} (provider: {full_config.get('provider')})")
+                return full_config
 
-        full_config['config_name'] = llm_provider
-        logger.debug(f"Loaded LLM config: {llm_provider} (provider: {full_config.get('provider')})")
-        return full_config
+        raise ValueError(
+            f"LLM config '{llm_provider}' not found. "
+            f"Please configure it in the LLM Providers panel."
+        )
 
     def _create_model(self, llm_config: Dict[str, Any]) -> Union[AnthropicModel, OpenAIModel]:
         """

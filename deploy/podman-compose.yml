@@ -35,13 +35,14 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      ENVIRONMENT: production
+      ENVIRONMENT: HOSTED
       PROD_DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
       DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
       CORS_ORIGINS: https://${PUBLIC_DOMAIN}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     volumes:
       - llm-config:/home/llmhub/.llm_hub

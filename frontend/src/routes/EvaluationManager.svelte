@@ -178,6 +178,7 @@
           input_variables: formInputVariables,
           model: formGenerationModel,
           additional_instructions: formAdditionalInstructions.trim() || undefined,
+          user_id: userId,
         }),
       });
 

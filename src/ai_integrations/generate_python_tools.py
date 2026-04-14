@@ -23,14 +23,32 @@ from src.llm_setup import create_llm
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
+def _create_llm_from_config(llm_config: Dict):
+    """Create a LangChain LLM instance from a resolved config dict."""
+    provider = llm_config["provider"]
+    model = llm_config["model"]
+    api_key = llm_config.get("api_key")
+    base_url = llm_config.get("base_url")
+
+    if provider == "lmstudio":
+        api_key = "dummy-key-for-local-llm"
+        if not model.startswith("openai/"):
+            model = f"openai/{model}"
+
+    return create_llm(
+        provider=provider,
+        model=model,
+        temperature=0.3,
+        api_key=api_key,
+        base_url=base_url
+    )
+
+
 def generate_tool_code(
     session: Any,
     tool_name: str,
     tool_description: str,
-    provider: str,
-    model: str,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None
+    llm_config: Dict,
 ) -> Dict[str, str]:
     """
     Generate Python tool code using LLM based on tool name and description.
@@ -39,19 +57,8 @@ def generate_tool_code(
         session: Database session
         tool_name: Name of the tool to generate
         tool_description: Description of what the tool should do
-        provider: LLM provider (e.g., 'anthropic', 'openai', 'gemini', 'lmstudio')
-        model: Model name (e.g., 'claude-3-5-sonnet-20241022')
-        api_key: Optional API key for the provider
-        base_url: Optional base URL (for LM Studio or custom endpoints)
-
-    Returns:
-        Dict with 'script_code' and 'main_function' keys
-
-    Raises:
-        ValueError: If prompts not found or code generation fails
-        Exception: If LLM call fails
+        llm_config: Resolved LLM config dict with provider, model, api_key, base_url
     """
-    # 1. Query prompts from database
     prompt_record = get_prompt_by_name(session, "python_code_gen")
 
     if not prompt_record:
@@ -66,32 +73,11 @@ def generate_tool_code(
     if not system_prompt or not user_prompt:
         raise ValueError("System prompt or user prompt is empty in database")
 
-    # 2. Replace placeholders in user_prompt
     user_prompt_filled = user_prompt.replace("{TOOL_NAME}", tool_name)
     user_prompt_filled = user_prompt_filled.replace("{TOOL_DESCRIPTION}", tool_description)
 
-    # 3. Prepare API credentials and base URL
-    llm_api_key = api_key
-    llm_base_url = base_url
-    llm_model = model
-
-    # Special handling for LM Studio (OpenAI-compatible local server)
-    if provider == "lmstudio":
-        # Use a dummy API key for LM Studio (required by LiteLLM but not validated by local server)
-        llm_api_key = "dummy-key-for-local-llm"
-        # Prefix model with "openai/" to tell LiteLLM to use OpenAI format
-        if not llm_model.startswith("openai/"):
-            llm_model = f"openai/{llm_model}"
-
-    # 4. Create LLM instance
     try:
-        llm = create_llm(
-            provider=provider,
-            model=llm_model,
-            temperature=0.3,
-            api_key=llm_api_key,
-            base_url=llm_base_url
-        )
+        llm = _create_llm_from_config(llm_config)
     except ValueError as e:
         raise ValueError(f"Failed to create LLM: {str(e)}")
 
@@ -152,11 +138,8 @@ def generate_tool_code_stream(
     session: Any,
     tool_name: str,
     tool_description: str,
-    provider: str,
-    model: str,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    additional_instructions: Optional[str] = None
+    llm_config: Dict,
+    additional_instructions: Optional[str] = None,
 ) -> Iterator[str]:
     """
     Generate Python tool code using LLM with streaming.
@@ -165,20 +148,9 @@ def generate_tool_code_stream(
         session: Database session
         tool_name: Name of the tool to generate
         tool_description: Description of what the tool should do
-        provider: LLM provider (e.g., 'anthropic', 'openai', 'gemini', 'lmstudio')
-        model: Model name (e.g., 'claude-3-5-sonnet-20241022')
-        api_key: Optional API key for the provider
-        base_url: Optional base URL (for LM Studio or custom endpoints)
+        llm_config: Resolved LLM config dict with provider, model, api_key, base_url
         additional_instructions: Optional additional instructions to append to user prompt
-
-    Yields:
-        JSON strings with streaming updates
-
-    Raises:
-        ValueError: If prompts not found or code generation fails
-        Exception: If LLM call fails
     """
-    # 1. Query prompts from database
     prompt_record = get_prompt_by_name(session, "python_code_gen")
 
     if not prompt_record:
@@ -192,34 +164,14 @@ def generate_tool_code_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Replace placeholders in user_prompt
     user_prompt_filled = user_prompt.replace("{TOOL_NAME}", tool_name)
     user_prompt_filled = user_prompt_filled.replace("{TOOL_DESCRIPTION}", tool_description)
 
-    # Append additional instructions if provided
     if additional_instructions and additional_instructions.strip():
         user_prompt_filled += f"\n\nAdditional instructions about the script:\n{additional_instructions.strip()}"
 
-    # 3. Prepare API credentials and base URL
-    llm_api_key = api_key
-    llm_base_url = base_url
-    llm_model = model
-
-    # Special handling for LM Studio (OpenAI-compatible local server)
-    if provider == "lmstudio":
-        llm_api_key = "dummy-key-for-local-llm"
-        if not llm_model.startswith("openai/"):
-            llm_model = f"openai/{llm_model}"
-
-    # 4. Create LLM instance
     try:
-        llm = create_llm(
-            provider=provider,
-            model=llm_model,
-            temperature=0.3,
-            api_key=llm_api_key,
-            base_url=llm_base_url
-        )
+        llm = _create_llm_from_config(llm_config)
     except ValueError as e:
         yield json.dumps({"error": f"Failed to create LLM: {str(e)}"}) + "\n"
         return
@@ -265,10 +217,7 @@ def edit_tool_code_stream(
     editing_instructions: str,
     tool_name: str,
     tool_description: str,
-    provider: str,
-    model: str,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None
+    llm_config: Dict,
 ) -> Iterator[str]:
     """
     Edit existing Python tool code using LLM with streaming.
@@ -279,19 +228,8 @@ def edit_tool_code_stream(
         editing_instructions: Instructions for how to modify the code
         tool_name: Name of the tool
         tool_description: Description of what the tool does
-        provider: LLM provider (e.g., 'anthropic', 'openai', 'gemini', 'lmstudio')
-        model: Model name (e.g., 'claude-3-5-sonnet-20241022')
-        api_key: Optional API key for the provider
-        base_url: Optional base URL (for LM Studio or custom endpoints)
-
-    Yields:
-        JSON strings with streaming updates
-
-    Raises:
-        ValueError: If prompts not found or code editing fails
-        Exception: If LLM call fails
+        llm_config: Resolved LLM config dict with provider, model, api_key, base_url
     """
-    # 1. Query prompts from database
     prompt_record = get_prompt_by_name(session, "python_code_gen")
 
     if not prompt_record:
@@ -305,7 +243,6 @@ def edit_tool_code_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Build editing prompt
     user_prompt = f"""I need you to edit the following Python script.
 
 Tool name: {tool_name}
@@ -321,26 +258,8 @@ Editing instructions:
 
 Please provide the complete edited Python script following all the rules in the system prompt."""
 
-    # 3. Prepare API credentials and base URL
-    llm_api_key = api_key
-    llm_base_url = base_url
-    llm_model = model
-
-    # Special handling for LM Studio (OpenAI-compatible local server)
-    if provider == "lmstudio":
-        llm_api_key = "dummy-key-for-local-llm"
-        if not llm_model.startswith("openai/"):
-            llm_model = f"openai/{llm_model}"
-
-    # 4. Create LLM instance
     try:
-        llm = create_llm(
-            provider=provider,
-            model=llm_model,
-            temperature=0.3,
-            api_key=llm_api_key,
-            base_url=llm_base_url
-        )
+        llm = _create_llm_from_config(llm_config)
     except ValueError as e:
         yield json.dumps({"error": f"Failed to create LLM: {str(e)}"}) + "\n"
         return

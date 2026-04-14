@@ -695,11 +695,9 @@ export async function createPythonScriptTool(userId: number, toolData: PythonScr
 export interface CodeGenerateRequest {
   tool_name: string;
   tool_description: string;
-  provider: string;
   model: string;
-  api_key?: string;
-  base_url?: string;
   additional_instructions?: string;
+  user_id?: number;
 }
 
 export interface CodeGenerateResponse {
@@ -779,10 +777,8 @@ export interface CodeEditRequest {
   editing_instructions: string;
   tool_name: string;
   tool_description: string;
-  provider: string;
   model: string;
-  api_key?: string;
-  base_url?: string;
+  user_id?: number;
 }
 
 // Code editing API function with streaming
@@ -944,6 +940,7 @@ export interface SystemPromptGenerateRequest {
   tool_names: string[];
   model: string;
   additional_instructions?: string;
+  user_id?: number;
 }
 
 export interface UserPromptGenerateRequest extends SystemPromptGenerateRequest {
@@ -1099,9 +1096,10 @@ export interface LLMProvidersConfigRequest {
 }
 
 // LLM Provider Config API functions
-export async function loadLLMProvidersConfig(): Promise<LLMProvidersConfigResponse> {
+export async function loadLLMProvidersConfig(userId?: number): Promise<LLMProvidersConfigResponse> {
   try {
-    const response = await fetch(`${API_BASE_URL}/llm-providers/config`);
+    const params = userId != null ? `?user_id=${userId}` : '';
+    const response = await fetch(`${API_BASE_URL}/llm-providers/config${params}`);
 
     if (!response.ok) {
       throw new Error(`Failed to load LLM config: ${response.statusText}`);
@@ -1117,9 +1115,10 @@ export async function loadLLMProvidersConfig(): Promise<LLMProvidersConfigRespon
   }
 }
 
-export async function saveLLMProvidersConfig(config: LLMProvidersConfigRequest): Promise<{ status: string; message: string; config_path: string }> {
+export async function saveLLMProvidersConfig(config: LLMProvidersConfigRequest, userId?: number): Promise<{ status: string; message: string }> {
   try {
-    const response = await fetch(`${API_BASE_URL}/llm-providers/config`, {
+    const params = userId != null ? `?user_id=${userId}` : '';
+    const response = await fetch(`${API_BASE_URL}/llm-providers/config${params}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
