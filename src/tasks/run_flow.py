@@ -33,10 +33,12 @@ def main() -> int:
     from src.database.database_setup import DatabaseManager
     from src.database.database import update_execution
     from src.executors.flow_executor import FlowExecutor
+    from src.utils import load_llm_provider_config
 
     session = DatabaseManager().get_session()
     try:
-        executor = FlowExecutor(session, flow_id, user_id)
+        llm_config = load_llm_provider_config(user_id=user_id)
+        executor = FlowExecutor(session, flow_id, user_id, llm_config=llm_config)
         result = executor.execute_flow(
             initial_input, conda_env, execution_id=execution_id
         )
