@@ -55,7 +55,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      ENVIRONMENT: HOSTED
+      ENVIRONMENT: ${ENVIRONMENT}
       PROD_DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
       DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -91,7 +91,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      ENVIRONMENT: production
+      ENVIRONMENT: ${ENVIRONMENT}
       DATABASE_URL: postgresql://${POSTGRES_USER:-llmhub}:${POSTGRES_PASSWORD}@postgres:5432/llm_hub
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0

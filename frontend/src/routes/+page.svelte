@@ -289,7 +289,7 @@
             description: updatedAgent.description || '',
             graph_config: updatedAgent.graph_config,
             system_prompt: entryNode.system_prompt || '',
-            llm_provider: entryNode.llm_provider || '',
+            user_prompt: entryNode.user_prompt || '',
             tool_ids: entryNode.tool_ids || [],
           }
         };
@@ -323,7 +323,7 @@
           description: agent.description || '',
           graph_config: agent.graph_config,
           system_prompt: entryNode.system_prompt || '',
-          llm_provider: entryNode.llm_provider || '',
+          user_prompt: entryNode.user_prompt || '',
           tool_ids: entryNode.tool_ids || [],
           output_paths: entryNode.output_paths || undefined,
           script_code: '',
@@ -586,7 +586,6 @@
                 description: agent.description || '',
                 graph_config: agent.graph_config,
                 system_prompt: entryNodeConfig.system_prompt || '',
-                llm_provider: entryNodeConfig.llm_provider || '',
                 tool_ids: entryNodeConfig.tool_ids || [],
                 eval_ids: entryNodeConfig.eval_ids || [],
                 output_paths: entryNodeConfig.output_paths || undefined,
@@ -594,9 +593,6 @@
                 main_function: '',
                 input_schema: null,
                 output_schema: agent.output_schema || null,
-                runtimeLLM: entryNodeConfig.llm_provider
-                  ? llmProviders.find(p => p.name === entryNodeConfig.llm_provider) || null
-                  : null
               },
               position: { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
               sourcePosition: Position.Right,
@@ -705,8 +701,8 @@
     try {
       const agentLlms: Record<string, string> = {};
       for (const node of nodes) {
-        if (node.data.isAgent && node.data.llm_provider) {
-          agentLlms[node.id] = node.data.llm_provider;
+        if (node.data.isAgent && node.data.runtimeLLM?.name) {
+          agentLlms[node.id] = node.data.runtimeLLM.name;
         }
       }
       const userId = data.user?.id || 1;
@@ -780,7 +776,7 @@
 
         if (allEvalIds.length > 0) {
           // Use the agent's LLM provider for the judge
-          const agentLlmProvider = nodeConfig.llm_provider || agentNode.data.llm_provider || '';
+          const agentLlmProvider = agentNode.data.runtimeLLM?.name || '';
           if (agentLlmProvider) {
             evalPromises.push(evaluateExecution(child.id, userId, allEvalIds, agentLlmProvider));
           }
@@ -1227,7 +1223,6 @@
               description: newAgentDescription.trim(),
               system_prompt: newAgentSystemPrompt.trim(),
               user_prompt: newAgentUserPrompt.trim(),
-              llm_provider: newAgentLLMProvider || '',
               tool_ids: newAgentSelectedTools,
               eval_ids: newAgentSelectedEvals,
               ...(newAgentOutputPaths.filter(p => p.name.trim()).length > 0 ? {
@@ -1418,7 +1413,7 @@
         agentId: agent.id,
         graph_config: agent.graph_config,
         system_prompt: entryNode.system_prompt || '',
-        llm_provider: entryNode.llm_provider || '',
+        user_prompt: entryNode.user_prompt || '',
         tool_ids: entryNode.tool_ids || [],
         eval_ids: entryNode.eval_ids || [],
         output_schema: agent.output_schema || null
@@ -1513,7 +1508,6 @@
       description: newAgentDescription.trim(),
       system_prompt: newAgentSystemPrompt.trim(),
       user_prompt: newAgentUserPrompt.trim(),
-      llm_provider: newAgentLLMProvider || '',
       tool_ids: newAgentSelectedTools,
       eval_ids: newAgentSelectedEvals,
       output_paths: outputPaths,
