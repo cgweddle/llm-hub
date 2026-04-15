@@ -46,6 +46,7 @@ jobs:
             LANGFUSE_HOST=${{ secrets.LANGFUSE_HOST }}
             LLM_CONFIG_ENCRYPTION_KEY=${{ secrets.LLM_CONFIG_ENCRYPTION_KEY }}
             ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
+            ENVIRONMENT=${{ secrets.ENVIRONMENT }}
             ENVEOF
 
             # XDG_RUNTIME_DIR may not be set over non-interactive SSH.

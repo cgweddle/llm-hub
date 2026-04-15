@@ -114,7 +114,6 @@
           agentId: data.agentId,
           system_prompt: data.system_prompt || '',
           user_prompt: data.user_prompt || '',
-          llm_provider: data.llm_provider || '',
           tool_ids: data.tool_ids || [],
           graph_config: data.graph_config || {},
           output_paths: data.output_paths || {},

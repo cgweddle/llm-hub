@@ -34,7 +34,6 @@
   let editedAgentDescription = '';
   let editedAgentSystemPrompt = '';
   let editedAgentUserPrompt = '';
-  let editedAgentLLMConfig = '';
   let editedAgentToolIds: number[] = [];
   let editedAgentEvalIds: number[] = [];
   let editedOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
@@ -47,7 +46,6 @@
     editedAgentDescription = nodeData.data.description || '';
     editedAgentSystemPrompt = nodeData.data.system_prompt || '';
     editedAgentUserPrompt = nodeData.data.user_prompt || '';
-    editedAgentLLMConfig = nodeData.data.llm_provider || '';
     editedAgentToolIds = [...(nodeData.data.tool_ids || [])];
     editedAgentEvalIds = [...(nodeData.data.eval_ids || [])];
     // Load output paths as array of {name, description, return_behavior}
@@ -116,7 +114,6 @@
         description: editedAgentDescription,
         system_prompt: editedAgentSystemPrompt,
         user_prompt: editedAgentUserPrompt,
-        llm_provider: editedAgentLLMConfig,
         tool_ids: [...editedAgentToolIds],
         eval_ids: [...editedAgentEvalIds],
         output_paths: buildOutputPathsFromEdited(),
@@ -174,7 +171,7 @@
       nodeData.data.name = updatedAgent.name;
       nodeData.data.description = updatedAgent.description || '';
       nodeData.data.system_prompt = updatedEntryNode.system_prompt || '';
-      nodeData.data.llm_provider = editedAgentLLMConfig;
+      nodeData.data.user_prompt = updatedEntryNode.user_prompt || '';
       nodeData.data.tool_ids = updatedEntryNode.tool_ids || [];
       nodeData.data.eval_ids = updatedEntryNode.eval_ids || [];
       nodeData.data.output_paths = updatedEntryNode.output_paths || undefined;
@@ -756,23 +753,6 @@
                 .replace(/\{input\}/g, '<span class="template-var-display">{input}</span>')
                 .replace(/\{message_history\}/g, '<span class="template-var-display">{message_history}</span>')
               }</pre>
-            {/if}
-          </div>
-
-          <!-- LLM Configuration -->
-          <div class="section">
-            <div class="section-label">LLM Configuration</div>
-            {#if isEditingAgent}
-              <select class="main-function-input" bind:value={editedAgentLLMConfig}>
-                <option value="">-- Select LLM --</option>
-                {#each llmProviders as provider}
-                  <option value={provider.name}>{provider.name}</option>
-                {/each}
-              </select>
-            {:else if nodeData.data.llm_provider}
-              <p class="description-text">Model: <strong>{nodeData.data.llm_provider}</strong></p>
-            {:else}
-              <p class="description-text no-data">No LLM configured</p>
             {/if}
           </div>
 

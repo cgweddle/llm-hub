@@ -27,6 +27,7 @@ from src.database.database import (
     create_evaluation_result, get_evaluation_results_by_execution,
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
+from src.utils.environment import is_hosted
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.executors.flow_executor import FlowExecutor
@@ -944,10 +945,6 @@ def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
         "updated_at": flow.updated_at
     }
 
-def _is_production() -> bool:
-    return os.getenv("ENVIRONMENT", "local").lower() == "production"
-
-
 @app.post("/flows/{flow_id}/execute")
 def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session = Depends(get_db)):
     """Execute a flow.
@@ -960,7 +957,7 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
         if request.conda_env:
             update_flow(db, flow_id, conda_env=request.conda_env)
 
-        if _is_production():
+        if is_hosted():
             flow = get_flow_by_id(db, flow_id)
             if not flow:
                 raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
