@@ -28,12 +28,16 @@ export function buildEnhancedGraphConfig(
         input_value: node.data.triggerValue || ''
       };
     } else if (node.type === 'toolNode' && node.data.isAgent && node.data.agentId) {
-      // Agent node — delegates to AgentExecutor at runtime
-      nodesConfig[node.id] = {
+      const nodeConfig: NodeConfig = {
         node_type: 'agent',
         id: node.data.agentId,
         name: node.data.name
       };
+      const agentLlm = node.data.runtimeLLM?.name || node.data.llm_provider;
+      if (agentLlm) {
+        nodeConfig.model_name = agentLlm;
+      }
+      nodesConfig[node.id] = nodeConfig;
     } else if (node.type === 'toolNode' && node.data.toolId) {
       // Tool node — standard executable function
       const nodeConfig: NodeConfig = {

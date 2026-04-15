@@ -160,6 +160,7 @@ class AgentExecutor:
         agent_id: int,
         user_id: int,
         input_data: str,
+        llm_provider: str,
         stream: bool = False
     ) -> Dict[str, Any]:
         """
@@ -198,13 +199,13 @@ class AgentExecutor:
                 nodes = graph_config.get("nodes", {})
                 if len(nodes) == 1:
                     return await self._execute_single_node_stream(
-                        graph_config, input_data, execution
+                        graph_config, input_data, execution, llm_provider
                     )
                 # Multi-node streaming not supported — fall through to normal execution
                 logger.warning("Streaming not supported for multi-node agents, using non-streaming")
 
             # Unified graph execution
-            result = await self._execute_graph(graph_config, input_data, execution)
+            result = await self._execute_graph(graph_config, input_data, execution, llm_provider=llm_provider)
 
             update_execution(self.session, execution.id,
                 status='completed',
@@ -232,6 +233,7 @@ class AgentExecutor:
         agent_id: int,
         input_text: str,
         session: Session,
+        llm_provider: str,
         parent_execution: Optional[Execution] = None
     ) -> str:
         """
@@ -243,6 +245,7 @@ class AgentExecutor:
             agent_id: Agent ID
             input_text: Input text
             session: Database session
+            llm_provider: Name of the LLM provider to use
             parent_execution: Parent Execution record from FlowExecutor
 
         Returns:
@@ -256,7 +259,9 @@ class AgentExecutor:
         if not graph_config:
             raise ValueError(f"Agent {agent_id} has no graph_config")
 
-        result = await self._execute_graph(graph_config, input_text, execution=parent_execution)
+        result = await self._execute_graph(
+            graph_config, input_text, execution=parent_execution, llm_provider=llm_provider
+        )
         return str(result.get("result", ""))
 
     async def _execute_graph(
@@ -264,6 +269,7 @@ class AgentExecutor:
         graph_config: Dict[str, Any],
         input_data: str,
         execution: Optional[Execution],
+        llm_provider: str,
         max_loop_iterations: int = None
     ) -> Dict[str, Any]:
         """
@@ -339,14 +345,14 @@ class AgentExecutor:
                         async def _observed_run():
                             nonlocal _captured_trace_id
                             _captured_trace_id = langfuse_client.get_current_trace_id()
-                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, predecessor_messages=predecessor_msgs)
+                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, llm_provider=llm_provider, predecessor_messages=predecessor_msgs)
                             return result
 
                         output, node_result_messages, chosen_path = await _observed_run()
                         trace_id = _captured_trace_id
                         langfuse_client.flush()
                     else:
-                        output, node_result_messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, predecessor_messages=predecessor_msgs)
+                        output, node_result_messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, llm_provider=llm_provider, predecessor_messages=predecessor_msgs)
                     # Apply return behavior for the chosen path
                     if chosen_path:
                         node_output_paths = nodes_config[node_id].get("output_paths", {})
@@ -460,6 +466,7 @@ class AgentExecutor:
 
     async def _run_sub_agent(
         self, node_id: str, node_config: Dict, node_input: str,
+        llm_provider: str,
         predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, Optional[List], Optional[str]]:
         """
@@ -502,7 +509,6 @@ class AgentExecutor:
 
         node_input = self._apply_user_prompt(node_config, node_input, predecessor_messages)
 
-        llm_provider = node_config.get("llm_provider", "")
         model_name = self._resolve_model_name(llm_provider)
 
         # Build output type and routing from output_paths if configured
@@ -599,7 +605,8 @@ class AgentExecutor:
         self,
         graph_config: Dict[str, Any],
         input_data: str,
-        execution: Execution
+        execution: Execution,
+        llm_provider: str,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream execution for single-node PydanticAI agents.
@@ -613,7 +620,6 @@ class AgentExecutor:
 
         input_data = self._apply_user_prompt(node_config, input_data)
 
-        llm_provider = node_config.get("llm_provider", "")
         model_name = self._resolve_model_name(llm_provider)
 
         # Fetch tool records for template resolution and registration

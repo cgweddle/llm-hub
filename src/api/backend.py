@@ -103,6 +103,7 @@ class AgentUpdate(BaseModel):
 class AgentExecuteRequest(BaseModel):
     user_id: int
     input_data: str
+    llm_provider: str
     stream: bool = False
 
 class AgentExecuteResponse(BaseModel):
@@ -446,6 +447,7 @@ async def execute_agent_endpoint(
                         agent_id=agent_id,
                         user_id=request.user_id,
                         input_data=request.input_data,
+                        llm_provider=request.llm_provider,
                         stream=True
                     )
 
@@ -480,6 +482,7 @@ async def execute_agent_endpoint(
                 agent_id=agent_id,
                 user_id=request.user_id,
                 input_data=request.input_data,
+                llm_provider=request.llm_provider,
                 stream=False
             )
             return result

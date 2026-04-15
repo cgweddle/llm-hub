@@ -155,7 +155,6 @@
             description: editedAgentDescription,
             system_prompt: editedAgentSystemPrompt,
             user_prompt: editedAgentUserPrompt,
-            llm_provider: editedAgentLLMConfig,
             tool_ids: editedAgentToolIds,
             eval_ids: editedAgentEvalIds,
             ...(buildOutputPathsFromEdited() ? { output_paths: buildOutputPathsFromEdited() } : {})

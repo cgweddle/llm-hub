@@ -16,7 +16,6 @@ export interface SubAgentConfig {
   description: string;
   system_prompt: string;
   user_prompt: string;
-  llm_provider: string;
   tool_ids: number[];
   output_paths?: Record<string, string | { description: string; return_behavior: string }>;  // path_name → config for conditional routing
 }
@@ -139,7 +138,6 @@ export function buildAgentGraph(
       description: node.data.description || '',
       system_prompt: node.data.system_prompt || '',
       user_prompt: node.data.user_prompt || '',
-      llm_provider: node.data.llm_provider || '',
       tool_ids: node.data.tool_ids || []
     };
 
@@ -226,9 +224,6 @@ export function validateAgentGraph(
     }
     if (!node.data.system_prompt) {
       errors.push(`Node "${node.data.name || node.id}" has no system prompt`);
-    }
-    if (!node.data.llm_provider) {
-      errors.push(`Node "${node.data.name || node.id}" has no LLM provider assigned`);
     }
   }
 

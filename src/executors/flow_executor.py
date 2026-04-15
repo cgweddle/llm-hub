@@ -294,6 +294,7 @@ class FlowExecutor:
 
         node_config = self.graph_config["nodes"][node_name]
         agent_id = node_config["id"]
+        llm_provider = node_config.get("model_name", "")
 
         # Convert dict input to text for agent consumption
         if isinstance(input_data, dict):
@@ -328,16 +329,16 @@ class FlowExecutor:
                     with concurrent.futures.ThreadPoolExecutor() as pool:
                         future = pool.submit(
                             asyncio.run,
-                            executor.execute_agent_node(agent_id, input_text, self.session, parent_execution=agent_exec)
+                            executor.execute_agent_node(agent_id, input_text, self.session, llm_provider=llm_provider, parent_execution=agent_exec)
                         )
                         result = future.result()
                 else:
                     result = loop.run_until_complete(
-                        executor.execute_agent_node(agent_id, input_text, self.session, parent_execution=agent_exec)
+                        executor.execute_agent_node(agent_id, input_text, self.session, llm_provider=llm_provider, parent_execution=agent_exec)
                     )
             except RuntimeError:
                 result = asyncio.run(
-                    executor.execute_agent_node(agent_id, input_text, self.session, parent_execution=agent_exec)
+                    executor.execute_agent_node(agent_id, input_text, self.session, llm_provider=llm_provider, parent_execution=agent_exec)
                 )
 
             update_execution(self.session, agent_exec.id,
