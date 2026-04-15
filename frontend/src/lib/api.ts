@@ -540,7 +540,7 @@ export async function updateFlow(flowId: number, flowData: FlowUpdateRequest): P
   }
 }
 
-export async function executeFlow(flowId: number, initialInput: Record<string, any>, condaEnv?: string | null, userId: number = 1): Promise<FlowExecutionResult> {
+export async function executeFlow(flowId: number, initialInput: Record<string, any>, condaEnv?: string | null, userId: number = 1, agentLlms: Record<string, string> = {}): Promise<FlowExecutionResult> {
   try {
     const response = await fetch(`${API_BASE_URL}/flows/${flowId}/execute`, {
       method: 'POST',
@@ -550,7 +550,8 @@ export async function executeFlow(flowId: number, initialInput: Record<string, a
       body: JSON.stringify({
         user_id: userId,
         initial_input: initialInput,
-        conda_env: condaEnv
+        conda_env: condaEnv,
+        agent_llms: agentLlms
       })
     });
 

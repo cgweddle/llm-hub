@@ -219,6 +219,7 @@ class FlowExecuteRequest(BaseModel):
     user_id: int
     initial_input: dict
     conda_env: Optional[str] = None
+    agent_llms: Dict[str, str] = {}
 
 class ExecutionResponse(BaseModel):
     """Recursive execution tree node."""
@@ -983,13 +984,14 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
                 request.initial_input,
                 request.conda_env,
                 execution.id,
+                request.agent_llms,
             )
 
             return {"execution_id": execution.id, "status": "pending"}
 
         # Local: synchronous path (unchanged behavior)
         llm_config = load_llm_provider_config(user_id=request.user_id)
-        executor = FlowExecutor(db, flow_id, user_id=request.user_id, llm_config=llm_config)
+        executor = FlowExecutor(db, flow_id, user_id=request.user_id, llm_config=llm_config, agent_llms=request.agent_llms)
         result = executor.execute_flow(request.initial_input, request.conda_env)
         return result
     except HTTPException:

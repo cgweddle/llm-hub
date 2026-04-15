@@ -481,7 +481,7 @@ class AgentExecutor:
             f"(type: {node_config.get('agent_type')})"
         )
 
-        return await self._run_pydanticai_node(node_config, node_input, predecessor_messages=predecessor_messages)
+        return await self._run_pydanticai_node(node_config, node_input, llm_provider=llm_provider, predecessor_messages=predecessor_messages)
 
     @staticmethod
     def _apply_user_prompt(node_config: Dict, node_input: str,
@@ -500,6 +500,7 @@ class AgentExecutor:
 
     async def _run_pydanticai_node(
         self, node_config: Dict, node_input: str,
+        llm_provider: str,
         predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, List, Optional[str]]:
         """Run a PydanticAI sub-agent. Returns (output_text, all_messages, chosen_path).

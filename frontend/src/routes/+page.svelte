@@ -703,7 +703,14 @@
    */
   async function runFlow(flowId: number, initialInput: Record<string, any>) {
     try {
-      const result = await executeFlow(flowId, initialInput, selectedCondaEnv);
+      const agentLlms: Record<string, string> = {};
+      for (const node of nodes) {
+        if (node.data.isAgent && node.data.llm_provider) {
+          agentLlms[node.id] = node.data.llm_provider;
+        }
+      }
+      const userId = data.user?.id || 1;
+      const result = await executeFlow(flowId, initialInput, selectedCondaEnv, userId, agentLlms);
 
       // Capture execution ID and open info panel
       if (result.execution_id) {
