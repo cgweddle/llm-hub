@@ -28,30 +28,18 @@ export function buildEnhancedGraphConfig(
         input_value: node.data.triggerValue || ''
       };
     } else if (node.type === 'toolNode' && node.data.isAgent && node.data.agentId) {
-      const nodeConfig: NodeConfig = {
+      nodesConfig[node.id] = {
         node_type: 'agent',
         id: node.data.agentId,
         name: node.data.name
       };
-      const agentLlm = node.data.runtimeLLM?.name || node.data.llm_provider;
-      if (agentLlm) {
-        nodeConfig.model_name = agentLlm;
-      }
-      nodesConfig[node.id] = nodeConfig;
     } else if (node.type === 'toolNode' && node.data.toolId) {
-      // Tool node — standard executable function
       const nodeConfig: NodeConfig = {
         node_type: 'tool',
         id: node.data.toolId,
         name: node.data.name
       };
 
-      // Add LLM model name reference if attached to this node
-      if (node.data.runtimeLLM) {
-        nodeConfig.model_name = node.data.runtimeLLM.name;
-      }
-
-      // Save parameter values (user inputs) if present
       if (node.data.parameterValues && Object.keys(node.data.parameterValues).length > 0) {
         nodeConfig.input_values = node.data.parameterValues;
       }

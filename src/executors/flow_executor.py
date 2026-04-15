@@ -21,11 +21,12 @@ from src.executors.tool_executor import create_executable_function
 logger = logging.getLogger(__name__)
 
 class FlowExecutor:
-    def __init__(self, session: Session, flow_id: int, user_id: int, llm_config: Optional[Dict] = None):
+    def __init__(self, session: Session, flow_id: int, user_id: int, llm_config: Optional[Dict] = None, agent_llms: Optional[Dict[str, str]] = None):
         self.session = session
         self.flow_id = flow_id
         self.user_id = user_id
         self.llm_config = llm_config or {"models": []}
+        self.agent_llms = agent_llms or {}
 
         #Load flow from the database
         flow = self.session.query(Flow).filter(Flow.id == flow_id).first()
@@ -88,33 +89,15 @@ class FlowExecutor:
 
             func = create_executable_function(tool, conda_env=self.conda_env)
 
-            # Load LLM configuration if specified for this node
-            node_llm_config = None
-            model_name = node_info.get('model_name')
-            if model_name:
-                # Look up from the pre-loaded llm_config dict
-                for m in self.llm_config.get("models", []):
-                    if m.get("name") == model_name:
-                        node_llm_config = m.copy()
-                        node_llm_config['config_name'] = model_name
-                        logger.info(f"Loaded LLM config '{model_name}' for node {node_name}")
-                        break
-                if not node_llm_config:
-                    logger.warning(f"LLM config '{model_name}' not found for node {node_name}")
-
             self.tools_cache[tool_id] = tool
             self.executable_functions[node_name] = {
                 "function": func,
                 "tool": tool,
                 "input_schema": tool.input_schema,
                 "output_schema": tool.output_schema,
-                "llm_config": node_llm_config  # Store LLM config for tools that need it
             }
 
-            if node_llm_config:
-                logger.info(f"Prepared tool: {tool.name} for node {node_name} with LLM: {node_llm_config.get('name')}")
-            else:
-                logger.info(f"Prepared tool: {tool.name} for node {node_name}")
+            logger.info(f"Prepared tool: {tool.name} for node {node_name}")
 
     def _get_downstream_nodes(self, start_node: str, edges_config: List[Dict]):
         downstream_nodes = set()
@@ -139,11 +122,6 @@ class FlowExecutor:
         node_info = self.executable_functions[node_name]
         func = node_info["function"]
         tool = node_info["tool"]
-
-        ## Set llm config for the specific node
-        llm_config = node_info.get("llm_config")
-        if llm_config:
-            self._setup_llm_environment(llm_config=llm_config)
 
         logger.info(f"Executing node: {node_name}")
 
@@ -198,42 +176,6 @@ class FlowExecutor:
             })
             logger.error(f"Node {node_name} failed: {e}")
             raise
-
-    def _setup_llm_environment(self, llm_config: Dict) -> Dict[str, Optional[str]]:
-        """
-        Setup environment variables for calling the LLM from functions
-        """
-        provider = llm_config["provider"]
-        model = llm_config["model"]
-        api_key = llm_config.get("api_key")
-        base_url = llm_config.get("base_url")
-        config_name = llm_config.get("config_name")
-
-        # Pass the config name for subprocess to look up in config.yaml
-        if config_name:
-            os.environ["LLMHUB_CONFIG_NAME"] = config_name
-        os.environ["LLMHUB_MODEL_NAME"] = model
-        if provider == "anthropic":
-            if api_key:
-              os.environ["ANTHROPIC_API_KEY"] = api_key
-            if base_url:
-                os.environ["ANTHROPIC_BASE_URL"] = base_url
-        elif provider == "openai":
-            if api_key:
-              os.environ["OPENAI_API_KEY"] = api_key
-            if base_url:
-                os.environ["OPENAI_BASE_URL"] = base_url
-        elif provider == "llmstudio":
-            os.environ["OPENAI_API_KEY"] = api_key or "lm-studio"  # LM Studio needs a dummy key
-            if base_url:
-                os.environ["OPENAI_BASE_URL"] = base_url
-        elif provider=="azure":
-            if api_key:
-                os.environ["AZURE_API_KEY"] = api_key
-            if base_url:
-                os.environ["AZURE_API_BASE"] = base_url
-
-
 
     def _find_next_node(self, current_node: str) -> List[str]:
         """Find the next nodes in the flow"""
@@ -294,7 +236,9 @@ class FlowExecutor:
 
         node_config = self.graph_config["nodes"][node_name]
         agent_id = node_config["id"]
-        llm_provider = node_config.get("model_name", "")
+        llm_provider = self.agent_llms.get(node_name)
+        if not llm_provider:
+            raise ValueError(f"No LLM selected for agent node '{node_name}'")
 
         # Convert dict input to text for agent consumption
         if isinstance(input_data, dict):

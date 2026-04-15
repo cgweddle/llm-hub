@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from src.celery_app import celery_app
 from src.database.database_setup import DatabaseManager
@@ -37,13 +37,14 @@ _FORWARDED_ENV_VARS = [
 ]
 
 
-def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id):
+def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms):
     env = {
         "FLOW_RUNNER_FLOW_ID": str(flow_id),
         "FLOW_RUNNER_USER_ID": str(user_id),
         "FLOW_RUNNER_EXECUTION_ID": str(execution_id),
         "FLOW_RUNNER_INITIAL_INPUT": json.dumps(initial_input),
         "FLOW_RUNNER_CONDA_ENV": conda_env or "",
+        "FLOW_RUNNER_AGENT_LLMS": json.dumps(agent_llms or {}),
     }
     for var in _FORWARDED_ENV_VARS:
         if var in os.environ:
@@ -51,7 +52,7 @@ def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_i
     return env
 
 
-def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id) -> int:
+def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms) -> int:
     """
     Spawn a flow-runner Podman container, stream logs, and return its exit code.
     """
@@ -59,7 +60,7 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id) -> 
     # (e.g., local testing) doesn't require the podman python bindings.
     from podman import PodmanClient
 
-    env = _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id)
+    env = _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms)
 
     logger.info(
         "Spawning flow-runner container: image=%s network=%s execution_id=%s",
@@ -102,7 +103,7 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id) -> 
                 pass
 
 
-def _run_inline(flow_id, user_id, initial_input, conda_env, execution_id):
+def _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms):
     """
     Fallback: run FlowExecutor directly in the worker process (Phase 1 behavior).
     Selected via FLOW_RUNNER_USE_PODMAN=false.
@@ -113,7 +114,7 @@ def _run_inline(flow_id, user_id, initial_input, conda_env, execution_id):
     session = DatabaseManager().get_session()
     try:
         llm_config = load_llm_provider_config(user_id=user_id)
-        executor = FlowExecutor(session, flow_id, user_id, llm_config=llm_config)
+        executor = FlowExecutor(session, flow_id, user_id, llm_config=llm_config, agent_llms=agent_llms)
         result = executor.execute_flow(initial_input, conda_env, execution_id=execution_id)
         return {"execution_id": execution_id, "status": result.get("status")}
     finally:
@@ -150,23 +151,25 @@ def execute_flow_task(
     initial_input: Any,
     conda_env: Optional[str],
     execution_id: int,
+    agent_llms: Optional[Dict[str, str]] = None,
 ):
     """
     Execute a flow, either inside a Podman container (production default) or
     inline in the worker (set FLOW_RUNNER_USE_PODMAN=false to opt out).
     """
+    agent_llms = agent_llms or {}
     use_podman = os.getenv("FLOW_RUNNER_USE_PODMAN", "true").lower() == "true"
 
     if not use_podman:
         try:
-            return _run_inline(flow_id, user_id, initial_input, conda_env, execution_id)
+            return _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms)
         except Exception as e:
             logger.exception("Inline flow execution failed for execution_id=%s", execution_id)
             _mark_failed_if_still_running(execution_id, f"inline execution error: {e}")
             raise
 
     try:
-        returncode = _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id)
+        returncode = _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms)
     except Exception as e:
         logger.exception("flow-runner container launch failed for execution_id=%s", execution_id)
         _mark_failed_if_still_running(execution_id, f"podman spawn error: {e}")

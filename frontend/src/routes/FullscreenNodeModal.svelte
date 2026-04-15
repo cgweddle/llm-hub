@@ -174,7 +174,7 @@
       nodeData.data.name = updatedAgent.name;
       nodeData.data.description = updatedAgent.description || '';
       nodeData.data.system_prompt = updatedEntryNode.system_prompt || '';
-      nodeData.data.llm_provider = updatedEntryNode.llm_provider || '';
+      nodeData.data.llm_provider = editedAgentLLMConfig;
       nodeData.data.tool_ids = updatedEntryNode.tool_ids || [];
       nodeData.data.eval_ids = updatedEntryNode.eval_ids || [];
       nodeData.data.output_paths = updatedEntryNode.output_paths || undefined;
