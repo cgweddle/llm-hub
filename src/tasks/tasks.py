@@ -80,13 +80,16 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
             image=FLOW_RUNNER_IMAGE,
             command=["python", "-m", "src.tasks.run_flow"],
             environment=env,
-            networks={FLOW_RUNNER_NETWORK: {}},
             mem_limit=FLOW_RUNNER_MEMORY,
             cpu_quota=int(FLOW_RUNNER_CPUS * 100_000),
             cpu_period=100_000,
             remove=True,
         )
         try:
+            # Attach to the network before starting — podman-py's `networks`
+            # param on create doesn't reliably set up DNS resolution.
+            network = client.networks.get(FLOW_RUNNER_NETWORK)
+            network.connect(container)
             container.start()
             # Stream logs in the worker's log stream for observability
             for line in container.logs(stream=True, follow=True, stdout=True, stderr=True):
