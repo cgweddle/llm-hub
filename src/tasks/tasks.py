@@ -77,7 +77,11 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
             cpu_quota=int(FLOW_RUNNER_CPUS * 100_000),
             cpu_period=100_000,
             read_only=True,
-            tmpfs={"/tmp": "size=100M"},
+            mounts=[{
+                "type": "tmpfs",
+                "target": "/tmp",
+                "tmpfs_size": "100M",
+            }],
             remove=True,
         )
         try:
