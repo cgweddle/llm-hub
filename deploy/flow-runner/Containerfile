@@ -1,5 +1,5 @@
 # ── Stage 1: Build ──
-FROM python:3.10-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -7,16 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-COPY requirements.txt .
+COPY deploy/flow-runner/requirements.txt .
 RUN uv pip install --system --no-cache -r requirements.txt
 
-# Packages user-authored tools commonly need. Expand as needed.
-RUN uv pip install --system --no-cache numpy pandas pyyaml
-
 # ── Stage 2: Runtime ──
-FROM python:3.10-slim
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 && \
