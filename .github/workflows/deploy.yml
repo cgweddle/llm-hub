@@ -47,6 +47,7 @@ jobs:
             LLM_CONFIG_ENCRYPTION_KEY=${{ secrets.LLM_CONFIG_ENCRYPTION_KEY }}
             ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
             ENVIRONMENT=${{ secrets.ENVIRONMENT }}
+            FLOWRUNNER_DB_PASSWORD=${{ secrets.FLOWRUNNER_DB_PASSWORD }}
             ENVEOF
 
             # XDG_RUNTIME_DIR may not be set over non-interactive SSH.
