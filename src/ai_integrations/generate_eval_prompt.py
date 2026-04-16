@@ -12,19 +12,41 @@ Run 'python src/prompts/upload_prompts.py' to populate from markdown files.
 import json
 import os
 import sys
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 CURRENT_DIR = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-from src.llm_setup import create_llm
+from pydantic_ai import Agent
+
 from src.database.database import get_prompt_by_name
-from langchain_core.messages import SystemMessage, HumanMessage
 
 
 PROMPT_NAME = "eval_prompt_gen"
+
+
+def _build_agent(llm_config: Dict, system_prompt: str) -> Agent:
+    provider = llm_config["provider"]
+    model = llm_config["model"]
+    api_key = llm_config.get("api_key")
+    base_url = llm_config.get("base_url")
+
+    if provider == "lmstudio":
+        api_key = api_key or "lm-studio"
+        base_url = base_url or "http://localhost:1234/v1"
+        provider = "openai"
+
+    if api_key:
+        if provider == "anthropic":
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+        else:
+            os.environ["OPENAI_API_KEY"] = api_key
+    if base_url:
+        os.environ["OPENAI_BASE_URL"] = base_url
+
+    return Agent(model=f"{provider}:{model}", system_prompt=system_prompt)
 
 
 def _build_score_type_section(
@@ -91,7 +113,7 @@ def _build_return_format_section(
     return f"The judge must return JSON in this format: {json.dumps(return_format)}"
 
 
-def generate_eval_prompt_stream(
+async def generate_eval_prompt_stream(
     session: Any,
     eval_name: str,
     eval_description: str,
@@ -101,13 +123,12 @@ def generate_eval_prompt_stream(
     input_variables: List[str],
     llm_config: Dict,
     additional_instructions: Optional[str] = None,
-) -> Iterator[str]:
+) -> AsyncIterator[str]:
     """
     Generate a judge system prompt for an evaluation using LLM with streaming.
 
     Yields JSON strings with streaming updates.
     """
-    # 1. Load prompts from database
     prompt_record = get_prompt_by_name(session, PROMPT_NAME)
 
     if not prompt_record:
@@ -124,13 +145,6 @@ def generate_eval_prompt_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Extract LLM config fields
-    provider = llm_config["provider"]
-    model = llm_config["model"]
-    api_key = llm_config.get("api_key")
-    base_url = llm_config.get("base_url")
-
-    # 3. Build template sections
     eval_description_section = f"\nDescription: {eval_description}" if eval_description else ""
     score_type_section = _build_score_type_section(score_type, score_categories)
     input_variables_section = _build_input_variables_section(input_variables)
@@ -141,7 +155,6 @@ def generate_eval_prompt_stream(
     else:
         additional_section = ""
 
-    # 4. Fill placeholders in user prompt template
     user_message = user_prompt_template.replace("{EVAL_NAME}", eval_name)
     user_message = user_message.replace("{EVAL_DESCRIPTION_SECTION}", eval_description_section)
     user_message = user_message.replace("{SCORE_TYPE_SECTION}", score_type_section)
@@ -149,39 +162,18 @@ def generate_eval_prompt_stream(
     user_message = user_message.replace("{RETURN_FORMAT_SECTION}", return_format_section)
     user_message = user_message.replace("{ADDITIONAL_SECTION}", additional_section)
 
-    # 5. Create LLM
-    llm_api_key = api_key
-    llm_model_name = model
-
-    if provider == "lmstudio":
-        llm_api_key = "dummy-key-for-local-llm"
-        if not llm_model_name.startswith("openai/"):
-            llm_model_name = f"openai/{llm_model_name}"
-
     try:
-        llm = create_llm(
-            provider=provider,
-            model=llm_model_name,
-            temperature=0.7,
-            api_key=llm_api_key,
-            base_url=base_url,
-        )
+        agent = _build_agent(llm_config, system_prompt)
     except ValueError as e:
         yield json.dumps({"error": f"Failed to create LLM: {str(e)}"}) + "\n"
         return
 
-    # 6. Stream LLM response
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_message),
-    ]
-
     accumulated_text = ""
     try:
-        for chunk in llm.stream(messages):
-            if hasattr(chunk, "content") and chunk.content:
-                accumulated_text += chunk.content
-                yield json.dumps({"chunk": chunk.content}) + "\n"
+        async with agent.run_stream(user_message) as stream:
+            async for chunk in stream.stream_text(delta=True):
+                accumulated_text += chunk
+                yield json.dumps({"chunk": chunk}) + "\n"
     except Exception as e:
         yield json.dumps({"error": f"LLM streaming failed: {str(e)}"}) + "\n"
         return
