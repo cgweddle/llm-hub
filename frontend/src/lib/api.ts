@@ -97,7 +97,7 @@ export interface FlowUpdateRequest {
 export interface FlowExecutionResult {
   flow_id: number;
   execution_id: number | null;
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "pending" | "running";
   final_output: any;
   execution_trace: Array<{
     node: string;
@@ -560,11 +560,62 @@ export async function executeFlow(flowId: number, initialInput: Record<string, a
       throw new Error(errorData.detail || `Failed to execute flow: ${response.statusText}`);
     }
 
-    return await response.json();
+    const result = await response.json();
+
+    if (result.status === 'pending' || result.status === 'running') {
+      return await pollExecution(result.execution_id);
+    }
+
+    return result;
   } catch (error) {
     console.error('Error executing flow:', error);
     throw error;
   }
+}
+
+async function pollExecution(executionId: number, intervalMs = 2000, maxAttempts = 300): Promise<FlowExecutionResult> {
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, intervalMs));
+    const execution = await fetchExecution(executionId);
+    if (!execution) continue;
+
+    if (execution.status === 'completed') {
+      const lastChild = execution.children?.[execution.children.length - 1];
+      return {
+        flow_id: 0,
+        execution_id: execution.id,
+        status: 'completed',
+        final_output: lastChild?.output_data ?? execution.output_data,
+        execution_trace: (execution.children || []).map(c => ({
+          node: c.name || c.node_id || '',
+          input: c.input_data,
+          output: c.output_data,
+          status: c.status,
+          error: c.error_message || undefined,
+        })),
+      };
+    }
+
+    if (execution.status === 'failed') {
+      return {
+        flow_id: 0,
+        execution_id: execution.id,
+        status: 'failed',
+        final_output: null,
+        execution_trace: [],
+        error: execution.error_message || 'Flow execution failed',
+      };
+    }
+  }
+
+  return {
+    flow_id: 0,
+    execution_id: executionId,
+    status: 'failed',
+    final_output: null,
+    execution_trace: [],
+    error: 'Flow execution timed out waiting for result',
+  };
 }
 
 export async function getFlowDetails(flowId: number): Promise<Flow & { graph_config: GraphConfig; conda_env: string | null }> {
