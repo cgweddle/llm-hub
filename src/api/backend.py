@@ -974,7 +974,7 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
             )
 
             # Import lazily so local mode doesn't require celery/redis installed
-            from src.tasks.flow_tasks import execute_flow_task
+            from src.tasks.tasks import execute_flow_task
             execute_flow_task.delay(
                 flow_id,
                 request.user_id,
