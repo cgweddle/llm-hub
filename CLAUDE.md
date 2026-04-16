@@ -147,6 +147,7 @@ Simple agents have a single node (`"main"`). Multi-agent workflows have multiple
 | output_schema | JSON | AST-parsed output structure |
 | api_config | JSON | for API-based tools |
 | parameters | JSON | legacy — prefer input_schema |
+| required_packages | JSON | list of PyPI package names detected by pigar at create/update; nullable; informational (no auto-install) |
 | is_public | Boolean | default False |
 | created_at | DateTime | default now |
 | updated_at | DateTime | auto-updated |
@@ -325,10 +326,10 @@ Single gate in `_is_production()` at `src/api/backend.py:934`. The Celery task i
 **Celery task** (`src/tasks/flow_tasks.py::execute_flow_task`) — receives `(flow_id, user_id, initial_input, conda_env, execution_id)`. Default behavior: spawns an `llmhub-flow-runner` Podman container via `podman-py` bound to `CONTAINER_HOST` (the host's rootless socket). Falls back to in-worker execution when `FLOW_RUNNER_USE_PODMAN=false` (useful for testing the Celery layer without Podman).
 
 **Flow-runner container** (`deploy/flow-runner/Containerfile`, image `llmhub-flow-runner`):
-- Minimal `python:3.10-slim` with `src/` and `requirements.txt` only
+- Based on `ghcr.io/astral-sh/uv:python3.10-bookworm-slim` (provides python + `uv` on PATH), with `src/` and a **runner-specific** `deploy/flow-runner/requirements.txt` (not the repo-root `requirements.txt`). The runner deps are the minimal set needed by the flow-runner parent process: `pydantic`, `pydantic-ai`, `anthropic`, `openai` (provider SDKs — `pydantic-ai` does not pull these transitively; `openai` also covers LM Studio's OpenAI-compatible API), `sqlalchemy`, `psycopg2-binary`, `httpx`, `python-dotenv`, `langfuse`. No `numpy`/`pandas`/`pyyaml` are pre-installed — tool-specific packages are installed at container startup via `install_required_packages_for_flow` instead. Gemini is not included because the PydanticAI factory only dispatches to Anthropic/OpenAI/LM Studio (Gemini is only supported through the legacy `google.adk` factory, which is not in the flow execution path).
 - Entrypoint: `python -m src.tasks.run_flow` (`src/tasks/run_flow.py`)
 - Reads `FLOW_RUNNER_FLOW_ID`, `FLOW_RUNNER_USER_ID`, `FLOW_RUNNER_EXECUTION_ID`, `FLOW_RUNNER_INITIAL_INPUT` (JSON), `FLOW_RUNNER_CONDA_ENV` from env vars set by the worker's `podman run -e`
-- Opens its own DB session via `DatabaseManager().get_session()` and calls `FlowExecutor.execute_flow(..., execution_id=...)` — **exactly the same code path as local mode**. Tools still run as host-style subprocesses; they don't know they're in a container.
+- Opens its own DB session via `DatabaseManager().get_session()`, runs `install_required_packages_for_flow(session, flow_id)` to `uv pip install --user` every package listed in `required_packages` across the flow's tools and agent-attached tools (best-effort — warns but continues on failure), then calls `FlowExecutor.execute_flow(..., execution_id=...)` — **exactly the same code path as local mode**. Tools still run as host-style subprocesses; they don't know they're in a container.
 - Spawned with `--rm`, `--read-only`, `--tmpfs /tmp:size=100M`, `--memory=1g`, `--cpus=2`, on the `llmhub-net` network. Unrestricted network (tools/agents need outbound access for external APIs).
 - Image is built outside `podman-compose.yml` (via `podman build` in `.github/workflows/deploy.yml`) because it's ephemeral, not a long-running service.
 

@@ -35,9 +35,11 @@ def main() -> int:
     from src.database.database_setup import DatabaseManager
     from src.database.database import update_execution
     from src.executors.flow_executor import FlowExecutor
+    from src.tasks.install_required_packages import install_required_packages_for_flow
 
     session = DatabaseManager().get_session()
     try:
+        install_required_packages_for_flow(session, flow_id)
         executor = FlowExecutor(session, flow_id, user_id, llm_config=llm_config, agent_llms=agent_llms)
         result = executor.execute_flow(
             initial_input, conda_env, execution_id=execution_id

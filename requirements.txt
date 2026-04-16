@@ -16,3 +16,4 @@ pytest==9.0.3
 celery==5.4.0
 redis==5.2.1
 podman==5.2.0
+pigar==2.1.6

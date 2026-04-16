@@ -33,6 +33,7 @@ from src.validate.tool_compatibility import validate_two_tools, validate_tool_co
 from src.executors.flow_executor import FlowExecutor
 from src.executors.agent_executor import AgentExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
+from src.factories.pigar_import_detector import detect_required_packages
 
 
 def _resolve_llm_config(model_name: str, user_id: Optional[int] = None) -> Dict[str, Any]:
@@ -154,6 +155,7 @@ class ToolResponse(BaseModel):
     script_code: Optional[str] = None
     input_schema: Optional[dict] = None
     output_schema: Optional[dict] = None
+    required_packages: Optional[List[str]] = None
 
     class Config:
         from_attributes = True
@@ -808,6 +810,9 @@ def update_tool_endpoint(tool_id: int, tool_update: ToolUpdate, db: Session = De
                     update_data['output_schema'] = schema_gen.generate_output_schema(functions[main_function])
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to parse script: {str(e)}")
+
+        if 'script_code' in update_data and script_code:
+            update_data['required_packages'] = detect_required_packages(script_code)
 
     # Update the tool
     updated_tool = update_tool(db, tool_id, **update_data)
