@@ -143,7 +143,7 @@ def _mark_failed_if_still_running(execution_id: int, reason: str):
         session.close()
 
 
-@celery_app.task(bind=True, name="src.tasks.flow_tasks.execute_flow_task")
+@celery_app.task(bind=True, name="src.tasks.tasks.execute_flow_task")
 def execute_flow_task(
     self,
     flow_id: int,
