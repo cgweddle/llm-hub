@@ -88,7 +88,7 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
         try:
             container.start()
             # Stream logs in the worker's log stream for observability
-            for line in container.logs(stream=True, follow=True):
+            for line in container.logs(stream=True, follow=True, stdout=True, stderr=True):
                 if isinstance(line, bytes):
                     line = line.decode("utf-8", errors="replace")
                 logger.info("[flow-runner] %s", line.rstrip())
