@@ -80,6 +80,7 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
             image=FLOW_RUNNER_IMAGE,
             command=["python", "-m", "src.tasks.run_flow"],
             environment=env,
+            network_mode="bridge",
             mem_limit=FLOW_RUNNER_MEMORY,
             cpu_quota=int(FLOW_RUNNER_CPUS * 100_000),
             cpu_period=100_000,
