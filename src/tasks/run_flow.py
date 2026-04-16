@@ -27,6 +27,7 @@ def main() -> int:
         initial_input = json.loads(os.environ["FLOW_RUNNER_INITIAL_INPUT"])
         conda_env = os.environ.get("FLOW_RUNNER_CONDA_ENV") or None
         agent_llms = json.loads(os.environ.get("FLOW_RUNNER_AGENT_LLMS", "{}"))
+        llm_config = json.loads(os.environ.get("FLOW_RUNNER_LLM_CONFIG", '{"models": []}'))
     except (KeyError, ValueError) as e:
         logger.error("Missing or invalid flow-runner env vars: %s", e)
         return 2
@@ -34,11 +35,9 @@ def main() -> int:
     from src.database.database_setup import DatabaseManager
     from src.database.database import update_execution
     from src.executors.flow_executor import FlowExecutor
-    from src.utils import load_llm_provider_config
 
     session = DatabaseManager().get_session()
     try:
-        llm_config = load_llm_provider_config(user_id=user_id)
         executor = FlowExecutor(session, flow_id, user_id, llm_config=llm_config, agent_llms=agent_llms)
         result = executor.execute_flow(
             initial_input, conda_env, execution_id=execution_id

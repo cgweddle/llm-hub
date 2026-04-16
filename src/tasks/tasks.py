@@ -29,16 +29,16 @@ FLOW_RUNNER_TIMEOUT = int(os.getenv("FLOW_RUNNER_TIMEOUT_SECONDS", "3600"))
 PODMAN_SOCKET_URI = os.getenv("CONTAINER_HOST", "unix:///run/podman/podman.sock")
 
 # Env vars forwarded from worker into the flow-runner container.
-# LLM provider credentials live in Postgres (looked up via DATABASE_URL),
-# so they are not forwarded here.
+# LLM credentials are pre-resolved by the worker and passed via
+# FLOW_RUNNER_LLM_CONFIG, so neither the encryption key nor direct
+# access to llm_provider_configs is needed in the container.
 _FORWARDED_ENV_VARS = [
-    "DATABASE_URL", "SQL_DEBUG", "ENVIRONMENT",
-    "LLM_CONFIG_ENCRYPTION_KEY",
+    "SQL_DEBUG", "ENVIRONMENT",
     "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
 ]
 
 
-def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms):
+def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config):
     env = {
         "FLOW_RUNNER_FLOW_ID": str(flow_id),
         "FLOW_RUNNER_USER_ID": str(user_id),
@@ -46,14 +46,21 @@ def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_i
         "FLOW_RUNNER_INITIAL_INPUT": json.dumps(initial_input),
         "FLOW_RUNNER_CONDA_ENV": conda_env or "",
         "FLOW_RUNNER_AGENT_LLMS": json.dumps(agent_llms or {}),
+        "FLOW_RUNNER_LLM_CONFIG": json.dumps(llm_config),
     }
     for var in _FORWARDED_ENV_VARS:
         if var in os.environ:
             env[var] = os.environ[var]
+
+    # Use the restricted flowrunner DB user if configured, otherwise
+    # fall back to the main DATABASE_URL (e.g., local dev without Postgres roles).
+    flowrunner_db_url = os.environ.get("FLOWRUNNER_DATABASE_URL")
+    env["DATABASE_URL"] = flowrunner_db_url or os.environ.get("DATABASE_URL", "")
+
     return env
 
 
-def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms) -> int:
+def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config) -> int:
     """
     Spawn a flow-runner Podman container, stream logs, and return its exit code.
     """
@@ -61,7 +68,7 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
     # (e.g., local testing) doesn't require the podman python bindings.
     from podman import PodmanClient
 
-    env = _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms)
+    env = _build_container_env(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config)
 
     logger.info(
         "Spawning flow-runner container: image=%s network=%s execution_id=%s",
@@ -102,17 +109,15 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
                 pass
 
 
-def _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms):
+def _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config):
     """
     Fallback: run FlowExecutor directly in the worker process (Phase 1 behavior).
     Selected via FLOW_RUNNER_USE_PODMAN=false.
     """
     from src.executors.flow_executor import FlowExecutor
-    from src.utils import load_llm_provider_config
 
     session = DatabaseManager().get_session()
     try:
-        llm_config = load_llm_provider_config(user_id=user_id)
         executor = FlowExecutor(session, flow_id, user_id, llm_config=llm_config, agent_llms=agent_llms)
         result = executor.execute_flow(initial_input, conda_env, execution_id=execution_id)
         return {"execution_id": execution_id, "status": result.get("status")}
@@ -156,19 +161,33 @@ def execute_flow_task(
     Execute a flow, either inside a Podman container (production default) or
     inline in the worker (set FLOW_RUNNER_USE_PODMAN=false to opt out).
     """
+    from src.utils import load_llm_provider_config
+
     agent_llms = agent_llms or {}
     use_podman = os.getenv("FLOW_RUNNER_USE_PODMAN", "true").lower() == "true"
 
+    # Resolve LLM credentials in the worker so the flow-runner never needs
+    # the encryption key or access to llm_provider_configs.
+    llm_config = load_llm_provider_config(user_id=user_id)
+    needed_providers = set(agent_llms.values()) if agent_llms else set()
+    if needed_providers:
+        llm_config["models"] = [
+            m for m in llm_config.get("models", [])
+            if m.get("name") in needed_providers
+        ]
+    else:
+        llm_config = {"models": []}
+
     if not use_podman:
         try:
-            return _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms)
+            return _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config)
         except Exception as e:
             logger.exception("Inline flow execution failed for execution_id=%s", execution_id)
             _mark_failed_if_still_running(execution_id, f"inline execution error: {e}")
             raise
 
     try:
-        returncode = _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms)
+        returncode = _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config)
     except Exception as e:
         logger.exception("flow-runner container launch failed for execution_id=%s", execution_id)
         _mark_failed_if_still_running(execution_id, f"podman spawn error: {e}")

@@ -369,6 +369,62 @@ def seed_admin_user(db_manager):
         session.close()
 
 
+def create_flowrunner_role(db_manager):
+    """Create a restricted Postgres role for the flow-runner container."""
+    from src.utils.environment import is_hosted
+    if not is_hosted():
+        return
+
+    password = os.environ.get("FLOWRUNNER_DB_PASSWORD")
+    if not password:
+        print("FLOWRUNNER_DB_PASSWORD not set, skipping flowrunner role creation")
+        return
+
+    from sqlalchemy import text
+    session = db_manager.get_session()
+    try:
+        # Create role if it doesn't exist
+        exists = session.execute(
+            text("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flowrunner'")
+        ).fetchone()
+        if not exists:
+            session.execute(text(f"CREATE ROLE flowrunner LOGIN PASSWORD :pw"), {"pw": password})
+            print("Created flowrunner role")
+        else:
+            # Update password in case it changed
+            session.execute(text(f"ALTER ROLE flowrunner PASSWORD :pw"), {"pw": password})
+
+        # Grant connect and schema usage
+        session.execute(text("GRANT CONNECT ON DATABASE llm_hub TO flowrunner"))
+        session.execute(text("GRANT USAGE ON SCHEMA public TO flowrunner"))
+
+        # Read-only tables
+        session.execute(text(
+            "GRANT SELECT ON flows, tools, agents, executions, "
+            "agent_tool_association, agent_flow_association, flow_tool_association "
+            "TO flowrunner"
+        ))
+
+        # Write access to executions only
+        session.execute(text("GRANT INSERT, UPDATE ON executions TO flowrunner"))
+        session.execute(text("GRANT USAGE ON SEQUENCE executions_id_seq TO flowrunner"))
+
+        # Explicitly revoke on sensitive tables
+        session.execute(text(
+            "REVOKE ALL ON llm_provider_configs, users, sessions, "
+            "evaluation_results, evaluations, prompts "
+            "FROM flowrunner"
+        ))
+
+        session.commit()
+        print("Flowrunner role permissions configured")
+    except Exception as e:
+        session.rollback()
+        print(f"Warning: failed to configure flowrunner role: {e}")
+    finally:
+        session.close()
+
+
 def setup_database():
     db_manager = get_database_manager()
 
@@ -377,6 +433,9 @@ def setup_database():
 
     print("Seeding admin user...")
     seed_admin_user(db_manager)
+
+    print("Configuring flowrunner role...")
+    create_flowrunner_role(db_manager)
 
     print("Database setup complete!")
     return True
