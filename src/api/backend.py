@@ -529,16 +529,16 @@ def delete_agent_endpoint(agent_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Agent deletion failed: {str(e)}")
 
 @app.post("/agents/generate-system-prompt")
-def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Session = Depends(get_db)):
+async def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Session = Depends(get_db)):
     """Generate a system prompt for an agent using AI with streaming"""
     try:
         from src.ai_integrations.generate_agent_system_prompt import generate_system_prompt_stream
 
         llm_config = _resolve_llm_config(request.model, request.user_id)
 
-        def stream_generator():
+        async def stream_generator():
             try:
-                for chunk in generate_system_prompt_stream(
+                async for chunk in generate_system_prompt_stream(
                     session=db,
                     agent_name=request.agent_name,
                     agent_description=request.agent_description,
@@ -563,15 +563,15 @@ def generate_system_prompt_endpoint(request: SystemPromptGenerateRequest, db: Se
         raise HTTPException(status_code=500, detail=f"System prompt generation failed: {str(e)}")
 
 @app.post("/agents/generate-user-prompt")
-def generate_user_prompt_endpoint(request: UserPromptGenerateRequest, db: Session = Depends(get_db)):
+async def generate_user_prompt_endpoint(request: UserPromptGenerateRequest, db: Session = Depends(get_db)):
     """Generate a task-specific user prompt for an agent using AI with streaming"""
     try:
         from src.ai_integrations.generate_agent_system_prompt import generate_user_prompt_stream
         llm_config = _resolve_llm_config(request.model, request.user_id)
 
-        def stream_generator():
+        async def stream_generator():
             try:
-                for chunk in generate_user_prompt_stream(
+                async for chunk in generate_user_prompt_stream(
                     session=db,
                     agent_name=request.agent_name,
                     agent_description=request.agent_description,
@@ -677,15 +677,15 @@ def create_python_script_tool_endpoint(tool_data: PythonScriptToolCreate, user_i
         raise HTTPException(status_code=500, detail=f"Failed to create python script tool: {str(e)}")
 
 @app.post("/tools/generate-code")
-def generate_tool_code_endpoint(request: CodeGenerateRequest, db: Session = Depends(get_db)):
+async def generate_tool_code_endpoint(request: CodeGenerateRequest, db: Session = Depends(get_db)):
     """Generate Python tool code using AI with user-selected LLM (streaming)"""
     try:
         from src.ai_integrations.generate_python_tools import generate_tool_code_stream
         llm_config = _resolve_llm_config(request.model, request.user_id)
 
-        def stream_generator():
+        async def stream_generator():
             try:
-                for chunk in generate_tool_code_stream(
+                async for chunk in generate_tool_code_stream(
                     session=db,
                     tool_name=request.tool_name,
                     tool_description=request.tool_description,
@@ -713,15 +713,15 @@ def generate_tool_code_endpoint(request: CodeGenerateRequest, db: Session = Depe
         raise HTTPException(status_code=500, detail=f"Code generation failed: {str(e)}")
 
 @app.post("/tools/edit-code")
-def edit_tool_code_endpoint(request: CodeEditRequest, db: Session = Depends(get_db)):
+async def edit_tool_code_endpoint(request: CodeEditRequest, db: Session = Depends(get_db)):
     """Edit existing Python tool code using AI with user-selected LLM (streaming)"""
     try:
         from src.ai_integrations.generate_python_tools import edit_tool_code_stream
         llm_config = _resolve_llm_config(request.model, request.user_id)
 
-        def stream_generator():
+        async def stream_generator():
             try:
-                for chunk in edit_tool_code_stream(
+                async for chunk in edit_tool_code_stream(
                     session=db,
                     existing_code=request.existing_code,
                     editing_instructions=request.editing_instructions,
@@ -1224,7 +1224,7 @@ class EvalPromptGenerateRequest(BaseModel):
     user_id: Optional[int] = None
 
 @app.post("/evaluations/generate-prompt")
-def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Session = Depends(get_db)):
+async def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Session = Depends(get_db)):
     """Generate a judge system prompt for an evaluation using AI (streaming)."""
     from src.ai_integrations.generate_eval_prompt import generate_eval_prompt_stream
 
@@ -1233,8 +1233,8 @@ def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Sessio
 
     llm_config = _resolve_llm_config(request.model, request.user_id)
 
-    def stream():
-        yield from generate_eval_prompt_stream(
+    async def stream():
+        async for chunk in generate_eval_prompt_stream(
             session=db,
             eval_name=request.eval_name,
             eval_description=request.eval_description,
@@ -1244,7 +1244,8 @@ def generate_eval_prompt_endpoint(request: EvalPromptGenerateRequest, db: Sessio
             input_variables=request.input_variables,
             llm_config=llm_config,
             additional_instructions=request.additional_instructions,
-        )
+        ):
+            yield chunk
 
     return StreamingResponse(
         stream(),

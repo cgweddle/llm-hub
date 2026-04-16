@@ -12,47 +12,52 @@ Run 'python src/prompts/upload_prompts.py' to populate from markdown files.
 import json
 import os
 import sys
-from typing import Any, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
-# Add project root to path
 CURRENT_DIR = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-from src.llm_setup import create_llm
+from pydantic_ai import Agent
+
 from src.database.database import get_prompt_by_name
-from typing import Dict
-from langchain_core.messages import SystemMessage, HumanMessage
 
 
 PROMPT_NAME = "agent_prompt_gen"
 USER_PROMPT_GEN_NAME = "agent_user_prompt_gen"
 
 
-def generate_system_prompt_stream(
+def _build_agent(llm_config: Dict, system_prompt: str) -> Agent:
+    provider = llm_config["provider"]
+    model = llm_config["model"]
+    api_key = llm_config.get("api_key")
+    base_url = llm_config.get("base_url")
+
+    if provider == "lmstudio":
+        api_key = api_key or "lm-studio"
+        base_url = base_url or "http://localhost:1234/v1"
+        provider = "openai"
+
+    if api_key:
+        if provider == "anthropic":
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+        else:
+            os.environ["OPENAI_API_KEY"] = api_key
+    if base_url:
+        os.environ["OPENAI_BASE_URL"] = base_url
+
+    return Agent(model=f"{provider}:{model}", system_prompt=system_prompt)
+
+
+async def generate_system_prompt_stream(
     session: Any,
     agent_name: str,
     agent_description: str,
     tool_names: List[str],
     llm_config: Dict,
     additional_instructions: Optional[str] = None,
-) -> Iterator[str]:
-    """
-    Generate an agent system prompt using LLM with streaming.
-
-    Args:
-        session: Database session
-        agent_name: Name of the agent
-        agent_description: Description of what the agent does
-        tool_names: List of tool names available to the agent
-        llm_model: Config name from ~/.llm_hub/config.yaml
-        additional_instructions: Optional extra instructions for prompt generation
-
-    Yields:
-        JSON strings with streaming updates
-    """
-    # 1. Query prompts from database
+) -> AsyncIterator[str]:
     prompt_record = get_prompt_by_name(session, PROMPT_NAME)
 
     if not prompt_record:
@@ -69,77 +74,45 @@ def generate_system_prompt_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Extract LLM config fields
-    provider = llm_config["provider"]
-    model = llm_config["model"]
-    api_key = llm_config.get("api_key")
-    base_url = llm_config.get("base_url")
-
-    # 3. Build tools section
     if tool_names:
         tools_list = "\n".join(f"- {name}" for name in tool_names)
         tools_section = f"Available Tools:\n{tools_list}\n\nThe agent should know how to use these tools effectively."
     else:
         tools_section = "This agent has no specific tools assigned."
 
-    # Build additional instructions section
     if additional_instructions and additional_instructions.strip():
         additional_section = f"Additional Requirements:\n{additional_instructions.strip()}"
     else:
         additional_section = ""
 
-    # 4. Fill placeholders in user prompt
     user_prompt_filled = user_prompt_template.replace("{AGENT_NAME}", agent_name)
     user_prompt_filled = user_prompt_filled.replace("{AGENT_DESCRIPTION}", agent_description)
     user_prompt_filled = user_prompt_filled.replace("{TOOLS_SECTION}", tools_section)
     user_prompt_filled = user_prompt_filled.replace("{ADDITIONAL_SECTION}", additional_section)
 
-    # 5. Prepare LLM credentials
-    llm_api_key = api_key
-    llm_model = model
-
-    if provider == "lmstudio":
-        llm_api_key = "dummy-key-for-local-llm"
-        if not llm_model.startswith("openai/"):
-            llm_model = f"openai/{llm_model}"
-
-    # 6. Create LLM instance
     try:
-        llm = create_llm(
-            provider=provider,
-            model=llm_model,
-            temperature=0.7,
-            api_key=llm_api_key,
-            base_url=base_url
-        )
+        agent = _build_agent(llm_config, system_prompt)
     except ValueError as e:
         yield json.dumps({"error": f"Failed to create LLM: {str(e)}"}) + "\n"
         return
 
-    # 7. Stream LLM response
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt_filled)
-    ]
-
     accumulated_text = ""
     try:
-        for chunk in llm.stream(messages):
-            if hasattr(chunk, 'content') and chunk.content:
-                accumulated_text += chunk.content
-                yield json.dumps({"chunk": chunk.content}) + "\n"
+        async with agent.run_stream(user_prompt_filled) as stream:
+            async for chunk in stream.stream_text(delta=True):
+                accumulated_text += chunk
+                yield json.dumps({"chunk": chunk}) + "\n"
     except Exception as e:
         yield json.dumps({"error": f"LLM streaming failed: {str(e)}"}) + "\n"
         return
 
-    # Send final result
     yield json.dumps({
         "done": True,
         "system_prompt": accumulated_text.strip()
     }) + "\n"
 
 
-def generate_user_prompt_stream(
+async def generate_user_prompt_stream(
     session: Any,
     agent_name: str,
     agent_description: str,
@@ -147,26 +120,7 @@ def generate_user_prompt_stream(
     llm_config: Dict,
     generated_system_prompt: str,
     additional_instructions: Optional[str] = None,
-) -> Iterator[str]:
-    """
-    Generate a task-specific user prompt for an agent using LLM with streaming.
-
-    Uses a separate prompt template (agent_user_prompt_gen) that is aware of
-    the agent's system prompt, so the user prompt complements it without overlap.
-
-    Args:
-        session: Database session
-        agent_name: Name of the agent
-        agent_description: Description of what the agent does
-        tool_names: List of tool names available to the agent
-        llm_model: Config name from ~/.llm_hub/config.yaml
-        generated_system_prompt: The already-generated system prompt for this agent
-        additional_instructions: Optional extra instructions
-
-    Yields:
-        JSON strings with streaming updates
-    """
-    # 1. Query user prompt generation template from database
+) -> AsyncIterator[str]:
     prompt_record = get_prompt_by_name(session, USER_PROMPT_GEN_NAME)
 
     if not prompt_record:
@@ -183,13 +137,6 @@ def generate_user_prompt_stream(
         yield json.dumps({"error": "System prompt or user prompt is empty in database"}) + "\n"
         return
 
-    # 2. Extract LLM config fields
-    provider = llm_config["provider"]
-    model = llm_config["model"]
-    api_key = llm_config.get("api_key")
-    base_url = llm_config.get("base_url")
-
-    # 3. Build tools section
     if tool_names:
         tools_list = "\n".join(f"- {name}" for name in tool_names)
         tools_section = f"Available Tools:\n{tools_list}\n\nThe task instruction may reference using these tools."
@@ -201,52 +148,28 @@ def generate_user_prompt_stream(
     else:
         additional_section = ""
 
-    # 4. Fill placeholders in user prompt template
     user_prompt_filled = user_prompt_template.replace("{AGENT_NAME}", agent_name)
     user_prompt_filled = user_prompt_filled.replace("{AGENT_DESCRIPTION}", agent_description)
     user_prompt_filled = user_prompt_filled.replace("{TOOLS_SECTION}", tools_section)
     user_prompt_filled = user_prompt_filled.replace("{ADDITIONAL_SECTION}", additional_section)
     user_prompt_filled = user_prompt_filled.replace("{SYSTEM_PROMPT}", generated_system_prompt)
 
-    # 5. Prepare LLM credentials
-    llm_api_key = api_key
-    llm_model = model
-
-    if provider == "lmstudio":
-        llm_api_key = "dummy-key-for-local-llm"
-        if not llm_model.startswith("openai/"):
-            llm_model = f"openai/{llm_model}"
-
-    # 6. Create LLM instance
     try:
-        llm = create_llm(
-            provider=provider,
-            model=llm_model,
-            temperature=0.7,
-            api_key=llm_api_key,
-            base_url=base_url
-        )
+        agent = _build_agent(llm_config, system_prompt)
     except ValueError as e:
         yield json.dumps({"error": f"Failed to create LLM: {str(e)}"}) + "\n"
         return
 
-    # 7. Stream LLM response
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt_filled)
-    ]
-
     accumulated_text = ""
     try:
-        for chunk in llm.stream(messages):
-            if hasattr(chunk, 'content') and chunk.content:
-                accumulated_text += chunk.content
-                yield json.dumps({"chunk": chunk.content}) + "\n"
+        async with agent.run_stream(user_prompt_filled) as stream:
+            async for chunk in stream.stream_text(delta=True):
+                accumulated_text += chunk
+                yield json.dumps({"chunk": chunk}) + "\n"
     except Exception as e:
         yield json.dumps({"error": f"LLM streaming failed: {str(e)}"}) + "\n"
         return
 
-    # Send final result
     yield json.dumps({
         "done": True,
         "user_prompt": accumulated_text.strip()
