@@ -109,6 +109,7 @@ class Tool(Base):
     output_schema = Column(JSON)  # Output structure with types for flow validation
     api_config = Column(JSON)  # For API-based tools
     parameters = Column(JSON)  # Tool parameters schema (legacy, use input_schema)
+    required_packages = Column(JSON)  # List of PyPI package names detected via pigar
     is_public = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

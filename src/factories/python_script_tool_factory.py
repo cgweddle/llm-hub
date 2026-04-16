@@ -23,6 +23,7 @@ except ImportError:
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from database.database import create_tool as db_create_tool, get_session
+from factories.pigar_import_detector import detect_required_packages
 
 
 
@@ -225,6 +226,8 @@ class PythonScriptToolFactory:
             input_schema = self.schema_generator.generate_input_schema(main_func)
             output_schema = self.schema_generator.generate_output_schema(main_func)
 
+            required_packages = detect_required_packages(script_code)
+
             # Create tool in database
             session = get_session()
             try:
@@ -239,6 +242,7 @@ class PythonScriptToolFactory:
                     script_code=script_code,
                     input_schema=input_schema,
                     output_schema=output_schema,
+                    required_packages=required_packages,
                     is_public=True
                 )
 

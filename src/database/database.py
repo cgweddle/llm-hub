@@ -225,7 +225,9 @@ def create_user(session: Any, username: str, email: str, password_hash: str, is_
 def create_tool(session: Any, user_id: int, name: str, description: str,
                 tool_type: str, main_function: str = None, function_code: str = None,
                 helper_functions: Dict = None, script_code: str = None, input_schema: Dict = None,
-                output_schema: Dict = None, api_config: Dict = None, is_public: bool = False) -> Tool:
+                output_schema: Dict = None, api_config: Dict = None,
+                required_packages: Optional[List[str]] = None,
+                is_public: bool = False) -> Tool:
     """Create a new tool with helper functions and type schemas"""
     tool = Tool(
         user_id=user_id,
@@ -237,6 +239,7 @@ def create_tool(session: Any, user_id: int, name: str, description: str,
         script_code=script_code,
         input_schema=input_schema or {},
         output_schema=output_schema or {},
+        required_packages=required_packages,
         is_public=is_public
     )
     session.add(tool)
