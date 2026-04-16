@@ -33,6 +33,7 @@ PODMAN_SOCKET_URI = os.getenv("CONTAINER_HOST", "unix:///run/podman/podman.sock"
 # so they are not forwarded here.
 _FORWARDED_ENV_VARS = [
     "DATABASE_URL", "SQL_DEBUG", "ENVIRONMENT",
+    "LLM_CONFIG_ENCRYPTION_KEY",
     "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
 ]
 
