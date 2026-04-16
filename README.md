@@ -112,7 +112,23 @@ Added to `deploy/podman-compose.yml` alongside the existing postgres / backend /
 
 Plus a new image built outside compose (per-flow, ephemeral — never runs as a service):
 
-- **`llmhub-flow-runner`** — Minimal Python 3.10 image that hosts `FlowExecutor` for one flow execution. Spawned via the host's Podman socket with `--read-only`, `--tmpfs /tmp`, memory/CPU limits, and `--rm`. Deleted after each flow.
+- **`llmhub-flow-runner`** — Minimal Python 3.10 image that hosts `FlowExecutor` for one flow execution. Spawned via the host's Podman socket with memory/CPU limits and `--rm`. Deleted after each flow.
+
+### Building the Flow-Runner Image
+
+The flow-runner image is built separately from the compose services since it's ephemeral (spawned per-flow, not long-running). Build it with:
+
+```bash
+podman build -t llmhub-flow-runner -f deploy/flow-runner/Containerfile .
+```
+
+The image is a two-stage build (`deploy/flow-runner/Containerfile`):
+1. **Build stage**: Installs Python deps from `requirements.txt` plus common data-science packages (`numpy`, `pandas`, `pyyaml`) that user-authored tools may need
+2. **Runtime stage**: Copies installed packages and `src/` into a minimal `python:3.10-slim` image, runs as the unprivileged `llmhub` user
+
+The image contains the full `src/` tree because the flow-runner runs the same `FlowExecutor` code as local mode — it needs access to executors, database modules, and utilities. Since the container is ephemeral and auto-deleted, the copied code disappears with it.
+
+Rebuild this image whenever `src/` or `requirements.txt` changes. The CI/CD pipeline (`deploy.yml`) builds it automatically.
 
 ### Execution Flow (production)
 
@@ -139,6 +155,39 @@ Frontend polls GET /executions/{id} → sees pending → running → completed
 - **One Celery task per flow** (not per node): DAG traversal stays in one process, avoiding distributed-transaction complexity.
 - **Podman wraps the whole flow**, not individual tools: `FlowExecutor` and `subprocess.run()` for tools work identically inside or outside the container — no code branching on environment.
 - **Unrestricted network on the flow-runner**: tools and agents legitimately need outbound access for external APIs. Sandbox is resource + filesystem isolation only.
-- **Credentials in Postgres (production)**: no credential files mounted into containers; the flow-runner gets `DATABASE_URL` and reads per-user LLM credentials at runtime.
+- **Credentials pre-resolved by the worker**: the worker decrypts LLM credentials before spawning the flow-runner and passes only the needed providers via env var. The flow-runner never has the encryption key or access to other users' credentials.
+
+## Security
+
+### Flow-Runner Container Isolation
+
+The flow-runner executes user-authored tool scripts, so it operates with minimal privileges:
+
+| Resource | Flow-Runner Access |
+|---|---|
+| Database user | `flowrunner` — restricted Postgres role |
+| DB read access | `flows`, `tools`, `agents`, `executions`, association tables |
+| DB write access | `executions` only (INSERT/UPDATE) |
+| Sensitive tables | No access to `llm_provider_configs`, `users`, `sessions`, `evaluations`, `prompts` |
+| LLM API keys | Only the providers needed for the current flow, pre-resolved by the worker |
+| `LLM_CONFIG_ENCRYPTION_KEY` | Not available in the container |
+| Filesystem | Writable but ephemeral — container is auto-deleted after execution |
+| Network | Unrestricted (tools/agents need outbound API access) |
+| Resources | Memory and CPU capped via Podman limits |
+
+### How Credential Isolation Works
+
+1. **Worker** receives the Celery task with `user_id` and `agent_llms` (a map of node names to provider names)
+2. **Worker** calls `load_llm_provider_config(user_id)` to decrypt the user's LLM credentials from Postgres
+3. **Worker** filters to only the providers referenced in `agent_llms` and serializes them as `FLOW_RUNNER_LLM_CONFIG`
+4. **Flow-runner** reads the pre-resolved config from the env var — no database query, no decryption needed
+
+### Restricted Database Role
+
+The `flowrunner` Postgres role is created automatically during `database_setup.py setup` (runs on every deploy). It requires `FLOWRUNNER_DB_PASSWORD` in the environment. The role has:
+- `SELECT` on reference tables (flows, tools, agents, executions, association tables)
+- `INSERT`, `UPDATE` on `executions` (for recording execution results)
+- `USAGE` on `executions_id_seq` (for auto-increment IDs)
+- No access to `llm_provider_configs`, `users`, `sessions`, `evaluations`, `evaluation_results`, or `prompts`
 
 See [deploy/DEPLOY.md](deploy/DEPLOY.md) for the hosting / CI-CD setup.
