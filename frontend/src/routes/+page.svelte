@@ -1581,9 +1581,6 @@
 
       <div class="flows-section">
         <h4>Available Flows</h4>
-        <Button class="w-full mb-2" size="sm" onclick={() => showSaveDialog = true}>
-          Create New Flow
-        </Button>
         {#each availableFlows as flow}
           <div
             class="flow-item"
