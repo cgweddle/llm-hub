@@ -76,13 +76,24 @@ jobs:
             # Drop in our logging-cap override (upstream compose stays pristine)
             cp "$DEPLOY_DIR/deploy/langfuse/docker-compose.override.yml" .
 
-            # Write LangFuse .env from GitHub Secrets
+            # Write LangFuse .env from GitHub Secrets.
+            # INIT_* vars only take effect on a fresh Postgres DB — they auto-create
+            # the org/project/user and bind the public/secret keys so llm-hub can
+            # authenticate. All vars below are required; omitting any causes
+            # LangFuse to skip init entirely (silent on traces, "Invalid credentials").
             cat > .env << LFENVEOF
             NEXTAUTH_SECRET=${{ secrets.LANGFUSE_NEXTAUTH_SECRET }}
             SALT=${{ secrets.LANGFUSE_SALT }}
             ENCRYPTION_KEY=${{ secrets.LANGFUSE_ENCRYPTION_KEY }}
+            LANGFUSE_INIT_ORG_ID=llmhub
+            LANGFUSE_INIT_ORG_NAME=LLM Hub
+            LANGFUSE_INIT_PROJECT_ID=llmhub
+            LANGFUSE_INIT_PROJECT_NAME=LLM Hub
             LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${{ secrets.LANGFUSE_PUBLIC_KEY }}
             LANGFUSE_INIT_PROJECT_SECRET_KEY=${{ secrets.LANGFUSE_SECRET_KEY }}
+            LANGFUSE_INIT_USER_EMAIL=${{ secrets.LANGFUSE_ADMIN_EMAIL }}
+            LANGFUSE_INIT_USER_NAME=Admin
+            LANGFUSE_INIT_USER_PASSWORD=${{ secrets.LANGFUSE_ADMIN_PASSWORD }}
             LFENVEOF
 
             podman-compose up -d
