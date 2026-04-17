@@ -1,0 +1,52 @@
+version: "3.9"
+
+# Overrides applied on top of LangFuse's upstream docker-compose.yml.
+# Copied into ~/langfuse/ by the deploy workflow so upstream config stays pristine.
+#
+# Purpose: silence ClickHouse's info-level firehose and cap every container's
+# log volume so a self-amplifying error loop can't fill the host disk again.
+
+services:
+  clickhouse:
+    environment:
+      CLICKHOUSE_LOG_LEVEL: warning
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  langfuse-worker:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  langfuse-web:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  postgres:
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  minio:
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
