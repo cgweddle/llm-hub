@@ -19,6 +19,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
     deploy:
       resources:
         limits:
@@ -37,6 +42,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
     deploy:
       resources:
         limits:
@@ -73,6 +83,11 @@ services:
       - generated-scripts:/app/generated_scripts
     networks:
       - llmhub-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -118,6 +133,11 @@ services:
       - ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock
     networks:
       - llmhub-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -144,6 +164,11 @@ services:
       PUBLIC_API_BASE_URL: https://${PUBLIC_DOMAIN}/api
     networks:
       - llmhub-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -168,6 +193,11 @@ services:
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
     networks:
       - llmhub-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
     deploy:
       resources:
         limits:

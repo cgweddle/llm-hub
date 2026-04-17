@@ -59,6 +59,37 @@ jobs:
             # worker container can spawn flow-runner containers through it.
             systemctl --user enable --now podman.socket || true
 
+            # --- LangFuse stack (self-hosted tracing backend) ---
+            # Clones LangFuse's repo pinned to a tag, layers in our compose
+            # override (log caps + CLICKHOUSE_LOG_LEVEL=warning), writes .env
+            # from GitHub Secrets, and brings it up alongside llm-hub.
+            LANGFUSE_DIR=$HOME/langfuse
+            LANGFUSE_TAG=v3.134.0
+
+            if [ ! -d "$LANGFUSE_DIR" ]; then
+              git clone https://github.com/langfuse/langfuse.git "$LANGFUSE_DIR"
+            fi
+            cd "$LANGFUSE_DIR"
+            git fetch --tags
+            git checkout "$LANGFUSE_TAG"
+
+            # Drop in our logging-cap override (upstream compose stays pristine)
+            cp "$DEPLOY_DIR/deploy/langfuse/docker-compose.override.yml" .
+
+            # Write LangFuse .env from GitHub Secrets
+            cat > .env << LFENVEOF
+            NEXTAUTH_SECRET=${{ secrets.LANGFUSE_NEXTAUTH_SECRET }}
+            SALT=${{ secrets.LANGFUSE_SALT }}
+            ENCRYPTION_KEY=${{ secrets.LANGFUSE_ENCRYPTION_KEY }}
+            LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${{ secrets.LANGFUSE_PUBLIC_KEY }}
+            LANGFUSE_INIT_PROJECT_SECRET_KEY=${{ secrets.LANGFUSE_SECRET_KEY }}
+            LFENVEOF
+
+            podman-compose up -d
+
+            cd "$DEPLOY_DIR"
+            # --- End LangFuse ---
+
             # Build the flow-runner image used by the Celery worker.
             # Not part of podman-compose because it's spawned per flow,
             # not as a long-running service.
@@ -72,6 +103,10 @@ jobs:
             podman-compose build
             podman-compose down
             podman-compose up -d
+
+            # Remove dangling images left over from this rebuild.
+            # Only touches unreferenced layers — running containers are safe.
+            podman system prune -f
 
             # Wait for health checks to pass
             sleep 15
