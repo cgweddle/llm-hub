@@ -65,15 +65,19 @@ export const actions: Actions = {
 			});
 		} catch (e: any) {
 			console.error("Registration failed:", e);
-			// Handle unique constraint violations (works for both SQLite and PostgreSQL)
-			const msg = e.message?.toLowerCase() ?? "";
-			if (msg.includes("unique") || msg.includes("duplicate") || msg.includes("constraint")) {
-				if (msg.includes("username")) {
+			// Detect unique constraint violations across Postgres (code '23505') and SQLite (message text)
+			const isUniqueViolation =
+				e.code === "23505" ||
+				(e.message?.toLowerCase() ?? "").match(/unique|duplicate|constraint/);
+			if (isUniqueViolation) {
+				const fieldHint = (e.detail ?? e.constraint_name ?? e.message ?? "").toLowerCase();
+				if (fieldHint.includes("username")) {
 					return fail(400, { message: "Username already taken" });
 				}
-				if (msg.includes("email")) {
+				if (fieldHint.includes("email")) {
 					return fail(400, { message: "Email already registered" });
 				}
+				return fail(400, { message: "That username or email is already taken" });
 			}
 			return fail(500, {
 				message: "An error occurred during registration"
