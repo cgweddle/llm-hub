@@ -64,6 +64,7 @@ export const actions: Actions = {
 				...sessionCookie.attributes
 			});
 		} catch (e: any) {
+			console.error("Registration failed:", e);
 			// Handle unique constraint violations (works for both SQLite and PostgreSQL)
 			const msg = e.message?.toLowerCase() ?? "";
 			if (msg.includes("unique") || msg.includes("duplicate") || msg.includes("constraint")) {
