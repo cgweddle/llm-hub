@@ -1,8 +1,11 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
 
-  type $$Props = Omit<NodeProps, 'id'>;
-  export let isConnectable: $$Props['isConnectable'];
+  interface Props {
+    isConnectable: NodeProps['isConnectable'];
+  }
+
+  let { isConnectable }: Props = $props();
 </script>
 
 <div class="start-node">

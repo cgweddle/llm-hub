@@ -5,83 +5,86 @@
   import { getContext } from 'svelte';
   import type { Writable } from 'svelte/store';
 
-  type $$Props = Omit<NodeProps, 'id'>;
-  export let data: $$Props['data'];
-  export let isConnectable: $$Props['isConnectable'];
-  export let id: string;
+  interface Props {
+    data: NodeProps['data'];
+    isConnectable: NodeProps['isConnectable'];
+    id: string;
+  }
 
-  // Reactive destructuring so variables update when data prop changes
-  let name: string, description: string, script_code: string, main_function: string;
-  let handles: string[], toolId: number, input_schema: any, output_schema: any, runtimeLLM: any;
-  let output_paths: Record<string, any> | undefined;
-  $: ({ name, description, script_code, main_function, handles = ['a'], toolId, input_schema, output_schema, runtimeLLM, output_paths } = data);
+  let { data, isConnectable, id }: Props = $props();
+
+  // Reactive destructuring — each read of data.X inside $derived tracks it as a dep
+  const name = $derived(data.name as string);
+  const description = $derived(data.description as string);
+  const script_code = $derived(data.script_code as string);
+  const main_function = $derived(data.main_function as string);
+  const toolId = $derived(data.toolId as number);
+  const input_schema = $derived(data.input_schema);
+  const output_schema = $derived(data.output_schema);
+  const runtimeLLM = $derived(data.runtimeLLM);
+  const output_paths = $derived(data.output_paths as Record<string, any> | undefined);
 
   // Get LLM providers from parent context (passed from +page.svelte)
   const llmProvidersStore = getContext<Writable<LLMProvider[]>>('llmProviders');
-  $: llmProviders = llmProvidersStore ? $llmProvidersStore : [];
+  const llmProviders = $derived(llmProvidersStore ? $llmProvidersStore : []);
 
   // Get the function to update node internals when handles change
   const updateNodeInternals = useUpdateNodeInternals();
 
   // Extract input parameter names from the input schema
-  let inputParameters: string[] = [];
-  $: {
+  const inputParameters = $derived.by(() => {
     if (input_schema && typeof input_schema === 'object') {
-      // Assuming input_schema has a "properties" field like JSON Schema
       if (input_schema.properties) {
-        inputParameters = Object.keys(input_schema.properties);
-      } else {
-        // Fallback: use all keys from input_schema
-        inputParameters = Object.keys(input_schema);
+        return Object.keys(input_schema.properties);
       }
-    } else {
-      inputParameters = [];
+      return Object.keys(input_schema);
     }
-  }
+    return [] as string[];
+  });
 
   // Extract output properties if the output is a dictionary
-  let outputIsDictionary = false;
-  let outputProperties: Array<{key: string, type: string}> = [];
-  let outputExpanded = false;
-
-  $: {
+  const outputIsDictionary = $derived(
+    !!(output_schema && typeof output_schema === 'object' && output_schema.properties)
+  );
+  const outputProperties = $derived.by(() => {
     if (output_schema && typeof output_schema === 'object' && output_schema.properties) {
-      // Has properties defined - treat as expandable dictionary
-      outputIsDictionary = true;
-      outputProperties = Object.entries(output_schema.properties).map(([key, value]: [string, any]) => ({
+      return Object.entries(output_schema.properties).map(([key, value]: [string, any]) => ({
         key,
-        type: value.type || 'any'
+        type: (value.type || 'any') as string
       }));
-    } else {
-      outputIsDictionary = false;
-      outputProperties = [];
     }
-  }
+    return [] as Array<{ key: string; type: string }>;
+  });
+
+  let outputExpanded = $state(false);
 
   // Compute output path entries for agent nodes with conditional routing
-  let outputPathEntries: Array<[string, any]> = [];
-  $: {
+  const outputPathEntries = $derived.by(() => {
     if (data.isAgent && output_paths && typeof output_paths === 'object') {
-      outputPathEntries = Object.entries(output_paths);
-    } else {
-      outputPathEntries = [];
+      return Object.entries(output_paths);
     }
-  }
+    return [] as Array<[string, any]>;
+  });
 
-  // Update node internals when expansion state or output paths change
-  $: if (outputExpanded !== undefined || outputPathEntries.length >= 0) {
+  // Tell SvelteFlow to recompute handle positions when the set of handles changes
+  $effect(() => {
+    // Reads below establish this effect's dependencies
+    void outputExpanded;
+    void outputPathEntries.length;
     updateNodeInternals(id);
-  }
+  });
 
   // Track custom parameter values
-  let parameterValues: { [key: string]: string } = data.parameterValues || {};
-  let editingParameter: string | null = null;
-  let tempValue: string = '';
+  let parameterValues = $state<{ [key: string]: string }>(data.parameterValues || {});
+  let editingParameter = $state<string | null>(null);
+  let tempValue = $state<string>('');
 
   // Update node data when parameterValues change
-  $: if (data) {
-    data.parameterValues = parameterValues;
-  }
+  $effect(() => {
+    if (data) {
+      data.parameterValues = parameterValues;
+    }
+  });
 
   function handleParameterClick(paramName: string) {
     editingParameter = paramName;
@@ -146,11 +149,8 @@
   }
 
   // LLM configuration
-  let showLLMDropdown = false;
-  let selectedLLM: LLMProvider | null = runtimeLLM || null;
-
-  // Keep selectedLLM in sync with runtimeLLM (when flow is loaded)
-  $: selectedLLM = runtimeLLM || null;
+  let showLLMDropdown = $state(false);
+  const selectedLLM = $derived((runtimeLLM as LLMProvider | null) || null);
 
   function toggleLLMDropdown(event: Event) {
     event.stopPropagation();
@@ -159,7 +159,6 @@
 
   function selectLLM(provider: LLMProvider | null, event: Event) {
     event.stopPropagation();
-    selectedLLM = provider;
     data.runtimeLLM = provider;
     showLLMDropdown = false;
   }
@@ -179,7 +178,7 @@
   }
 </script>
 
-<svelte:window on:click={handleOutsideClick} />
+<svelte:window onclick={handleOutsideClick} />
 
 <div class="toolNode">
   <div class="toolNodeBody">
@@ -190,8 +189,8 @@
         <div class="llm-config-container">
           <button
             class="llm-button {selectedLLM ? 'has-llm' : ''}"
-            on:click={toggleLLMDropdown}
-            on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { toggleLLMDropdown(event); } }}
+            onclick={toggleLLMDropdown}
+            onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { toggleLLMDropdown(event); } }}
             aria-label="Configure LLM"
             title={selectedLLM ? `LLM: ${selectedLLM.name}` : 'Attach LLM'}
           >
@@ -203,7 +202,7 @@
               <div class="llm-dropdown-header">Attach LLM</div>
               <button
                 class="llm-dropdown-item {!selectedLLM ? 'selected' : ''}"
-                on:click={(e) => selectLLM(null, e)}
+                onclick={(e) => selectLLM(null, e)}
               >
                 <span class="llm-item-icon">⭘</span>
                 <span>None</span>
@@ -211,7 +210,7 @@
               {#each llmProviders as provider}
                 <button
                   class="llm-dropdown-item {selectedLLM?.name === provider.name ? 'selected' : ''}"
-                  on:click={(e) => selectLLM(provider, e)}
+                  onclick={(e) => selectLLM(provider, e)}
                 >
                   <span class="llm-item-icon">🤖</span>
                   <div class="llm-item-info">
@@ -226,8 +225,8 @@
 
         <button
           class="expand-button"
-          on:click={openFullscreen}
-          on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { openFullscreen(); } }}
+          onclick={openFullscreen}
+          onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { openFullscreen(); } }}
           aria-label="Expand node fullscreen"
         >
           +
@@ -254,11 +253,11 @@
             type="text"
             class="parameter-input"
             bind:value={tempValue}
-            on:keydown={(e) => {
+            onkeydown={(e) => {
               if (e.key === 'Enter') saveParameterValue(paramName);
               if (e.key === 'Escape') cancelEdit();
             }}
-            on:blur={() => saveParameterValue(paramName)}
+            onblur={() => saveParameterValue(paramName)}
             placeholder="Enter value..."
             autofocus
           />
@@ -266,7 +265,7 @@
       {:else}
         <button
           class="handle-label-outside"
-          on:click|stopPropagation={() => handleParameterClick(paramName)}
+          onclick={(e) => { e.stopPropagation(); handleParameterClick(paramName); }}
           title="Click to set custom value"
         >
           <div class="param-content">
@@ -313,7 +312,7 @@
   <div class="output-handle-wrapper" style="top: 60px;">
     <button
       class="handle-label-outside output-label"
-      on:click|stopPropagation={() => outputExpanded = !outputExpanded}
+      onclick={(e) => { e.stopPropagation(); outputExpanded = !outputExpanded; }}
       title={outputExpanded ? 'Click to collapse' : 'Click to expand properties'}
     >
       <span class="expander-icon">{outputExpanded ? '∨' : '→'}</span>

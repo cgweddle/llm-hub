@@ -961,6 +961,7 @@ export interface AgentUpdateData {
   description?: string;
   graph_config?: AgentGraphConfig;
   output_schema?: Record<string, any>;
+  is_public?: boolean;
 }
 
 export async function updateAgent(agentId: number, updateData: AgentUpdateData): Promise<Agent> {

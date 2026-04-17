@@ -101,6 +101,7 @@ class AgentUpdate(BaseModel):
     description: Optional[str] = None
     graph_config: Optional[dict] = None
     output_schema: Optional[dict] = None
+    is_public: Optional[bool] = None
 
 class AgentExecuteRequest(BaseModel):
     user_id: int
