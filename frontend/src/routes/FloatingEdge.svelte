@@ -1,34 +1,36 @@
 <script lang="ts">
   import { getStraightPath, type EdgeProps } from '@xyflow/svelte';
 
-  type $$Props = EdgeProps;
+  interface Props {
+    source: EdgeProps['source'];
+    target: EdgeProps['target'];
+    sourceX: EdgeProps['sourceX'];
+    sourceY: EdgeProps['sourceY'];
+    targetX: EdgeProps['targetX'];
+    targetY: EdgeProps['targetY'];
+    markerEnd?: EdgeProps['markerEnd'];
+    style?: EdgeProps['style'];
+    id: EdgeProps['id'];
+  }
 
-  export let source: EdgeProps['source'];
-  export let target: EdgeProps['target'];
-  export let sourceX: EdgeProps['sourceX'];
-  export let sourceY: EdgeProps['sourceY'];
-  export let targetX: EdgeProps['targetX'];
-  export let targetY: EdgeProps['targetY'];
-  export let markerEnd: EdgeProps['markerEnd'] = undefined;
-  export let style: EdgeProps['style'] = undefined;
-  export let id: EdgeProps['id'];
+  let {
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    markerEnd,
+    style,
+    id
+  }: Props = $props();
 
-  let edgePath: string | undefined;
-
-  $: {
+  const edgePath = $derived.by(() => {
     try {
-      const pathResult = getStraightPath({
-        sourceX,
-        sourceY,
-        targetX,
-        targetY
-      });
-      edgePath = pathResult[0];
+      return getStraightPath({ sourceX, sourceY, targetX, targetY })[0];
     } catch (error) {
       console.error('Error calculating edge path:', error);
-      edgePath = undefined;
+      return undefined;
     }
-  }
+  });
 </script>
 
 <path {id} marker-end={markerEnd} d={edgePath} {style} />

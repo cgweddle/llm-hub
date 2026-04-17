@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, setContext } from 'svelte';
+  import { setContext } from 'svelte';
   import { writable } from 'svelte/store';
   import {
     SvelteFlow,
@@ -24,30 +24,38 @@
   import { getAgentTemplatesList, getAgentTemplate, type AgentTypeKey } from '$lib/agentTemplates';
   import { buildAgentGraphConfig, validateAgentGraph } from '$lib/agentGraphBuilder';
   import { autoLayoutNodes } from '$lib/elkLayout';
-  import { createAgent, updateAgent, loadLLMProvidersConfig, type Agent, type AgentCreateData, type Evaluation } from '$lib/api';
+  import { createAgent, updateAgent, type Agent, type AgentCreateData, type Evaluation } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
   import type { Viewport } from '@xyflow/svelte';
 
   import type { AgentTemplate } from '$lib/agentTemplates';
 
-  const dispatch = createEventDispatcher<{
-    back: void;
-    agentCreated: Agent;
-    agentUpdated: Agent;
-    configureNewAgent: { template: AgentTemplate };
-  }>();
+  interface Props {
+    agents?: Agent[];
+    userId?: number;
+    evaluations?: Evaluation[];
+    onback?: () => void;
+    onagentCreated?: (agent: Agent) => void;
+    onagentUpdated?: (agent: Agent) => void;
+    onconfigureNewAgent?: (detail: { template: AgentTemplate }) => void;
+  }
 
-  // Props
-  export let agents: Agent[] = [];
-  export let userId: number = 1;
-  export let evaluations: Evaluation[] = [];
+  let {
+    agents = [],
+    userId = 1,
+    evaluations = [],
+    onback,
+    onagentCreated,
+    onagentUpdated,
+    onconfigureNewAgent
+  }: Props = $props();
 
   // Sidebar section collapse state
-  let sectionsExpanded: Record<string, boolean> = {
+  let sectionsExpanded = $state<Record<string, boolean>>({
     newAgent: false,
     availableAgents: false,
     evaluations: false
-  };
+  });
 
   function toggleSection(section: string) {
     sectionsExpanded[section] = !sectionsExpanded[section];
@@ -82,25 +90,28 @@
   }
 
   // Canvas state
-  let agentNodes: Node[] = [createStartNode()];
-  let agentEdges: Edge[] = [];
-  let agentViewport: Viewport = { x: 0, y: 0, zoom: 1 };
+  let agentNodes = $state<Node[]>([createStartNode()]);
+  let agentEdges = $state<Edge[]>([]);
+  let agentViewport = $state<Viewport>({ x: 0, y: 0, zoom: 1 });
 
   // LLM provider state
-  let selectedLLMProvider: LLMProvider | null = null;
-  let llmProviders: LLMProvider[] = [];
+  let selectedLLMProvider = $state<LLMProvider | null>(null);
+  let llmProviders = $state<LLMProvider[]>([]);
 
   // Sync llmProviders into the context store for ToolNode
-  $: llmProvidersStore.set(llmProviders);
+  $effect(() => {
+    llmProvidersStore.set(llmProviders);
+  });
 
   // Save dialog state
-  let loadedAgentId: number | null = null;
-  let showSaveAgentDialog = false;
-  let composedAgentName = '';
-  let composedAgentDescription = '';
-  let maxLoopIterations = 5;
-  let isSavingAgent = false;
-  let topLevelEvalIds: number[] = [];
+  let loadedAgentId = $state<number | null>(null);
+  let showSaveAgentDialog = $state(false);
+  let composedAgentName = $state('');
+  let composedAgentDescription = $state('');
+  let composedAgentIsPublic = $state(false);
+  let maxLoopIterations = $state(5);
+  let isSavingAgent = $state(false);
+  let topLevelEvalIds = $state<number[]>([]);
 
   function toggleTopLevelEval(evalId: number) {
     if (topLevelEvalIds.includes(evalId)) {
@@ -112,9 +123,9 @@
 
 
   // Toast state
-  let showToast = false;
-  let toastMessage = '';
-  let toastSuccess = false;
+  let showToast = $state(false);
+  let toastMessage = $state('');
+  let toastSuccess = $state(false);
 
   function showToastMessage(message: string, success: boolean) {
     toastMessage = message;
@@ -350,6 +361,7 @@
       // 6. Pre-fill save dialog metadata
       composedAgentName = agent.name || '';
       composedAgentDescription = agent.description || '';
+      composedAgentIsPublic = agent.is_public || false;
       maxLoopIterations = config.max_loop_iterations || 5;
       topLevelEvalIds = config.eval_ids || [];
 
@@ -438,19 +450,21 @@
         savedAgent = await updateAgent(loadedAgentId, {
           name: agentName,
           description: agentDescription,
-          graph_config: graphConfig
+          graph_config: graphConfig,
+          is_public: composedAgentIsPublic
         });
         showToastMessage(`Agent "${savedAgent.name}" updated successfully!`, true);
-        dispatch('agentUpdated', savedAgent);
+        onagentUpdated?.(savedAgent);
       } else {
         const agentData: AgentCreateData = {
           name: agentName,
           description: agentDescription,
-          graph_config: graphConfig
+          graph_config: graphConfig,
+          is_public: composedAgentIsPublic
         };
         savedAgent = await createAgent(userId, agentData);
         showToastMessage(`Composed agent "${savedAgent.name}" created successfully!`, true);
-        dispatch('agentCreated', savedAgent);
+        onagentCreated?.(savedAgent);
       }
 
       // Reset state
@@ -458,11 +472,12 @@
       loadedAgentId = null;
       composedAgentName = '';
       composedAgentDescription = '';
+      composedAgentIsPublic = false;
       topLevelEvalIds = [];
       agentNodes = [createStartNode()];
       agentEdges = [];
 
-      dispatch('back');
+      onback?.();
 
     } catch (error) {
       showToastMessage(`Failed to save composed agent: ${error}`, false);
@@ -485,7 +500,7 @@
   }
 
   function handleBack() {
-    dispatch('back');
+    onback?.();
   }
 </script>
 
@@ -522,7 +537,7 @@
           {#each getAgentTemplatesList() as template}
             <button
               class="agent-type-item"
-              onclick={() => dispatch('configureNewAgent', { template })}
+              onclick={() => onconfigureNewAgent?.({ template })}
               style="border-left-color: {template.color};"
               type="button"
             >
@@ -666,6 +681,32 @@
         <div class="form-field">
           <Label for="composedAgentDesc">Description</Label>
           <Input id="composedAgentDesc" bind:value={composedAgentDescription} placeholder="Describe what this agent does..." />
+        </div>
+
+        <div class="form-field">
+          <Label>Public</Label>
+          <div class="public-radio-group">
+            <label class="public-radio-label">
+              <input
+                type="radio"
+                name="composedAgentPublic"
+                value={false}
+                checked={!composedAgentIsPublic}
+                onchange={() => composedAgentIsPublic = false}
+              />
+              <span>No</span>
+            </label>
+            <label class="public-radio-label">
+              <input
+                type="radio"
+                name="composedAgentPublic"
+                value={true}
+                checked={composedAgentIsPublic}
+                onchange={() => composedAgentIsPublic = true}
+              />
+              <span>Yes</span>
+            </label>
+          </div>
         </div>
 
         {#if agentEdges.filter(e => e.source !== START_NODE_ID).length > agentNodes.filter(n => n.type !== 'startNode').length - 1}
@@ -1022,6 +1063,25 @@
 
   .form-field {
     margin-bottom: 16px;
+  }
+
+  .public-radio-group {
+    display: flex;
+    gap: 16px;
+    margin-top: 6px;
+  }
+
+  .public-radio-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #333;
+  }
+
+  .public-radio-label input[type="radio"] {
+    cursor: pointer;
   }
 
   .agent-summary {

@@ -92,6 +92,7 @@
   // Flow save state
   let flowName = $state('');
   let flowDescription = $state('');
+  let flowIsPublic = $state(false);
   let showSaveDialog = $state(false);
   let isSaving = $state(false);
 
@@ -145,6 +146,7 @@
   let newAgentSelectedTools: number[] = $state([]);
   let newAgentSelectedEvals: number[] = $state([]);
   let newAgentLLMProvider = $state('');
+  let newAgentIsPublic = $state(false);
   let isCreatingAgent = $state(false);
   let showGeneratePromptAI = $state(false);
   let promptAdditionalInstructions = $state('');
@@ -477,7 +479,7 @@
           name: flowName,
           description: flowDescription,
           graph_config: graphConfig,
-          is_public: false,
+          is_public: flowIsPublic,
           user_id: data.user?.id || 1,  // Use user ID or default to 1
           conda_env: selectedCondaEnv || undefined  // Store conda env as separate field
         };
@@ -497,6 +499,7 @@
         showSaveDialog = false;
         flowName = '';
         flowDescription = '';
+        flowIsPublic = false;
       }
 
     } catch (error) {
@@ -1215,6 +1218,7 @@
       const agentData: AgentCreateData = {
         name: newAgentName.trim(),
         description: newAgentDescription.trim(),
+        is_public: newAgentIsPublic,
         graph_config: {
           nodes: {
             "main": {
@@ -1430,6 +1434,7 @@
     newAgentSelectedTools = [];
     newAgentSelectedEvals = [];
     newAgentLLMProvider = '';
+    newAgentIsPublic = false;
     showGeneratePromptAI = false;
     promptAdditionalInstructions = '';
     isGeneratingPrompt = false;
@@ -1449,8 +1454,8 @@
     );
   }
 
-  function handleAgentUpdatedFromBuilder(event: CustomEvent<Agent>) {
-    data.agents = data.agents.map(a => a.id === event.detail.id ? event.detail : a);
+  function handleAgentUpdatedFromBuilder(agent: Agent) {
+    data.agents = data.agents.map(a => a.id === agent.id ? agent : a);
   }
 
   // Agent Builder handlers
@@ -1458,16 +1463,16 @@
     builderMode.setAgent();
   }
 
-  function handleAgentCreated(event: CustomEvent<Agent>) {
-    data.agents = [...data.agents, event.detail];
+  function handleAgentCreated(agent: Agent) {
+    data.agents = [...data.agents, agent];
   }
 
   function handleAgentBuilderBack() {
     builderMode.setFlow();
   }
 
-  function handleConfigureNewAgent(event: CustomEvent<{ template: AgentTemplate }>) {
-    const { template } = event.detail;
+  function handleConfigureNewAgent(detail: { template: AgentTemplate }) {
+    const { template } = detail;
     pendingAgentTemplate = template;
     isConfiguringComplexNode = true;
     newAgentName = template.name;
@@ -1477,6 +1482,7 @@
     newAgentSelectedTools = [];
     newAgentSelectedEvals = [];
     newAgentLLMProvider = '';
+    newAgentIsPublic = false;
     newAgentOutputPaths = [];
     showCreateAgentModal = true;
   }
@@ -1788,10 +1794,10 @@
       agents={data.agents}
       evaluations={data.evaluations}
       userId={data.user?.id || 1}
-      on:back={handleAgentBuilderBack}
-      on:agentCreated={handleAgentCreated}
-      on:agentUpdated={handleAgentUpdatedFromBuilder}
-      on:configureNewAgent={handleConfigureNewAgent}
+      onback={handleAgentBuilderBack}
+      onagentCreated={handleAgentCreated}
+      onagentUpdated={handleAgentUpdatedFromBuilder}
+      onconfigureNewAgent={handleConfigureNewAgent}
     />
   {/if}
 
@@ -1813,6 +1819,32 @@
           <div class="form-field">
             <Label for="flowDesc">Description</Label>
             <Input id="flowDesc" bind:value={flowDescription} placeholder="Describe what this flow does..." />
+          </div>
+
+          <div class="form-field">
+            <Label>Public</Label>
+            <div class="create-tool-radio-group">
+              <label class="create-tool-radio-label">
+                <input
+                  type="radio"
+                  name="flowPublic"
+                  value={false}
+                  checked={!flowIsPublic}
+                  onchange={() => flowIsPublic = false}
+                />
+                <span>No</span>
+              </label>
+              <label class="create-tool-radio-label">
+                <input
+                  type="radio"
+                  name="flowPublic"
+                  value={true}
+                  checked={flowIsPublic}
+                  onchange={() => flowIsPublic = true}
+                />
+                <span>Yes</span>
+              </label>
+            </div>
           </div>
         </div>
 
@@ -2072,6 +2104,33 @@
                 placeholder="Describe what this agent does..."
               />
             </div>
+            {#if !isConfiguringComplexNode}
+              <div class="create-tool-form-row">
+                <label class="create-tool-label">Public</label>
+                <div class="create-tool-radio-group">
+                  <label class="create-tool-radio-label">
+                    <input
+                      type="radio"
+                      name="agentPublic"
+                      value={false}
+                      checked={!newAgentIsPublic}
+                      onchange={() => newAgentIsPublic = false}
+                    />
+                    <span>No</span>
+                  </label>
+                  <label class="create-tool-radio-label">
+                    <input
+                      type="radio"
+                      name="agentPublic"
+                      value={true}
+                      checked={newAgentIsPublic}
+                      onchange={() => newAgentIsPublic = true}
+                    />
+                    <span>Yes</span>
+                  </label>
+                </div>
+              </div>
+            {/if}
           </div>
 
           <!-- System Prompt Section -->
