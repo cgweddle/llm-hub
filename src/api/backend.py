@@ -28,6 +28,7 @@ from src.database.database import (
 )
 from src.utils import load_llm_provider_config, save_llm_provider_config
 from src.utils.environment import is_hosted
+from src.database.database import get_user_llm_provider_configs, sync_user_llm_configs
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.executors.flow_executor import FlowExecutor
@@ -36,9 +37,27 @@ from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from src.factories.pigar_import_detector import detect_required_packages
 
 
+def load_request_llm_config(user_id: Optional[int], session=None) -> Dict[str, Any]:
+    """Load the `{"models": [...]}` config for a request.
+
+    HOSTED: reads decrypted per-user rows from llm_provider_configs.
+    LOCAL:  reads ~/.llm_hub/config.yaml.
+    """
+    if is_hosted() and user_id is not None:
+        owns_session = session is None
+        if owns_session:
+            session = db_manager.get_session()
+        try:
+            return {"models": get_user_llm_provider_configs(session, user_id)}
+        finally:
+            if owns_session:
+                session.close()
+    return load_llm_provider_config()
+
+
 def _resolve_llm_config(model_name: str, user_id: Optional[int] = None) -> Dict[str, Any]:
     """Resolve a single LLM config dict by name for the given user."""
-    config = load_llm_provider_config(user_id=user_id)
+    config = load_request_llm_config(user_id)
     for m in config.get("models", []):
         if m.get("name") == model_name:
             return m
@@ -441,7 +460,7 @@ async def execute_agent_endpoint(
     """
     try:
         # Load the user's LLM config once for this request
-        llm_config = load_llm_provider_config(user_id=request.user_id)
+        llm_config = load_request_llm_config(request.user_id, db)
         executor = AgentExecutor(db, llm_config=llm_config)
 
         # Handle streaming requests
@@ -655,19 +674,15 @@ def create_python_script_tool_endpoint(tool_data: PythonScriptToolCreate, user_i
             script_code=tool_data.script_code,
             tool_name=tool_data.name,
             tool_description=tool_data.description,
-            user_id=user_id
+            user_id=user_id,
+            is_public=tool_data.is_public
         )
-        
+
         # Fetch the created tool
         created_tool = get_tool_by_id(db, tool_id)
         if not created_tool:
             raise HTTPException(status_code=500, detail="Tool was created but could not be retrieved")
-        
-        # Update is_public if needed (factory doesn't handle this)
-        if created_tool.is_public != tool_data.is_public:
-            update_tool(db, tool_id, is_public=tool_data.is_public)
-            created_tool = get_tool_by_id(db, tool_id)
-        
+
         return created_tool
         
     except ValueError as e:
@@ -993,7 +1008,7 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
             return {"execution_id": execution.id, "status": "pending"}
 
         # Local: synchronous path (unchanged behavior)
-        llm_config = load_llm_provider_config(user_id=request.user_id)
+        llm_config = load_request_llm_config(request.user_id, db)
         executor = FlowExecutor(db, flow_id, user_id=request.user_id, llm_config=llm_config, agent_llms=request.agent_llms)
         result = executor.execute_flow(request.initial_input, request.conda_env)
         return result
@@ -1006,7 +1021,7 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
 def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, user_id: int = 1, db: Session = Depends(get_db)):
     """Resume a failed flow"""
     try:
-        llm_config = load_llm_provider_config(user_id=user_id)
+        llm_config = load_request_llm_config(user_id, db)
         executor = FlowExecutor(db, flow_id, user_id=user_id, llm_config=llm_config)
         result = executor.resume_flow(flow_id, execution_trace, resume_input)
         return result
@@ -1171,7 +1186,7 @@ def get_llm_providers_config(user_id: Optional[int] = Query(None)):
     try:
         from src.utils import mask_credentials
 
-        config = load_llm_provider_config(user_id=user_id)
+        config = load_request_llm_config(user_id)
 
         # Mask sensitive credentials before sending to frontend
         config['models'] = mask_credentials(config.get('models', []))
@@ -1194,14 +1209,21 @@ def save_llm_providers_config(config: LLMProvidersConfigRequest, user_id: Option
         models_list = [model.model_dump() for model in config.models]
 
         # Load existing config to restore any masked credentials
-        existing_config = load_llm_provider_config(user_id=user_id)
+        existing_config = load_request_llm_config(user_id)
         existing_models = existing_config.get('models', [])
 
         # Restore masked credentials (if any)
         models_list = restore_masked_credentials(models_list, existing_models)
 
-        # Save config
-        save_llm_provider_config(models=models_list, user_id=user_id)
+        # Save config: DB in HOSTED, YAML in LOCAL
+        if is_hosted() and user_id is not None:
+            session = db_manager.get_session()
+            try:
+                sync_user_llm_configs(session, user_id, models_list)
+            finally:
+                session.close()
+        else:
+            save_llm_provider_config(models_list)
 
         return {
             "status": "success",
@@ -1311,7 +1333,7 @@ async def evaluate_execution_endpoint(execution_id: int, data: EvaluateRequest, 
         raise HTTPException(status_code=400, detail="Execution has no LangFuse trace — cannot evaluate")
 
     from src.executors.evaluation_executor import EvaluationExecutor
-    llm_config = load_llm_provider_config(user_id=data.user_id)
+    llm_config = load_request_llm_config(data.user_id, db)
     executor = EvaluationExecutor(db, llm_config=llm_config)
 
     results = []

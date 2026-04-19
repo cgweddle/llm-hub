@@ -24,8 +24,10 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY src/ ./src/
+COPY deploy/flow-runner/entrypoint.sh /usr/local/bin/flow-runner-entrypoint.sh
 
-RUN mkdir -p /home/llmhub/.llm_hub && \
+RUN chmod +x /usr/local/bin/flow-runner-entrypoint.sh && \
+    mkdir -p /home/llmhub/.llm_hub && \
     chown -R llmhub:llmhub /app /home/llmhub
 
 USER llmhub
