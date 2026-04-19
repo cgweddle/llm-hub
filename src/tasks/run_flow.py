@@ -1,10 +1,10 @@
 """
 Flow execution entrypoint that runs inside the flow-runner Podman container.
 
-Invoked by: `podman run llmhub-flow-runner python -m src.tasks.run_flow`
-
-Reads task parameters from environment variables (set by the Celery worker via
-`podman run -e`), opens its own DB session, and calls FlowExecutor.
+Invoked by deploy/flow-runner/entrypoint.sh after the entrypoint materializes
+~/.llm_hub/config.yaml from the worker-supplied env var. Reads task parameters
+from environment variables (set by the Celery worker via `podman run -e`),
+loads LLM config from the YAML, opens its own DB session, and calls FlowExecutor.
 
 Exits 0 on successful flow completion, non-zero on failure.
 """
@@ -27,7 +27,6 @@ def main() -> int:
         initial_input = json.loads(os.environ["FLOW_RUNNER_INITIAL_INPUT"])
         conda_env = os.environ.get("FLOW_RUNNER_CONDA_ENV") or None
         agent_llms = json.loads(os.environ.get("FLOW_RUNNER_AGENT_LLMS", "{}"))
-        llm_config = json.loads(os.environ.get("FLOW_RUNNER_LLM_CONFIG", '{"models": []}'))
     except (KeyError, ValueError) as e:
         logger.error("Missing or invalid flow-runner env vars: %s", e)
         return 2
@@ -36,6 +35,9 @@ def main() -> int:
     from src.database.database import update_execution
     from src.executors.flow_executor import FlowExecutor
     from src.tasks.install_required_packages import install_required_packages_for_flow
+    from src.utils.llm_config import load_llm_provider_config
+
+    llm_config = load_llm_provider_config()
 
     session = DatabaseManager().get_session()
     try:

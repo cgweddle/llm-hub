@@ -194,7 +194,8 @@ class PythonScriptToolFactory:
         self.schema_generator = TypeSchemaGenerator()
 
     def create_tool_from_script(self, script_code: str, tool_name: str,
-                              tool_description: str, user_id: int = 1) -> int:
+                              tool_description: str, user_id: int = 1,
+                              is_public: bool = False) -> int:
         """
         Create a tool in the database from a Python script
 
@@ -203,6 +204,7 @@ class PythonScriptToolFactory:
             tool_name: Name for the tool
             tool_description: Description of what the tool does
             user_id: User ID to associate with the tool
+            is_public: Whether the tool is visible to other users
 
         Returns:
             ID of created tool
@@ -243,7 +245,7 @@ class PythonScriptToolFactory:
                     input_schema=input_schema,
                     output_schema=output_schema,
                     required_packages=required_packages,
-                    is_public=True
+                    is_public=is_public
                 )
 
                 logger.info(f"Created tool '{tool_name}' with ID {tool.id}")

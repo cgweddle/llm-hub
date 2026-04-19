@@ -78,7 +78,6 @@ services:
       FLOWRUNNER_DB_PASSWORD: ${FLOWRUNNER_DB_PASSWORD:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     volumes:
-      - llm-config:/home/llmhub/.llm_hub
       - backend-logs:/app/logs
       - generated-scripts:/app/generated_scripts
     networks:
@@ -123,7 +122,6 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}
     volumes:
-      - llm-config:/home/llmhub/.llm_hub
       - backend-logs:/app/logs
       - generated-scripts:/app/generated_scripts
       # Host's (rootless) Podman socket — lets the worker spawn sibling
@@ -213,7 +211,6 @@ networks:
 
 volumes:
   pgdata:
-  llm-config:
   backend-logs:
   generated-scripts:
   caddy-data:

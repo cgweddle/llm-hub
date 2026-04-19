@@ -3,8 +3,6 @@ from typing import Optional, List, Dict, Any
 import os
 from pathlib import Path
 
-from .environment import is_hosted
-
 
 def load_model_config(config_path: Optional[str] = None) -> dict:
     """Load model configuration from YAML file"""
@@ -67,122 +65,35 @@ def _save_to_yaml(models: List[Dict[str, Any]]) -> None:
         raise IOError(f"Failed to save LLM config file: {e}")
 
 
-# --- Private DB helpers (hosted mode) ---
+# --- Public API (YAML-only; DB-backed per-user configs live in src/database/database.py) ---
 
-def _get_db_session():
-    """Get a database session for hosted mode."""
-    from src.database.database import get_session
-    return get_session()
-
-def _load_from_database(user_id: int) -> Dict[str, Any]:
-    """Load LLM provider configs from database for a specific user."""
-    from src.database.database import get_user_llm_provider_configs
-    session = _get_db_session()
-    try:
-        models = get_user_llm_provider_configs(session, user_id)
-        return {"models": models}
-    finally:
-        session.close()
-
-def _save_to_database(user_id: int, models: List[Dict[str, Any]]) -> None:
-    """Save LLM provider configs to database for a specific user.
-
-    Uses a sync strategy: update existing configs by name, create new ones,
-    delete configs that are no longer in the list.
-    """
-    from src.database.database import (
-        get_user_llm_provider_configs,
-        create_llm_provider_config,
-        update_llm_provider_config,
-        delete_llm_provider_config,
-    )
-    session = _get_db_session()
-    try:
-        existing = get_user_llm_provider_configs(session, user_id)
-        existing_by_name = {m["name"]: m for m in existing}
-        new_names = {m.get("name") for m in models}
-
-        # Delete configs no longer in the list
-        for existing_model in existing:
-            if existing_model["name"] not in new_names:
-                delete_llm_provider_config(session, existing_model["id"])
-
-        # Create or update
-        for model in models:
-            name = model.get("name")
-            if name in existing_by_name:
-                # Update existing
-                config_id = existing_by_name[name]["id"]
-                update_llm_provider_config(session, config_id,
-                    name=model.get("name"),
-                    provider=model.get("provider"),
-                    model=model.get("model"),
-                    api_key=model.get("api_key"),
-                    base_url=model.get("base_url"),
-                )
-            else:
-                # Create new
-                create_llm_provider_config(session, user_id,
-                    name=model.get("name"),
-                    provider=model.get("provider"),
-                    model=model.get("model"),
-                    api_key=model.get("api_key"),
-                    base_url=model.get("base_url"),
-                )
-    finally:
-        session.close()
-
-
-# --- Public API (routes to YAML or DB based on environment) ---
-
-def load_llm_provider_config(user_id: Optional[int] = None) -> Dict[str, Any]:
-    """Load LLM provider configuration.
-
-    In hosted mode with a user_id, loads from the database.
-    Otherwise, loads from ~/.llm_hub/config.yaml.
-    """
-    if is_hosted() and user_id is not None:
-        return _load_from_database(user_id)
+def load_llm_provider_config() -> Dict[str, Any]:
+    """Load LLM provider configuration from ~/.llm_hub/config.yaml."""
     return _load_from_yaml()
 
-def save_llm_provider_config(models: List[Dict[str, Any]], user_id: Optional[int] = None) -> None:
-    """Save LLM provider configuration.
+def save_llm_provider_config(models: List[Dict[str, Any]]) -> None:
+    """Save LLM provider configuration to ~/.llm_hub/config.yaml."""
+    _save_to_yaml(models)
 
-    In hosted mode with a user_id, saves to the database.
-    Otherwise, saves to ~/.llm_hub/config.yaml.
-    """
-    if is_hosted() and user_id is not None:
-        _save_to_database(user_id, models)
-    else:
-        _save_to_yaml(models)
-
-def get_llm_config_by_name(model_name: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    """Get a specific LLM configuration by its name.
-
-    Args:
-        model_name: Name of the LLM configuration (e.g., "Production Claude")
-        user_id: User ID for hosted mode DB lookup. Ignored in local mode.
+def get_llm_config_by_name(model_name: str) -> Optional[Dict[str, Any]]:
+    """Get a specific LLM configuration by its name from ~/.llm_hub/config.yaml.
 
     Returns:
         Dict with name, provider, model, api_key, base_url — or None if not found.
     """
     try:
-        config = load_llm_provider_config(user_id=user_id)
-        models = config.get("models", [])
-
-        for model_config in models:
+        config = load_llm_provider_config()
+        for model_config in config.get("models", []):
             if model_config.get("name") == model_name:
                 return model_config
-
         return None
-
     except Exception as e:
         raise ValueError(f"Failed to get LLM config for '{model_name}': {e}")
 
-def resolve_model_name(llm_provider: str, user_id: Optional[int] = None) -> str:
+def resolve_model_name(llm_provider: str) -> str:
     """Resolve an LLM provider name to a 'provider:model' string for PydanticAI.
     Also sets api_key/base_url as env vars so PydanticAI can pick them up."""
-    model_config = get_llm_config_by_name(llm_provider, user_id=user_id)
+    model_config = get_llm_config_by_name(llm_provider)
     if not model_config:
         raise ValueError(f"LLM provider '{llm_provider}' not found in config")
 
