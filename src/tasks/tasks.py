@@ -78,7 +78,7 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
     with PodmanClient(base_url=PODMAN_SOCKET_URI) as client:
         container = client.containers.create(
             image=FLOW_RUNNER_IMAGE,
-            command=["python", "-m", "src.tasks.run_flow"],
+            command=["/usr/local/bin/flow-runner-entrypoint.sh"],
             environment=env,
             network_mode="bridge",
             mem_limit=FLOW_RUNNER_MEMORY,
@@ -127,6 +127,48 @@ def _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_
         session.close()
 
 
+def _collect_needed_providers(flow_id: int, agent_llms: Dict[str, str]) -> set:
+    """Return the set of llm_provider names this flow can reach at runtime.
+
+    Union of per-node overrides (agent_llms) and the llm_provider baked into
+    each agent sub-node's graph_config. Scoping the config this way keeps the
+    YAML written into the flow-runner container minimal.
+    """
+    from src.database.database_setup import Flow, Agent
+
+    providers = set(agent_llms.values()) if agent_llms else set()
+
+    session = DatabaseManager().get_session()
+    try:
+        flow = session.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow or not flow.graph_config:
+            return providers
+
+        agent_ids = set()
+        for node_info in flow.graph_config.get("nodes", {}).values():
+            if node_info.get("node_type") != "agent":
+                continue
+            agent_id = node_info.get("agent_id") or node_info.get("id")
+            if agent_id:
+                agent_ids.add(agent_id)
+
+        if not agent_ids:
+            return providers
+
+        agents = session.query(Agent).filter(Agent.id.in_(agent_ids)).all()
+        for agent in agents:
+            if not agent.graph_config:
+                continue
+            for sub_node in agent.graph_config.get("nodes", {}).values():
+                provider = sub_node.get("llm_provider")
+                if provider:
+                    providers.add(provider)
+    finally:
+        session.close()
+
+    return providers
+
+
 def _mark_failed_if_still_running(execution_id: int, reason: str):
     """
     Safety net: if the flow-runner container died without updating the DB
@@ -163,22 +205,23 @@ def execute_flow_task(
     Execute a flow, either inside a Podman container (production default) or
     inline in the worker (set FLOW_RUNNER_USE_PODMAN=false to opt out).
     """
-    from src.utils import load_llm_provider_config
+    from src.database.database import get_user_llm_provider_configs
 
     agent_llms = agent_llms or {}
     use_podman = os.getenv("FLOW_RUNNER_USE_PODMAN", "true").lower() == "true"
 
     # Resolve LLM credentials in the worker so the flow-runner never needs
-    # the encryption key or access to llm_provider_configs.
-    llm_config = load_llm_provider_config(user_id=user_id)
-    needed_providers = set(agent_llms.values()) if agent_llms else set()
-    if needed_providers:
-        llm_config["models"] = [
-            m for m in llm_config.get("models", [])
-            if m.get("name") in needed_providers
-        ]
-    else:
-        llm_config = {"models": []}
+    # the encryption key or access to llm_provider_configs. The worker only
+    # runs in HOSTED deployments, so we read the DB directly.
+    session = DatabaseManager().get_session()
+    try:
+        models = get_user_llm_provider_configs(session, user_id)
+    finally:
+        session.close()
+    needed_providers = _collect_needed_providers(flow_id, agent_llms)
+    llm_config = {
+        "models": [m for m in models if m.get("name") in needed_providers]
+    }
 
     if not use_podman:
         try:

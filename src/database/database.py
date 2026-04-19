@@ -512,3 +512,38 @@ def delete_llm_provider_config(session: Any, config_id: int) -> bool:
         session.commit()
         return True
     return False
+
+def sync_user_llm_configs(session: Any, user_id: int, models: List[Dict[str, Any]]) -> None:
+    """Sync a user's LLM provider configs to match the given list.
+
+    Diffs by `name`: updates existing names, creates new ones, deletes absent ones.
+    Matches the POST /llm-providers/config semantics the UI relies on.
+    """
+    existing = get_user_llm_provider_configs(session, user_id)
+    existing_by_name = {m["name"]: m for m in existing}
+    new_names = {m.get("name") for m in models}
+
+    for existing_model in existing:
+        if existing_model["name"] not in new_names:
+            delete_llm_provider_config(session, existing_model["id"])
+
+    for model in models:
+        name = model.get("name")
+        if name in existing_by_name:
+            update_llm_provider_config(
+                session, existing_by_name[name]["id"],
+                name=model.get("name"),
+                provider=model.get("provider"),
+                model=model.get("model"),
+                api_key=model.get("api_key"),
+                base_url=model.get("base_url"),
+            )
+        else:
+            create_llm_provider_config(
+                session, user_id,
+                name=model.get("name"),
+                provider=model.get("provider"),
+                model=model.get("model"),
+                api_key=model.get("api_key"),
+                base_url=model.get("base_url"),
+            )
