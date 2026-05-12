@@ -22,7 +22,7 @@ Features:
 
 import logging
 from datetime import datetime
-from typing import Dict, Any, AsyncGenerator, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List
 
 from sqlalchemy.orm import Session
 
@@ -154,79 +154,6 @@ class AgentExecutor:
             self.retry_config = None
             if enable_retry and not RETRY_AVAILABLE:
                 logger.warning("Retry requested but retry utilities not available")
-
-    async def execute_agent(
-        self,
-        agent_id: int,
-        user_id: int,
-        input_data: str,
-        llm_provider: str,
-        stream: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Execute a standalone agent and store results in the database.
-        Creates a top-level Execution(type='agent'). Internal tool call
-        tracing is handled automatically by LangFuse.
-        """
-        agent_record = get_agent_by_id(self.session, agent_id)
-        if not agent_record:
-            raise ValueError(f"Agent with ID {agent_id} not found")
-
-        graph_config = agent_record.graph_config
-        if not graph_config:
-            raise ValueError(f"Agent {agent_id} has no graph_config")
-
-        logger.info(
-            f"Executing agent: {agent_record.name} "
-            f"(nodes: {len(graph_config.get('nodes', {}))}, user: {user_id}, stream: {stream})"
-        )
-
-        # Create top-level execution record
-        execution = create_execution(
-            self.session,
-            user_id=user_id,
-            agent_id=agent_id,
-            execution_type='agent',
-            name=agent_record.name,
-            input_data={"input": input_data},
-            status='running',
-            started_at=datetime.now()
-        )
-
-        try:
-            # Handle streaming for single-node agents
-            if stream:
-                nodes = graph_config.get("nodes", {})
-                if len(nodes) == 1:
-                    return await self._execute_single_node_stream(
-                        graph_config, input_data, execution, llm_provider
-                    )
-                # Multi-node streaming not supported — fall through to normal execution
-                logger.warning("Streaming not supported for multi-node agents, using non-streaming")
-
-            # Unified graph execution
-            result = await self._execute_graph(graph_config, input_data, execution, llm_provider=llm_provider)
-
-            update_execution(self.session, execution.id,
-                status='completed',
-                output_data={
-                    "result": result.get("result", ""),
-                    "model": result.get("model", ""),
-                    "cost": result.get("cost")
-                },
-                completed_at=datetime.now()
-            )
-            logger.info(f"Agent execution completed: {execution.id}")
-            return result
-
-        except Exception as e:
-            update_execution(self.session, execution.id,
-                status='failed',
-                error_message=str(e),
-                completed_at=datetime.now()
-            )
-            logger.error(f"Agent execution failed: {e}")
-            raise RuntimeError(f"Agent execution failed: {e}")
 
     async def execute_agent_node(
         self,
@@ -602,76 +529,6 @@ class AgentExecutor:
         except ImportError:
             logger.warning("PydanticAI tool converter not available")
 
-    async def _execute_single_node_stream(
-        self,
-        graph_config: Dict[str, Any],
-        input_data: str,
-        execution: Execution,
-        llm_provider: str,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Stream execution for single-node PydanticAI agents.
-        LangFuse captures the full trace automatically.
-        """
-        nodes_config = graph_config.get("nodes", {})
-        entry_point = graph_config.get("entry_point")
-        node_config = nodes_config.get(entry_point, {})
-
-        from pydantic_ai import Agent
-
-        input_data = self._apply_user_prompt(node_config, input_data)
-
-        model_name = self._resolve_model_name(llm_provider)
-
-        # Fetch tool records for template resolution and registration
-        tool_ids = node_config.get("tool_ids", [])
-        tool_records = [get_tool_by_id(self.session, tid) for tid in tool_ids]
-        tool_records = [t for t in tool_records if t is not None]
-
-        system_prompt = node_config.get("system_prompt", "You are a helpful assistant.")
-        system_prompt = resolve_system_prompt_template(system_prompt, node_config, tool_records)
-
-        agent = Agent(
-            model=model_name,
-            system_prompt=system_prompt,
-        )
-
-        if tool_ids:
-            self._register_tools_on_agent(agent, tool_ids)
-
-        async with agent.run_stream(input_data) as stream:
-            async for message in stream:
-                yield {
-                    "type": "message",
-                    "content": str(message.content) if hasattr(message, 'content') else str(message),
-                    "timestamp": datetime.now().isoformat(),
-                    "execution_id": execution.id
-                }
-
-            result = await stream.result()
-
-            result_data = result.output
-            if hasattr(result_data, 'model_dump'):
-                result_data = result_data.model_dump()
-
-            cost = self._extract_cost(result)
-
-            update_execution(self.session, execution.id,
-                status='completed',
-                output_data={
-                    "result": result_data,
-                    "cost": cost
-                },
-                completed_at=datetime.now()
-            )
-
-            yield {
-                "type": "complete",
-                "result": result_data,
-                "cost": cost,
-                "execution_id": execution.id
-            }
-
     def _resolve_model_name(self, llm_provider: str) -> str:
         """Resolve an LLM provider name to a model string for PydanticAI.
         Also sets api_key/base_url as env vars so PydanticAI can pick them up.
@@ -718,16 +575,3 @@ class AgentExecutor:
         except Exception as e:
             logger.warning(f"Could not extract cost information: {e}")
             return None
-
-
-# Convenience function for direct usage
-async def execute_agent_by_id(
-    agent_id: int,
-    user_id: int,
-    input_data: str,
-    session: Session,
-    stream: bool = False
-) -> Dict[str, Any]:
-    """Convenience function to execute an agent."""
-    executor = AgentExecutor(session)
-    return await executor.execute_agent(agent_id, user_id, input_data, stream)

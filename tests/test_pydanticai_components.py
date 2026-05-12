@@ -669,22 +669,6 @@ class TestPydanticAIAgentFactory:
 class TestAgentExecutor:
     """Tests for unified agent executor"""
 
-    @pytest.mark.asyncio
-    @patch('executors.agent_executor.get_agent_by_id')
-    async def test_execute_agent_not_found(self, mock_get_agent):
-        """Test execution fails when agent not found"""
-        mock_get_agent.return_value = None
-
-        session = MockSession()
-        executor = AgentExecutor(session)
-
-        with pytest.raises(ValueError, match="not found"):
-            await executor.execute_agent(
-                agent_id=999,
-                user_id=1,
-                input_data="Test"
-            )
-
     def test_extract_cost_with_cost_info(self):
         """Test cost extraction from result"""
         session = MockSession()

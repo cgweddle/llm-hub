@@ -1,3 +1,7 @@
+
+
+
+
 """
 PydanticAI Agent Factory
 Creates PydanticAI agents from database configurations or node config dicts.
@@ -6,8 +10,8 @@ Creates PydanticAI agents from database configurations or node config dicts.
 import logging
 import os
 import sys
-from typing import Dict, Any, List, Optional, Type, Union
-from pydantic import BaseModel
+from typing import Dict, Any, List, Optional, Tuple, Type, Union
+from pydantic import create_model
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.openai import OpenAIModel
@@ -21,12 +25,152 @@ from converters.pydanticai_tool_converter import PydanticAIToolConverter
 
 logger = logging.getLogger(__name__)
 
-# Maps provider names to their PydanticAI model class
-PROVIDER_MAP = {
-    "anthropic": AnthropicModel,
-    "openai": OpenAIModel,
-    "lmstudio": OpenAIModel,
-}
+
+@dataclass
+class BuiltAgent:
+    agent: Agent
+    class_to_path: Optional[Dict[str, str]] = None
+
+def _get_path_description(path_config) -> str:
+    if isinstance(path_config, str):
+        return path_config
+    return path_config.get("descriptmion", "")
+
+class PydanticAIAgentFactory:
+    def __init__(self, session=None):
+        self.session = session or get_session()
+        self.tool_converter = PydanticAIToolConverter(self.session)
+    
+    def build_from_node_config(
+        self,
+        node_config: Dict[str, Any],
+        llm_provider: str,
+    ) -> BuiltAgent:
+        model_name = self._resolve_model_name(llm_provider)
+
+        tool_ids = node_config.get("tool_ids", [])
+        tools = [get_tool_by_id(self.session, tid) for tid in tool_ids]
+        tools = [t for t in tools if t is not None]
+
+        system_prompt = node_config.get("system_prompt", "")
+        system_prompt = resolve_system_prompt_template(system_prompt, node_config, tools)
+
+        output_paths = node_config.get("output_paths")
+        output_type, class_to_path = self._build_output_paths(output_paths)
+        if output_paths:
+            system_prompt - self._append_routing_instructions(system_prompt, output_paths)
+        
+        agent_kwargs: Dict[str, Any] = {"model": model_name, "system_prompt": system_prompt}
+        if output_type is not None:
+            agent_kwargs["output_type"] = output_type
+        
+        agent = Agent(**agent_kwargs)
+
+        if tools:
+            self._register_tools(agent, tools)
+        
+        return BuiltAgent(agent=agent, class_to_path=class_to_path)
+
+
+    def build_from_database(self, agent_id: int, llm_provider: str) -> BuiltAgent:
+        agent_record = get_agent_by_id(self.session, agent_id)
+        if not agent_record:
+            raise ValueError(f"Agent with ID {agent_id} not found")
+        
+        graph_config = agent_record.graph_config
+        if not graph_config:
+            raise ValueError(f"Agent {agent_id} has no graph_config")
+
+        entry_point = graph_config.get("entry_point")
+        nodes = graph_config.get("nodes", {})
+        node_config = nodes.get(entry_point) if entry_point else None
+
+        if not node_config:
+            raise ValueError(
+                f"Agent {agent_id} graph_config has no valid entry_point node. "
+                f"entry_point='{entry_point}', available nodes: {list(nodes.keys())}"
+            )
+        
+        return self.build_from_node_config(node_config, llm_provider)
+
+
+    def _resolve_model_name(self, llm_provider: str) -> str:
+        if not llm_provider:
+            raise ValueError(
+                "llm_provider is not required "
+            )
+        llm_config = get_llm_config_by_name(llm_provider)
+        if not llm_config:
+            raise ValueError(
+                f"LLM config '{llm_provider}' not found in ~/.llm_hub/config.yaml"
+                f"Configure it in the LLM Providers panel."
+            )
+        
+        provider = llm_config.get("provider")
+        model = llm_config.get("model")
+        api_key = llm_config.get("api_key")
+        base_url = llm_config.get("base_url")
+
+        if not provider or not model:
+            raise ValueError(f"LLM config '{llm_provider}' is missing provider or model")
+        
+        if provider == "lmstudio":
+            api_key = api_key or "lm-studio"
+            base_url = base_url or "http://localhost:1234/v1"
+            provider = "openai"
+
+        if api_key:
+            if provider == "anthropic":
+                os.environ["ANTHROPIC_API_KEY"] = api_key
+            else:
+                os.environ["OPENAI_API_KEY"] = api_key
+        if base_url:
+            os.environ["OPENAI_BASE_URL"] = base_url
+
+        return f"{provider}:{model}"
+    
+    def _build_output_paths(
+        self, output_paths: Optional[Dict[str, Any]]
+    ) -> Tuple[Optional[Type], Optional[Dict[str, str]]]:
+        if not output_paths:
+            return None, None
+        
+        models = []
+        class_to_path: Dict[str, str] = {}
+        for path_name, path_config in output_paths.items():
+            description = _get_path_description(path_config)
+            class_name = path_name.capitalize()
+            model = create_model(class_name, content=(str, ...), __doc__=description)
+            models.append(model)
+            class_to_path[class_name] = path_name
+        
+        if len(models) == 1:
+            return models[0], class_to_path
+        return Union[tuple(models)], class_to_path
+    
+    @staticmethod
+    def _append_routing_instructions(
+        system_prompt: str, output_paths: Dict[str, Any]
+    ) -> str:
+        lines = ["\n\nYou must choose one of the following output paths:"]
+        for path_name, path_config in output_paths.items():
+            description = _get_path_description(path_config)
+            lines.append(f'- "{path_name.capitalize()}": {description}')
+        return system_prompt + "\n".join(lines)
+    
+
+    def _register_tools(self, agent: Agent, tools: List[Any]) -> None:
+        for tool in tools:
+            try:
+                tool_func, _, _ = self.tool_converter.convert_tool(tool)
+                agent.tool_plain(tool_func)
+                logger.debug(f"Registered tool: {tool.name}")
+            except Exception as e:
+                logger.error(f"Failed to register tool '{tool.name}': {e}")
+
+            
+
+
 
 
 class PydanticAIAgentFactory:

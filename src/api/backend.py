@@ -122,19 +122,6 @@ class AgentUpdate(BaseModel):
     output_schema: Optional[dict] = None
     is_public: Optional[bool] = None
 
-class AgentExecuteRequest(BaseModel):
-    user_id: int
-    input_data: str
-    llm_provider: str
-    stream: bool = False
-
-class AgentExecuteResponse(BaseModel):
-    execution_id: int
-    status: str
-    result: Any
-    messages: List[Dict[str, Any]]
-    cost: Optional[Dict[str, Any]] = None
-
 class UserCreate(BaseModel):
     username: str
     email: EmailStr
@@ -429,94 +416,6 @@ def get_user_agents_endpoint(user_id: int, db: Session = Depends(get_db)):
         return get_user_agents(session=db, user_id=user_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user agents: {str(e)}")
-
-@app.post("/agents/{agent_id}/execute", response_model=AgentExecuteResponse)
-async def execute_agent_endpoint(
-    agent_id: int,
-    request: AgentExecuteRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Execute an agent (supports both Google ADK ReAct and PydanticAI agents).
-
-    This endpoint automatically detects the agent type and routes to the appropriate
-    executor. Supports both standard and streaming execution modes.
-
-    Args:
-        agent_id: ID of the agent to execute
-        request: AgentExecuteRequest with user_id, input_data, and optional stream flag
-        db: Database session (injected)
-
-    Returns:
-        AgentExecuteResponse with execution results
-
-    Example:
-        POST /agents/5/execute
-        {
-            "user_id": 1,
-            "input_data": "What is 2+2?",
-            "stream": false
-        }
-    """
-    try:
-        # Load the user's LLM config once for this request
-        llm_config = load_request_llm_config(request.user_id, db)
-        executor = AgentExecutor(db, llm_config=llm_config)
-
-        # Handle streaming requests
-        if request.stream:
-            async def stream_generator():
-                try:
-                    result = await executor.execute_agent(
-                        agent_id=agent_id,
-                        user_id=request.user_id,
-                        input_data=request.input_data,
-                        llm_provider=request.llm_provider,
-                        stream=True
-                    )
-
-                    # result is an async generator for streaming
-                    if hasattr(result, '__aiter__'):
-                        async for chunk in result:
-                            yield f"data: {json.dumps(chunk)}\n\n"
-                    else:
-                        # Fallback if not streaming (shouldn't happen but handle it)
-                        yield f"data: {json.dumps(result)}\n\n"
-
-                except Exception as e:
-                    error_chunk = {
-                        "type": "error",
-                        "error": str(e),
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    yield f"data: {json.dumps(error_chunk)}\n\n"
-
-            return StreamingResponse(
-                stream_generator(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                }
-            )
-
-        # Standard (non-streaming) execution
-        else:
-            result = await executor.execute_agent(
-                agent_id=agent_id,
-                user_id=request.user_id,
-                input_data=request.input_data,
-                llm_provider=request.llm_provider,
-                stream=False
-            )
-            return result
-
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.patch("/agents/{agent_id}", response_model=AgentResponse)
 def update_agent_endpoint(agent_id: int, agent_update: AgentUpdate, db: Session = Depends(get_db)):
