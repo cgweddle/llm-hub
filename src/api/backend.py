@@ -31,7 +31,7 @@ from src.utils.environment import is_hosted
 from src.database.database import get_user_llm_provider_configs, sync_user_llm_configs
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
-from src.executors.flow_executor import FlowExecutor
+from src.runners.flow_runner import FlowRunner
 from src.executors.agent_executor import AgentExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from src.factories.pigar_import_detector import detect_required_packages
@@ -908,8 +908,8 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
 
         # Local: synchronous path (unchanged behavior)
         llm_config = load_request_llm_config(request.user_id, db)
-        executor = FlowExecutor(db, flow_id, user_id=request.user_id, llm_config=llm_config, agent_llms=request.agent_llms)
-        result = executor.execute_flow(request.initial_input, request.conda_env)
+        runner = FlowRunner(db, flow_id, user_id=request.user_id, llm_config=llm_config, agent_llms=request.agent_llms)
+        result = runner.run(request.initial_input, request.conda_env)
         return result
     except HTTPException:
         raise
@@ -921,8 +921,8 @@ def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Opti
     """Resume a failed flow"""
     try:
         llm_config = load_request_llm_config(user_id, db)
-        executor = FlowExecutor(db, flow_id, user_id=user_id, llm_config=llm_config)
-        result = executor.resume_flow(flow_id, execution_trace, resume_input)
+        runner = FlowRunner(db, flow_id, user_id=user_id, llm_config=llm_config)
+        result = runner.resume(execution_trace, resume_input)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow resume failed: {str(e)}")
