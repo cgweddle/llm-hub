@@ -19,8 +19,7 @@ from typing import Dict, Any, Callable, Type, Optional, Tuple, List
 
 from pydantic import BaseModel, Field, create_model
 
-# Import type evaluation from tool_executor
-from executors.tool_executor import eval_type_string
+from src.runners.tool_runner import eval_type_string
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +156,7 @@ class PydanticAIToolConverter:
     ) -> Type[BaseModel]:
         """
         Convert Python type string schema to Pydantic model.
-        Uses eval_type_string from tool_executor.py for type resolution.
+        Uses eval_type_string from tool_runner.py for type resolution.
 
         Schema format:
         {
@@ -309,7 +308,7 @@ class PydanticAIToolConverter:
     def _compile_function_code(self, tool) -> Callable:
         """
         Compile tool's function code into an executable function.
-        Similar to create_executable_function() in tool_executor.py
+        Similar to compile_tool() in tool_runner.py
         """
         exec_globals = {
             '__builtins__': __builtins__,

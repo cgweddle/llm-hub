@@ -41,6 +41,7 @@
     createFlow,
     updateFlow,
     executeFlow,
+    resumeFlow,
     getFlowDetails,
     deleteFlow,
     deleteAgent,
@@ -102,6 +103,8 @@
   // Info panel state
   let showInfoPanel = $state(false);
   let lastExecutionId: number | null = $state(null);
+  let resumingFlow = $state(false);
+  let infoRefreshToken = $state(0);
   let evalsEnabled = $state(false);
   let evalsRunning = $state(false);
 
@@ -742,6 +745,39 @@
       console.error('Flow execution error:', error);
       validationSuccess = false;
       validationMessage = `Failed to execute flow: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
+  /**
+   * Resume the last failed flow run from its in-memory checkpoint.
+   * Only the failed/edited nodes and their downstream re-run; completed
+   * upstream results are reused from the server's retained state.
+   */
+  async function handleResumeFlow() {
+    if (!lastExecutionId || resumingFlow) return;
+    resumingFlow = true;
+    infoRefreshToken++;
+    try {
+      const result = await resumeFlow(lastExecutionId, data.user?.id || 1);
+      if (result.status === 'completed') {
+        if (evalsEnabled) {
+          runPostExecutionEvals(lastExecutionId);
+        }
+        validationSuccess = true;
+        validationMessage = `Flow completed! Output: ${JSON.stringify(result.final_output)}`;
+      } else {
+        validationSuccess = false;
+        validationMessage = `Flow failed: ${result.error}`;
+      }
+    } catch (error) {
+      console.error('Flow resume error:', error);
+      validationSuccess = false;
+      validationMessage = `${error instanceof Error ? error.message : error}`;
+    } finally {
+      resumingFlow = false;
+      infoRefreshToken++;
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
     }
@@ -1779,7 +1815,10 @@
           userId={data.user?.id || 1}
           evalsEnabled={evalsEnabled}
           {evalsRunning}
+          resuming={resumingFlow}
+          refreshToken={infoRefreshToken}
           onclose={() => showInfoPanel = false}
+          onresume={handleResumeFlow}
         />
       {/if}
     </div>

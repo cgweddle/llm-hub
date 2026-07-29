@@ -3,12 +3,14 @@ import sys
 import os
 import json
 import subprocess
+import time
+import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from passlib.hash import bcrypt
@@ -21,7 +23,7 @@ from src.database.database import (
     create_tool, get_user_tools, create_flow, get_user_flows,
     get_tool_by_id, update_tool, delete_tool, get_flow_by_id, update_flow, delete_flow,
     get_agent_by_id, update_agent, delete_agent,
-    get_execution_by_id, get_user_executions, create_execution,
+    get_execution_by_id, get_user_executions, create_execution, update_execution,
     create_evaluation, get_evaluations_by_user, get_evaluation_by_id,
     update_evaluation, delete_evaluation,
     create_evaluation_result, get_evaluation_results_by_execution,
@@ -31,7 +33,8 @@ from src.utils.environment import is_hosted
 from src.database.database import get_user_llm_provider_configs, sync_user_llm_configs
 from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
-from src.runners.flow_runner import FlowRunner
+from src.runners.local_flow_child import spawn_local_flow_child
+from src.runners.live_run_store import live_run_store
 from src.executors.agent_executor import AgentExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from src.factories.pigar_import_detector import detect_required_packages
@@ -865,12 +868,92 @@ def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
         "updated_at": flow.updated_at
     }
 
+def _watch_local_flow_child(child, execution_id: int, flow_id: int,
+                            prev_completed_at=None) -> dict:
+    """Sync facade over the per-run flow child: block this request's threadpool
+    thread until the run reaches a terminal status in the DB, then build the
+    same response shape the old in-process path returned.
+
+    The DB is the only child→backend channel. `prev_completed_at` is the
+    transition witness for resume: the pre-resume failure timestamp, so a
+    stale 'failed' row read before the child starts isn't mistaken for the
+    resume's outcome. Safety nets: a child that exits without writing a
+    terminal status is marked failed after a short grace; a run exceeding
+    FLOW_RUNNER_TIMEOUT_SECONDS is killed and marked failed.
+    """
+    overall_timeout = int(os.environ.get("FLOW_RUNNER_TIMEOUT_SECONDS", "3600"))
+    start = time.monotonic()
+    exit_grace_until = None
+
+    def _is_terminal(ex) -> bool:
+        if ex is None or ex.status not in ("completed", "failed"):
+            return False
+        if prev_completed_at is not None:
+            return ex.completed_at is not None and ex.completed_at != prev_completed_at
+        return True
+
+    while True:
+        session = db_manager.get_session()
+        try:
+            ex = get_execution_by_id(session, execution_id)
+            if _is_terminal(ex):
+                break
+            if time.monotonic() - start > overall_timeout:
+                child.shutdown()
+                update_execution(
+                    session, execution_id,
+                    status="failed",
+                    error_message=f"flow run exceeded {overall_timeout}s and was killed",
+                    completed_at=datetime.now(),
+                )
+                break
+            if not child.is_alive():
+                if exit_grace_until is None:
+                    exit_grace_until = time.monotonic() + 2.0
+                elif time.monotonic() > exit_grace_until:
+                    update_execution(
+                        session, execution_id,
+                        status="failed",
+                        error_message="flow process exited before reporting a result "
+                                      "(check the backend console for its traceback)",
+                        completed_at=datetime.now(),
+                    )
+                    break
+        finally:
+            session.close()
+        time.sleep(0.3)
+
+    session = db_manager.get_session()
+    try:
+        ex = get_execution_by_id(session, execution_id)
+        status = ex.status if ex else "failed"
+        result = {
+            "flow_id": flow_id,
+            "execution_id": execution_id,
+            "status": status,
+            "final_output": ex.children[-1].output_data if (status == "completed" and ex.children) else None,
+        }
+        if status == "failed":
+            result["error"] = ex.error_message if ex else "execution record missing"
+            if child.is_alive():
+                live_run_store.retain(child)
+        else:
+            try:
+                child.popen.wait(timeout=15)
+            except Exception:
+                pass
+        return result
+    finally:
+        session.close()
+
+
 @app.post("/flows/{flow_id}/execute")
 def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session = Depends(get_db)):
     """Execute a flow.
 
-    LOCAL: runs synchronously, returns the full result.
-    PRODUCTION: dispatches to Celery, returns 202 with execution_id for polling.
+    LOCAL: spawns a per-run child process in the flow's environment and blocks
+    until it finishes (same synchronous response as before). PRODUCTION:
+    dispatches to Celery, returns 202 with execution_id for polling.
     """
     try:
         # Persist conda_env on the flow if provided (same in both modes)
@@ -906,26 +989,154 @@ def execute_flow_endpoint(flow_id: int, request: FlowExecuteRequest, db: Session
 
             return {"execution_id": execution.id, "status": "pending"}
 
-        # Local: synchronous path (unchanged behavior)
-        llm_config = load_request_llm_config(request.user_id, db)
-        runner = FlowRunner(db, flow_id, user_id=request.user_id, llm_config=llm_config, agent_llms=request.agent_llms)
-        result = runner.run(request.initial_input, request.conda_env)
-        return result
+        # Local: per-run child process, synchronous facade over DB polling.
+        flow = get_flow_by_id(db, flow_id)
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+
+        execution = create_execution(
+            db,
+            user_id=request.user_id,
+            flow_id=flow_id,
+            execution_type='flow',
+            name=flow.name,
+            input_data=request.initial_input,
+            status='pending',
+            started_at=datetime.now(),
+        )
+        try:
+            child = spawn_local_flow_child(
+                flow_id,
+                request.user_id,
+                execution.id,
+                request.initial_input,
+                flow.conda_env,
+                request.agent_llms,
+            )
+        except Exception as e:
+            update_execution(
+                db, execution.id,
+                status="failed",
+                error_message=f"failed to start flow process: {e}",
+                completed_at=datetime.now(),
+            )
+            raise HTTPException(status_code=500, detail=f"Flow execution failed to start: {e}")
+
+        return _watch_local_flow_child(child, execution.id, flow_id)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flow execution failed: {str(e)}")
 
-@app.post("/flows/{flow_id}/resume")
-def resume_flow_endpoint(flow_id: int, execution_trace: list, resume_input: Optional[dict] = None, user_id: int = 1, db: Session = Depends(get_db)):
-    """Resume a failed flow"""
-    try:
-        llm_config = load_request_llm_config(user_id, db)
-        runner = FlowRunner(db, flow_id, user_id=user_id, llm_config=llm_config)
-        result = runner.resume(execution_trace, resume_input)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Flow resume failed: {str(e)}")
+class ExecutionResumeRequest(BaseModel):
+    user_id: int = 1
+
+
+@app.post("/executions/{execution_id}/resume")
+def resume_execution_endpoint(execution_id: int, request: ExecutionResumeRequest, db: Session = Depends(get_db)):
+    """Resume a failed flow run from its in-memory checkpoint.
+
+    LOCAL: signals the resident flow child over stdin and blocks until the DB
+    shows the outcome. HOSTED: publishes on redis 'resume:<execution_id>' for
+    the resident flow-runner container. 410 means the checkpoint is gone
+    (server restarted, superseded by a newer failure, or runner timed out).
+    """
+    ex = get_execution_by_id(db, execution_id)
+    if not ex:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if ex.status != "failed":
+        raise HTTPException(status_code=409, detail=f"Execution is '{ex.status}', not 'failed'")
+
+    if is_hosted():
+        import redis  # lazy, like the celery import in the execute endpoint
+        client = redis.Redis.from_url(os.environ["CELERY_BROKER_URL"])
+        try:
+            receivers = client.publish(f"resume:{execution_id}", "resume")
+        finally:
+            client.close()
+        if receivers == 0:
+            raise HTTPException(status_code=410, detail="Run is no longer resumable (runner has shut down). Re-run the flow.")
+        # Flip to running here so pollers never see the stale 'failed' state
+        # while the container processes the resume message.
+        update_execution(db, execution_id, status="running", error_message=None, completed_at=None)
+        return JSONResponse(status_code=202, content={"execution_id": execution_id, "status": "running"})
+
+    child = live_run_store.pop(execution_id)
+    if child is None:
+        raise HTTPException(status_code=410, detail="Run is no longer resumable (server restarted or checkpoint superseded). Re-run the flow.")
+    prev_completed_at = ex.completed_at
+    if not child.signal({"action": "resume"}):
+        child.shutdown()
+        raise HTTPException(status_code=410, detail="Run is no longer resumable (runner process has exited). Re-run the flow.")
+    return _watch_local_flow_child(child, execution_id, ex.flow_id, prev_completed_at=prev_completed_at)
+
+
+class ExecutionTestRequest(BaseModel):
+    node_id: str
+    user_id: int = 1
+
+
+@app.post("/executions/{execution_id}/test")
+def test_execution_node_endpoint(execution_id: int, request: ExecutionTestRequest, db: Session = Depends(get_db)):
+    """Test one tool node inside a resident failed run, against its real
+    ctx.state inputs.
+
+    Transient: the run's resident process executes the node's (re-fetched, so
+    freshly edited) tool and writes the outcome to the root execution's
+    execution_metadata["last_test_result"] — no execution rows are created.
+    This endpoint signals the resident process (stdin locally, redis hosted)
+    and polls that metadata field for the matching request_id. 410 means no
+    resident process holds this run anymore.
+    """
+    ex = get_execution_by_id(db, execution_id)
+    if not ex:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if ex.status != "failed":
+        raise HTTPException(status_code=409, detail=f"Execution is '{ex.status}', not 'failed' — only a resident failed run is testable")
+
+    request_id = uuid.uuid4().hex
+    message = {"action": "test", "node_id": request.node_id, "request_id": request_id}
+
+    if is_hosted():
+        import redis  # lazy, like the celery import in the execute endpoint
+        client = redis.Redis.from_url(os.environ["CELERY_BROKER_URL"])
+        try:
+            receivers = client.publish(
+                f"test:{execution_id}",
+                json.dumps({"node_id": request.node_id, "request_id": request_id}),
+            )
+        finally:
+            client.close()
+        if receivers == 0:
+            raise HTTPException(status_code=410, detail="Run is no longer resident (runner has shut down). Re-run the flow.")
+    else:
+        child = live_run_store.get(execution_id)
+        if child is None or not child.is_alive() or not child.signal(message):
+            raise HTTPException(status_code=410, detail="Run is no longer resident (server restarted or checkpoint superseded). Re-run the flow.")
+
+    # Aligned with the test's own execution timeout so a slow-but-valid test
+    # isn't abandoned; the margin covers signal latency and the DB write.
+    tool_timeout = int(os.environ.get("TOOL_TIMEOUT_SECONDS", "300"))
+    deadline = time.monotonic() + tool_timeout + 30
+    while time.monotonic() < deadline:
+        session = db_manager.get_session()
+        try:
+            row = get_execution_by_id(session, execution_id)
+            result = (row.execution_metadata or {}).get("last_test_result") if row else None
+            if result and result.get("request_id") == request_id:
+                return result
+        finally:
+            session.close()
+        time.sleep(0.3)
+
+    return {
+        "request_id": request_id,
+        "node_id": request.node_id,
+        "status": "error",
+        "error": "test did not report a result in time",
+        "error_type": "TimeoutError",
+    }
+
 
 @app.patch("/flows/{flow_id}", response_model=FlowResponse)
 def update_flow_endpoint(flow_id: int, flow_update: FlowUpdate, db: Session = Depends(get_db)):

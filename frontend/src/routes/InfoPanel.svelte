@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
-    fetchExecution, fetchExecutionTrace, fetchExecutionScores,
-    type ExecutionDetail, type TraceDetail, type LangFuseScore
+    fetchExecution, fetchExecutionTrace, fetchExecutionScores, testTool,
+    type ExecutionDetail, type TraceDetail, type LangFuseScore, type ToolTestResult
   } from '$lib/api';
 
   let {
@@ -10,14 +10,20 @@
     userId = 1,
     evalsEnabled = false,
     evalsRunning = false,
-    onclose = () => {}
+    resuming = false,
+    refreshToken = 0,
+    onclose = () => {},
+    onresume = () => {}
   }: {
     executionId: number | null;
     flowName: string;
     userId?: number;
     evalsEnabled?: boolean;
     evalsRunning?: boolean;
+    resuming?: boolean;
+    refreshToken?: number;
     onclose: () => void;
+    onresume?: () => void;
   } = $props();
 
   let execution: ExecutionDetail | null = $state(null);
@@ -37,12 +43,21 @@
   let expandedScores: Set<string> = $state(new Set());
   let evalsLoaded = $state(false);
 
+  // In-run tool testing state (keyed by node_id)
+  let testingNodes: Set<string> = $state(new Set());
+  let testResults: Map<string, ToolTestResult> = $state(new Map());
+
   $effect(() => {
+    // refreshToken lets the parent force a refetch of the SAME execution —
+    // resume reuses the root execution row, so the id never changes.
+    refreshToken;
     if (executionId) {
       loadExecution(executionId);
       // Reset evals tab state on new execution
       scoresCache = new Map();
       evalsLoaded = false;
+      // Test results describe the previous resident state; drop them
+      testResults = new Map();
     } else {
       execution = null;
     }
@@ -142,6 +157,40 @@
     loadAllEvalScores();
   }
 
+  async function runNodeTest(node: ExecutionDetail) {
+    if (!executionId || !node.node_id || testingNodes.has(node.node_id)) return;
+    const nodeId = node.node_id;
+    const next = new Set(testingNodes);
+    next.add(nodeId);
+    testingNodes = next;
+    try {
+      const result = await testTool(executionId, nodeId, userId);
+      const cache = new Map(testResults);
+      cache.set(nodeId, result);
+      testResults = cache;
+    } catch (e) {
+      const cache = new Map(testResults);
+      cache.set(nodeId, {
+        request_id: '',
+        node_id: nodeId,
+        status: 'error',
+        error: e instanceof Error ? e.message : String(e),
+        error_type: 'RequestError'
+      });
+      testResults = cache;
+    } finally {
+      const done = new Set(testingNodes);
+      done.delete(nodeId);
+      testingNodes = done;
+      // Surface the result without requiring a second click
+      if (!expandedNodes.has(node.id)) {
+        const open = new Set(expandedNodes);
+        open.add(node.id);
+        expandedNodes = open;
+      }
+    }
+  }
+
   function toggleScoreExpand(scoreId: string) {
     const next = new Set(expandedScores);
     if (next.has(scoreId)) next.delete(scoreId);
@@ -232,6 +281,11 @@
       <span class="status-text">{execution.status}</span>
       {#if execution.started_at && execution.completed_at}
         <span class="duration">{formatDuration(execution.started_at, execution.completed_at)}</span>
+      {/if}
+      {#if execution.status === 'failed' && execution.execution_type === 'flow'}
+        <button class="resume-btn" onclick={onresume} disabled={resuming}>
+          {resuming ? 'Resuming…' : 'Resume'}
+        </button>
       {/if}
     {/if}
   </div>
@@ -330,6 +384,16 @@
     {#if node.langfuse_trace_id}
       <span class="trace-badge">traced</span>
     {/if}
+    {#if node.execution_type === 'tool' && node.node_id && execution?.status === 'failed'}
+      <button
+        class="test-btn"
+        onclick={() => runNodeTest(node)}
+        disabled={testingNodes.has(node.node_id)}
+        title="Run this tool against the failed run's live data (no execution is recorded)"
+      >
+        {testingNodes.has(node.node_id) ? 'Testing…' : 'Test'}
+      </button>
+    {/if}
     {#if node.error_message}
       <span class="error-preview" title={node.error_message}>
         {truncate(node.error_message, 50)}
@@ -339,6 +403,32 @@
 
   {#if expandedNodes.has(node.id)}
     <div class="node-details" style="padding-left: {32 + depth * 20}px">
+      {#if node.node_id && testResults.has(node.node_id)}
+        {@const test = testResults.get(node.node_id)!}
+        <div class="detail-section test-result" class:test-failed={test.status !== 'success'}>
+          <span class="detail-label">
+            Test result:
+            <span class={test.status === 'success' ? 'test-status-pass' : 'test-status-fail'}>{test.status}</span>
+          </span>
+          {#if test.error}
+            <pre class="detail-json error-json">{test.error_type ? `${test.error_type}: ` : ''}{test.error}</pre>
+          {/if}
+          {#if test.traceback}
+            <pre class="detail-json error-json">{test.traceback}</pre>
+          {/if}
+          {#if test.result !== null && test.result !== undefined}
+            <pre class="detail-json">{formatJson(test.result)}</pre>
+          {/if}
+          {#if test.stdout}
+            <span class="detail-label">stdout:</span>
+            <pre class="detail-json">{test.stdout}</pre>
+          {/if}
+          {#if test.stderr}
+            <span class="detail-label">stderr:</span>
+            <pre class="detail-json">{test.stderr}</pre>
+          {/if}
+        </div>
+      {/if}
       {#if node.input_data !== null && node.input_data !== undefined}
         <div class="detail-section">
           <span class="detail-label">Input:</span>
@@ -601,6 +691,65 @@
     color: oklch(0.55 0 0);
     font-size: 11px;
     flex-shrink: 0;
+  }
+
+  .resume-btn {
+    background: oklch(0.65 0.2 25 / 0.15);
+    color: oklch(0.75 0.15 25);
+    border: 1px solid oklch(0.65 0.2 25 / 0.4);
+    border-radius: 4px;
+    font-size: 11px;
+    padding: 2px 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .resume-btn:hover:not(:disabled) {
+    background: oklch(0.65 0.2 25 / 0.3);
+  }
+
+  .resume-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .test-btn {
+    background: oklch(0.42 0.12 200 / 0.15);
+    color: oklch(0.75 0.1 200);
+    border: 1px solid oklch(0.42 0.12 200 / 0.4);
+    border-radius: 4px;
+    font-size: 11px;
+    padding: 2px 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .test-btn:hover:not(:disabled) {
+    background: oklch(0.42 0.12 200 / 0.3);
+  }
+
+  .test-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .test-result {
+    border-left: 2px solid oklch(0.42 0.12 200 / 0.5);
+    padding-left: 6px;
+  }
+
+  .test-result.test-failed {
+    border-left-color: oklch(0.65 0.2 25 / 0.5);
+  }
+
+  .test-status-pass {
+    color: oklch(0.7 0.15 145);
+    font-weight: 700;
+  }
+
+  .test-status-fail {
+    color: oklch(0.65 0.2 25);
+    font-weight: 700;
   }
 
   .error-preview {

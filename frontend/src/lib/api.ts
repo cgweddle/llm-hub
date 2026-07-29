@@ -99,13 +99,6 @@ export interface FlowExecutionResult {
   execution_id: number | null;
   status: "completed" | "failed" | "pending" | "running";
   final_output: any;
-  execution_trace: Array<{
-    node: string;
-    input: any;
-    output: any;
-    status: string;
-    error?: string;
-  }>;
   error?: string;
 }
 
@@ -573,6 +566,61 @@ export async function executeFlow(flowId: number, initialInput: Record<string, a
   }
 }
 
+export async function resumeFlow(executionId: number, userId: number = 1): Promise<FlowExecutionResult> {
+  const response = await fetch(`${API_BASE_URL}/executions/${executionId}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId }),
+  });
+
+  if (response.status === 410) {
+    throw new Error('This run can no longer be resumed (runner shut down). Re-run the flow.');
+  }
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Failed to resume flow: ${response.statusText}`);
+  }
+
+  const result = await response.json();
+
+  // Hosted mode returns 202 {status: 'running'}; poll like executeFlow does.
+  if (result.status === 'pending' || result.status === 'running') {
+    return await pollExecution(executionId);
+  }
+
+  return result;
+}
+
+export interface ToolTestResult {
+  request_id: string;
+  node_id: string;
+  status: 'success' | 'error';
+  result?: string | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  error?: string;
+  error_type?: string;
+  traceback?: string;
+}
+
+export async function testTool(executionId: number, nodeId: string, userId: number = 1): Promise<ToolTestResult> {
+  const response = await fetch(`${API_BASE_URL}/executions/${executionId}/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_id: nodeId, user_id: userId }),
+  });
+
+  if (response.status === 410) {
+    throw new Error('This run is no longer resident (runner shut down). Re-run the flow.');
+  }
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Failed to test tool: ${response.statusText}`);
+  }
+
+  return await response.json();
+}
+
 async function pollExecution(executionId: number, intervalMs = 2000, maxAttempts = 300): Promise<FlowExecutionResult> {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, intervalMs));
@@ -586,13 +634,6 @@ async function pollExecution(executionId: number, intervalMs = 2000, maxAttempts
         execution_id: execution.id,
         status: 'completed',
         final_output: lastChild?.output_data ?? execution.output_data,
-        execution_trace: (execution.children || []).map(c => ({
-          node: c.name || c.node_id || '',
-          input: c.input_data,
-          output: c.output_data,
-          status: c.status,
-          error: c.error_message || undefined,
-        })),
       };
     }
 
@@ -602,7 +643,6 @@ async function pollExecution(executionId: number, intervalMs = 2000, maxAttempts
         execution_id: execution.id,
         status: 'failed',
         final_output: null,
-        execution_trace: [],
         error: execution.error_message || 'Flow execution failed',
       };
     }
@@ -613,7 +653,6 @@ async function pollExecution(executionId: number, intervalMs = 2000, maxAttempts
     execution_id: executionId,
     status: 'failed',
     final_output: null,
-    execution_trace: [],
     error: 'Flow execution timed out waiting for result',
   };
 }

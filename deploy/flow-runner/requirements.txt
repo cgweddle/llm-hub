@@ -7,3 +7,4 @@ psycopg2-binary==2.9.11
 httpx==0.28.1
 python-dotenv==1.1.1
 langfuse==4.0.6
+redis==5.2.1
