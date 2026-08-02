@@ -35,7 +35,6 @@ from src.database.database_setup import DatabaseManager
 from src.validate.tool_compatibility import validate_two_tools, validate_tool_compatibility, validate_connection
 from src.runners.local_flow_child import spawn_local_flow_child
 from src.runners.live_run_store import live_run_store
-from src.executors.agent_executor import AgentExecutor
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from src.factories.pigar_import_detector import detect_required_packages
 
@@ -1217,7 +1216,7 @@ def get_execution_trace_endpoint(execution_id: int, db: Session = Depends(get_db
         raise HTTPException(status_code=404, detail="No LangFuse trace for this execution")
 
     try:
-        from src.executors.agent_executor import langfuse_client, LANGFUSE_AVAILABLE
+        from src.observability.langfuse_tracing import langfuse_client, LANGFUSE_AVAILABLE
         if not LANGFUSE_AVAILABLE or not langfuse_client:
             raise HTTPException(status_code=503, detail="LangFuse not configured")
 
@@ -1506,7 +1505,7 @@ def get_execution_scores_endpoint(execution_id: int, db: Session = Depends(get_d
         raise HTTPException(status_code=404, detail="No LangFuse trace for this execution")
 
     try:
-        from src.executors.agent_executor import langfuse_client, LANGFUSE_AVAILABLE
+        from src.observability.langfuse_tracing import langfuse_client, LANGFUSE_AVAILABLE
         if not LANGFUSE_AVAILABLE or not langfuse_client:
             raise HTTPException(status_code=503, detail="LangFuse not configured")
 

@@ -15,7 +15,8 @@ Features:
 - Unified graph-based execution (no agent_type routing)
 - Execution record management via self-referencing execution tree
 - LangFuse integration for internal agent telemetry
-- Streaming support for PydanticAI
+- Runs pre-built agents (runners.agent_runner.BuiltAgent) — compilation
+  happens at flow prepare time, execution only runs them
 - Automatic retry with exponential backoff for transient failures
 - Error handling and logging
 """
@@ -30,9 +31,10 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from database.database import get_agent_by_id, get_tool_by_id, create_execution, update_execution
+from database.database import get_agent_by_id, create_execution, update_execution
 from database.database_setup import Execution
-from utils.prompt_template import resolve_system_prompt_template, resolve_user_prompt_template
+from utils.prompt_template import resolve_user_prompt_template
+from runners.agent_runner import BuiltAgent
 
 # Import retry utilities
 try:
@@ -47,72 +49,22 @@ except ImportError:
     RetryConfig = None
     DEFAULT_LLM_RETRY_CONFIG = None
 
-# Load .env before initializing LangFuse (needs LANGFUSE_* env vars)
-from dotenv import load_dotenv
-load_dotenv()
-
-# Initialize LangFuse for automatic PydanticAI tracing
-try:
-    from langfuse import get_client as get_langfuse_client, observe as langfuse_observe
-    langfuse_client = get_langfuse_client()
-    # Instrument all PydanticAI agents — captures tool calls, LLM I/O, costs automatically
-    from pydantic_ai import Agent as _PydanticAIAgent
-    _PydanticAIAgent.instrument_all()
-    LANGFUSE_AVAILABLE = True
-    logger_init_msg = "LangFuse instrumentation enabled for PydanticAI agents"
-except Exception:
-    LANGFUSE_AVAILABLE = False
-    langfuse_client = None
-    langfuse_observe = None
-    logger_init_msg = "LangFuse not available — internal agent tracing disabled"
+from observability.langfuse_tracing import (
+    LANGFUSE_AVAILABLE,
+    langfuse_client,
+    langfuse_observe,
+)
 
 logger = logging.getLogger(__name__)
-logger.info(logger_init_msg)
 
-
-def _get_path_description(path_config) -> str:
-    """Extract description from an output path config (string or dict)."""
-    if isinstance(path_config, str):
-        return path_config
-    return path_config.get("description", "")
-
-
-def _build_output_path_types(output_paths: Dict[str, Any]):
-    """Build dynamic Pydantic union types from output_paths config.
-
-    Given {"revise": "Draft needs work", "approve": "Draft is ready"} or
-    {"revise": {"description": "...", "return_behavior": "node_output"}, ...},
-    creates model classes Revise and Approve each with a 'content' field,
-    and returns (union_type, {ClassName: path_name} mapping).
-
-    PydanticAI treats union members as separate output tools,
-    so the LLM actively chooses which path to take.
-    """
-    from pydantic import BaseModel, create_model
-
-    models = {}
-    class_to_path = {}
-    for path_name, path_config in output_paths.items():
-        description = _get_path_description(path_config)
-        # Create a model class with the path name capitalized
-        class_name = path_name.capitalize()
-        model = create_model(
-            class_name,
-            content=(str, ...),
-            __doc__=description,
-        )
-        models[path_name] = model
-        class_to_path[class_name] = path_name
-
-    # Build the union type
-    from typing import Union
-    model_list = list(models.values())
-    if len(model_list) == 1:
-        union_type = model_list[0]
-    else:
-        union_type = Union[tuple(model_list)]
-
-    return union_type, class_to_path, models
+# Instrumentation is execution-side: this module runs agents, so it turns on
+# span emission for all PydanticAI agent runs in this process.
+if LANGFUSE_AVAILABLE:
+    from pydantic_ai import Agent as _PydanticAIAgent
+    _PydanticAIAgent.instrument_all()
+    logger.info("LangFuse instrumentation enabled for PydanticAI agents")
+else:
+    logger.info("LangFuse not available — internal agent tracing disabled")
 
 
 class AgentExecutor:
@@ -137,10 +89,8 @@ class AgentExecutor:
         session: Session,
         retry_config: Optional["RetryConfig"] = None,
         enable_retry: bool = True,
-        llm_config: Optional[Dict[str, Any]] = None,
     ):
         self.session = session
-        self.llm_config = llm_config or {"models": []}
 
         # Configure retry behavior
         self.enable_retry = enable_retry and RETRY_AVAILABLE
@@ -160,20 +110,20 @@ class AgentExecutor:
         agent_id: int,
         input_text: str,
         session: Session,
-        llm_provider: str,
+        built_agents: Dict[str, BuiltAgent],
         parent_execution: Optional[Execution] = None
     ) -> str:
         """
         Execute an agent and return its text output.
-        Entry point for FlowExecutor — records structural node under parent_execution.
+        Entry point for FlowRunner — records structural node under parent_execution.
         Internal tracing is handled by LangFuse automatically.
 
         Args:
             agent_id: Agent ID
             input_text: Input text
             session: Database session
-            llm_provider: Name of the LLM provider to use
-            parent_execution: Parent Execution record from FlowExecutor
+            built_agents: sub-node id → BuiltAgent, compiled at flow prepare time
+            parent_execution: Parent Execution record from FlowRunner
 
         Returns:
             Agent text output as string
@@ -187,7 +137,7 @@ class AgentExecutor:
             raise ValueError(f"Agent {agent_id} has no graph_config")
 
         result = await self._execute_graph(
-            graph_config, input_text, execution=parent_execution, llm_provider=llm_provider
+            graph_config, input_text, execution=parent_execution, built_agents=built_agents
         )
         return str(result.get("result", ""))
 
@@ -196,7 +146,7 @@ class AgentExecutor:
         graph_config: Dict[str, Any],
         input_data: str,
         execution: Optional[Execution],
-        llm_provider: str,
+        built_agents: Dict[str, BuiltAgent],
         max_loop_iterations: int = None
     ) -> Dict[str, Any]:
         """
@@ -258,28 +208,33 @@ class AgentExecutor:
                 # Determine input for this node
                 node_input = node_outputs.get(node_id + "_input", current_input)
 
+                built = built_agents.get(node_id)
+                if built is None:
+                    raise ValueError(f"No compiled agent for sub-node '{node_id}'")
+
                 # Execute the sub-agent node
                 chosen_path = None
+                # Read by the except handler below even when LangFuse is off,
+                # so it must be bound outside the LANGFUSE_AVAILABLE branch.
+                _captured_trace_id = None
                 try:
                     trace_id = None
                     predecessor_msgs = messages if messages else None
 
                     if LANGFUSE_AVAILABLE and langfuse_observe:
                         # Capture trace ID even if the agent fails
-                        _captured_trace_id = None
-
                         @langfuse_observe(name=nodes_config[node_id].get("name", node_id))
                         async def _observed_run():
                             nonlocal _captured_trace_id
                             _captured_trace_id = langfuse_client.get_current_trace_id()
-                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, llm_provider=llm_provider, predecessor_messages=predecessor_msgs)
+                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, built, predecessor_messages=predecessor_msgs)
                             return result
 
                         output, node_result_messages, chosen_path = await _observed_run()
                         trace_id = _captured_trace_id
                         langfuse_client.flush()
                     else:
-                        output, node_result_messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, llm_provider=llm_provider, predecessor_messages=predecessor_msgs)
+                        output, node_result_messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, built, predecessor_messages=predecessor_msgs)
                     # Apply return behavior for the chosen path
                     if chosen_path:
                         node_output_paths = nodes_config[node_id].get("output_paths", {})
@@ -393,11 +348,11 @@ class AgentExecutor:
 
     async def _run_sub_agent(
         self, node_id: str, node_config: Dict, node_input: str,
-        llm_provider: str,
+        built: BuiltAgent,
         predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, Optional[List], Optional[str]]:
         """
-        Create and run a sub-agent for a single graph node.
+        Run the pre-built sub-agent for a single graph node.
         Returns (output_text, messages, chosen_path) where:
         - messages is the PydanticAI message history (all_messages() from the run)
         - chosen_path is the output path name (None if no output_paths configured)
@@ -408,7 +363,7 @@ class AgentExecutor:
             f"(type: {node_config.get('agent_type')})"
         )
 
-        return await self._run_pydanticai_node(node_config, node_input, llm_provider=llm_provider, predecessor_messages=predecessor_messages)
+        return await self._run_pydanticai_node(node_config, node_input, built, predecessor_messages=predecessor_messages)
 
     @staticmethod
     def _apply_user_prompt(node_config: Dict, node_input: str,
@@ -427,57 +382,18 @@ class AgentExecutor:
 
     async def _run_pydanticai_node(
         self, node_config: Dict, node_input: str,
-        llm_provider: str,
+        built: BuiltAgent,
         predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, List, Optional[str]]:
-        """Run a PydanticAI sub-agent. Returns (output_text, all_messages, chosen_path).
+        """Run a pre-built PydanticAI sub-agent (compiled by runners.agent_runner).
+        Returns (output_text, all_messages, chosen_path).
         chosen_path is None for nodes without output_paths.
         LangFuse auto-captures internal tool calls and LLM I/O."""
-        from pydantic_ai import Agent
-
         node_input = self._apply_user_prompt(node_config, node_input, predecessor_messages)
-
-        model_name = self._resolve_model_name(llm_provider)
-
-        # Build output type and routing from output_paths if configured
-        output_paths = node_config.get("output_paths")
-        output_type = None
-        class_to_path = None
-        if output_paths and len(output_paths) > 0:
-            output_type, class_to_path, _ = _build_output_path_types(output_paths)
-
-        # Fetch tool records for template resolution and registration
-        tool_ids = node_config.get("tool_ids", [])
-        tool_records = [get_tool_by_id(self.session, tid) for tid in tool_ids]
-        tool_records = [t for t in tool_records if t is not None]
-
-        system_prompt = node_config.get("system_prompt", "You are a helpful assistant.")
-        system_prompt = resolve_system_prompt_template(system_prompt, node_config, tool_records)
-
-        # Append routing instructions when output paths are configured
-        if output_paths:
-            routing_lines = ["\n\nYou must choose one of the following output paths:"]
-            for path_name, path_config in output_paths.items():
-                description = _get_path_description(path_config)
-                routing_lines.append(f'- "{path_name.capitalize()}": {description}')
-            system_prompt += "\n".join(routing_lines)
-
-        agent_kwargs = dict(
-            model=model_name,
-            system_prompt=system_prompt,
-        )
-        if output_type is not None:
-            agent_kwargs["output_type"] = output_type
-
-        sub_agent = Agent(**agent_kwargs)
-
-        # Register tools on the agent
-        if tool_ids:
-            self._register_tools_on_agent(sub_agent, tool_ids)
 
         # Run with retry if enabled
         async def run():
-            return await sub_agent.run(node_input)
+            return await built.agent.run(node_input)
 
         if self.enable_retry:
             def on_retry(attempt, exception, delay):
@@ -490,10 +406,10 @@ class AgentExecutor:
         result_data = result.output
         chosen_path = None
 
-        if class_to_path and result_data is not None:
+        if built.class_to_path and result_data is not None:
             # Determine which union member was chosen via isinstance
             class_name = type(result_data).__name__
-            chosen_path = class_to_path.get(class_name)
+            chosen_path = built.class_to_path.get(class_name)
             # Extract content from the structured output
             if hasattr(result_data, 'content'):
                 output_str = str(result_data.content)
@@ -508,58 +424,6 @@ class AgentExecutor:
             output_str = str(result_data) if result_data else ""
 
         return (output_str, result.all_messages(), chosen_path)
-
-    def _register_tools_on_agent(self, agent, tool_ids):
-        """Register database tools on a PydanticAI agent."""
-        try:
-            from converters.pydanticai_tool_converter import PydanticAIToolConverter
-            converter = PydanticAIToolConverter(self.session)
-
-            for tool_id in tool_ids:
-                try:
-                    tool_record = get_tool_by_id(self.session, tool_id)
-                    if not tool_record:
-                        logger.warning(f"Tool {tool_id} not found, skipping")
-                        continue
-                    tool_func, _, _ = converter.convert_tool(tool_record)
-                    agent.tool_plain(tool_func)
-                    logger.debug(f"Registered tool: {tool_record.name}")
-                except Exception as e:
-                    logger.error(f"Failed to register tool {tool_id}: {e}")
-        except ImportError:
-            logger.warning("PydanticAI tool converter not available")
-
-    def _resolve_model_name(self, llm_provider: str) -> str:
-        """Resolve an LLM provider name to a model string for PydanticAI.
-        Also sets api_key/base_url as env vars so PydanticAI can pick them up.
-
-        Uses the llm_config dict passed to the constructor (loaded once per request
-        at the API layer) rather than reading from disk.
-        """
-        models = self.llm_config.get("models", [])
-        for model_config in models:
-            if model_config.get("name") == llm_provider:
-                provider = model_config.get("provider")
-                model = model_config.get("model")
-                api_key = model_config.get("api_key")
-                base_url = model_config.get("base_url")
-
-                if provider == "lmstudio":
-                    api_key = api_key or "lm-studio"
-                    base_url = base_url or "http://localhost:1234/v1"
-                    provider = "openai"
-
-                if api_key:
-                    if provider == "anthropic":
-                        os.environ["ANTHROPIC_API_KEY"] = api_key
-                    else:
-                        os.environ["OPENAI_API_KEY"] = api_key
-                if base_url:
-                    os.environ["OPENAI_BASE_URL"] = base_url
-
-                return f"{provider}:{model}"
-
-        raise ValueError(f"LLM provider '{llm_provider}' not found in config")
 
     def _extract_cost(self, result) -> Optional[Dict[str, Any]]:
         """Extract cost/token usage from PydanticAI result."""

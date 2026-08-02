@@ -17,12 +17,16 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# LangFuse client — imported from agent_executor where it's already initialized
 try:
-    from src.executors.agent_executor import langfuse_client, LANGFUSE_AVAILABLE
+    from src.observability.langfuse_tracing import langfuse_client, LANGFUSE_AVAILABLE
 except ImportError:
     LANGFUSE_AVAILABLE = False
     langfuse_client = None
+
+# Instrumentation is execution-side: this module runs the judge agent, so it
+# turns on span emission for PydanticAI agent runs in this process.
+if LANGFUSE_AVAILABLE:
+    Agent.instrument_all()
 
 
 # --- Default structured output models ---

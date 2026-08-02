@@ -21,7 +21,8 @@ from unittest.mock import Mock, MagicMock, patch, AsyncMock
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from executors.agent_executor import AgentExecutor, _build_output_path_types
+from executors.agent_executor import AgentExecutor
+from runners.agent_runner import _build_output_path_types
 
 
 # ============================================================================
