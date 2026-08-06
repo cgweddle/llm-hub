@@ -31,7 +31,7 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from database.database import get_agent_by_id, create_execution, update_execution
+from database.database import create_execution, update_execution
 from database.database_setup import Execution
 from utils.prompt_template import resolve_user_prompt_template
 from runners.agent_runner import BuiltAgent
@@ -107,9 +107,8 @@ class AgentExecutor:
 
     async def execute_agent_node(
         self,
-        agent_id: int,
+        graph_config: Dict[str, Any],
         input_text: str,
-        session: Session,
         built_agents: Dict[str, BuiltAgent],
         parent_execution: Optional[Execution] = None
     ) -> str:
@@ -119,22 +118,16 @@ class AgentExecutor:
         Internal tracing is handled by LangFuse automatically.
 
         Args:
-            agent_id: Agent ID
+            graph_config: The agent's graph_config, captured at flow prepare time
             input_text: Input text
-            session: Database session
             built_agents: sub-node id → BuiltAgent, compiled at flow prepare time
             parent_execution: Parent Execution record from FlowRunner
 
         Returns:
             Agent text output as string
         """
-        agent = get_agent_by_id(session, agent_id)
-        if not agent:
-            raise ValueError(f"Agent with ID {agent_id} not found")
-
-        graph_config = agent.graph_config
         if not graph_config:
-            raise ValueError(f"Agent {agent_id} has no graph_config")
+            raise ValueError("Agent has no graph_config")
 
         result = await self._execute_graph(
             graph_config, input_text, execution=parent_execution, built_agents=built_agents

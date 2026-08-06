@@ -5,7 +5,6 @@ Tests cover:
 - API models (AgentCreate, AgentResponse with output_schema)
 - Database functions (create_agent with output_schema)
 - PydanticAI Tool Converter (JSON schema to Pydantic model conversion)
-- PydanticAI Agent Factory (agent creation and validation)
 - Agent Executor (execution routing)
 
 Run with: pytest tests/test_pydanticai_components.py -v
@@ -33,12 +32,6 @@ try:
     TOOL_CONVERTER_AVAILABLE = True
 except ImportError:
     TOOL_CONVERTER_AVAILABLE = False
-
-try:
-    from factories.pydanticai_agent_factory import PydanticAIAgentFactory
-    AGENT_FACTORY_AVAILABLE = True
-except ImportError:
-    AGENT_FACTORY_AVAILABLE = False
 
 try:
     from executors.agent_executor import AgentExecutor
@@ -102,7 +95,8 @@ class MockTool:
         output_schema: Dict = None,
         function_code: str = None,
         main_function: str = "test_func",
-        helper_functions: Dict = None
+        helper_functions: Dict = None,
+        script_code: str = None
     ):
         self.id = id
         self.name = name
@@ -111,6 +105,7 @@ class MockTool:
         self.input_schema = input_schema or {}
         self.output_schema = output_schema
         self.function_code = function_code or "def test_func(x): return x * 2"
+        self.script_code = script_code or self.function_code
         self.main_function = main_function
         self.helper_functions = helper_functions or {}
 
@@ -493,15 +488,14 @@ class TestPydanticAIToolConverter:
         assert callable(func)
         assert func(3, 4) == 12
 
-    def test_compile_function_with_helpers(self):
-        """Test function compilation with helper functions"""
+    def test_compile_function_with_helper_in_script(self):
+        """Helper functions live in the same script_code (no helper_functions merging)"""
         converter = PydanticAIToolConverter()
 
         tool = MockTool(
             name="with_helper",
-            function_code="def main_func(x): return helper(x) * 2",
-            main_function="main_func",
-            helper_functions={"helper": "def helper(x): return x + 1"}
+            script_code="def helper(x): return x + 1\ndef main_func(x): return helper(x) * 2",
+            main_function="main_func"
         )
 
         func = converter._compile_function_code(tool)
@@ -545,120 +539,6 @@ class TestPydanticAIToolConverter:
         assert wrapper.__name__ == "double"
         assert wrapper.__doc__ == "Doubles a number"
         assert wrapper(x=5) == 10
-
-
-# ============================================================================
-# Test: PydanticAI Agent Factory
-# ============================================================================
-
-@pytest.mark.skipif(not AGENT_FACTORY_AVAILABLE, reason="Agent factory not available")
-class TestPydanticAIAgentFactory:
-    """Tests for PydanticAI agent factory"""
-
-    @patch('factories.pydanticai_agent_factory.get_agent_by_id')
-    def test_validate_agent_config_valid(self, mock_get_agent):
-        """Test validation of valid agent configuration"""
-        mock_agent = MockAgent(
-            id=1,
-            agent_type="pydanticai",
-            llm_config={"model_name": "test_model"}
-        )
-        mock_agent.graph_config = {
-            "entry_point": "main",
-            "nodes": {
-                "main": {
-                    "llm_provider": "test_model",
-                    "tool_ids": [1],
-                }
-            },
-        }
-        mock_get_agent.return_value = mock_agent
-
-        llm_config = {"models": [{"name": "test_model", "provider": "openai", "model": "gpt-4"}]}
-        factory = PydanticAIAgentFactory(session=MockSession(), llm_config=llm_config)
-        validation = factory.validate_agent_config(1)
-
-        assert validation["valid"] is True
-        assert len(validation["errors"]) == 0
-
-    @patch('factories.pydanticai_agent_factory.get_agent_by_id')
-    def test_validate_agent_config_not_found(self, mock_get_agent):
-        """Test validation when agent not found"""
-        mock_get_agent.return_value = None
-
-        factory = PydanticAIAgentFactory(session=MockSession())
-        validation = factory.validate_agent_config(999)
-
-        assert validation["valid"] is False
-        assert "not found" in validation["errors"][0]
-
-    @patch('factories.pydanticai_agent_factory.get_agent_by_id')
-    def test_validate_agent_config_wrong_type(self, mock_get_agent):
-        """Test validation when agent type is not pydanticai"""
-        mock_agent = MockAgent(id=1, agent_type="react")
-        mock_get_agent.return_value = mock_agent
-
-        factory = PydanticAIAgentFactory(session=MockSession())
-        validation = factory.validate_agent_config(1)
-
-        assert validation["valid"] is False
-        assert "pydanticai" in validation["errors"][0]
-
-    @patch('factories.pydanticai_agent_factory.get_agent_by_id')
-    def test_validate_agent_config_no_tools_warning(self, mock_get_agent):
-        """Test validation warns when no tools configured"""
-        mock_agent = MockAgent(
-            id=1,
-            agent_type="pydanticai",
-            tools=[],
-            tools_config={}
-        )
-        mock_agent.graph_config = {
-            "entry_point": "main",
-            "nodes": {
-                "main": {
-                    "llm_provider": "test_model",
-                    "tool_ids": [],
-                }
-            },
-        }
-        mock_get_agent.return_value = mock_agent
-
-        llm_config = {"models": [{"name": "test_model", "provider": "openai", "model": "gpt-4"}]}
-        factory = PydanticAIAgentFactory(session=MockSession(), llm_config=llm_config)
-        validation = factory.validate_agent_config(1)
-
-        assert "no tools" in validation["warnings"][0].lower()
-
-    def test_get_result_type_from_metadata(self):
-        """Test extracting result type from agent_metadata"""
-        factory = PydanticAIAgentFactory(session=MockSession())
-
-        mock_agent = MockAgent(
-            agent_metadata={
-                "result_schema": {
-                    "type": "object",
-                    "properties": {
-                        "answer": {"type": "string"}
-                    }
-                }
-            }
-        )
-
-        result_type = factory._get_result_type(mock_agent)
-
-        assert result_type is not None
-        assert issubclass(result_type, BaseModel)
-
-    def test_get_result_type_none_when_no_schema(self):
-        """Test result type is None when no schema defined"""
-        factory = PydanticAIAgentFactory(session=MockSession())
-
-        mock_agent = MockAgent(agent_metadata={})
-
-        result_type = factory._get_result_type(mock_agent)
-
-        assert result_type is None
 
 
 # ============================================================================
@@ -720,6 +600,13 @@ class TestDatabaseFunctions:
             "type": "object",
             "properties": {"result": {"type": "string"}}
         }
+        graph_config = {
+            "nodes": {"main": {"agent_type": "pydanticai",
+                               "system_prompt": "You are helpful."}},
+            "edges": [],
+            "entry_point": "main",
+            "exit_points": ["main"],
+        }
 
         # Mock the Agent class
         mock_agent_instance = Mock()
@@ -730,10 +617,7 @@ class TestDatabaseFunctions:
             user_id=1,
             name="Test Agent",
             description="Test description",
-            agent_type="pydanticai",
-            system_prompt="You are helpful.",
-            llm_config={"model_name": "test"},
-            tools_config={},
+            graph_config=graph_config,
             output_schema=output_schema
         )
 
@@ -741,6 +625,7 @@ class TestDatabaseFunctions:
         mock_agent_class.assert_called_once()
         call_kwargs = mock_agent_class.call_args[1]
         assert call_kwargs["output_schema"] == output_schema
+        assert call_kwargs["graph_config"] == graph_config
 
     @patch('database.database.Agent')
     def test_create_agent_without_output_schema(self, mock_agent_class):
@@ -757,10 +642,13 @@ class TestDatabaseFunctions:
             user_id=1,
             name="Test Agent",
             description="Test description",
-            agent_type="react",
-            system_prompt="You are helpful.",
-            llm_config={"model_name": "test"},
-            tools_config={}
+            graph_config={
+                "nodes": {"main": {"agent_type": "react",
+                                   "system_prompt": "You are helpful."}},
+                "edges": [],
+                "entry_point": "main",
+                "exit_points": ["main"],
+            }
         )
 
         call_kwargs = mock_agent_class.call_args[1]

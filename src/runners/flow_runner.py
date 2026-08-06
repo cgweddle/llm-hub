@@ -47,6 +47,7 @@ from src.database.database import (
     get_agent_by_id,
 )
 from src.runners.tool_runner import compile_tool
+from src.runners.agent_runner import BuiltAgent, compile_agent, resolve_provider_config
 from src.factories.flow_to_script_factory import (
     generate_orchestrator_code,
     decompose_into_chains,
@@ -108,6 +109,8 @@ class FlowRunContext:
     entry_point: str
     functions_by_node: Dict[str, Callable]      # tool node_id -> executable fn
     tool_schemas: Dict[str, dict]               # tool node_id -> input_schema
+    agents_by_node: Dict[str, Dict[str, BuiltAgent]]  # agent node_id -> sub-node id -> BuiltAgent
+    agent_graphs: Dict[str, dict]               # agent node_id -> agent graph_config at prepare time
     sequence_by_node: Dict[str, int]            # node_id -> precomputed sequence
     state: Dict[str, Any] = field(default_factory=dict)        # node_id -> raw output
     child_rows: Dict[str, int] = field(default_factory=dict)   # node_id -> execution row id
@@ -303,17 +306,17 @@ async def _run_tool_node(ctx: FlowRunContext, node_id: str, node_input: Any) -> 
 
 async def _run_agent_node(ctx: FlowRunContext, session: Session, node_id: str,
                           node_config: dict, input_text: str, child) -> str:
-    """Run an agent node via the existing AgentExecutor (async)."""
+    """Run an agent node's pre-built sub-agents via AgentExecutor (async)."""
     from src.executors.agent_executor import AgentExecutor
 
-    agent_id = node_config["id"]
-    llm_provider = ctx.agent_llms.get(node_id)
-    if not llm_provider:
-        raise ValueError(f"No LLM selected for agent node '{node_id}'")
+    built_agents = ctx.agents_by_node.get(node_id)
+    graph_config = ctx.agent_graphs.get(node_id)
+    if built_agents is None or graph_config is None:
+        raise ValueError(f"No compiled agent for flow node '{node_id}'")
 
-    executor = AgentExecutor(session, llm_config=ctx.llm_config)
+    executor = AgentExecutor(session)
     return await executor.execute_agent_node(
-        agent_id, input_text, session, llm_provider=llm_provider, parent_execution=child
+        graph_config, input_text, built_agents, parent_execution=child
     )
 
 
@@ -471,6 +474,38 @@ class FlowRunner:
             schemas[node_name] = tool.input_schema
         return functions, schemas
 
+    def _prepare_agents(self):
+        """Compile every agent node's sub-agents and capture its graph_config.
+
+        One provider per flow agent node (from agent_llms); credentials are
+        bound into each BuiltAgent's model object at compile time, so no
+        env-var state is shared between agents.
+        """
+        agents: Dict[str, Dict[str, BuiltAgent]] = {}
+        graphs: Dict[str, dict] = {}
+        for node_name, node_info in self.graph_config["nodes"].items():
+            if node_info.get("node_type") != "agent":
+                continue
+            agent_id = node_info.get("id") or node_info.get("agent_id")
+            agent = get_agent_by_id(self.session, agent_id)
+            if not agent:
+                raise ValueError(f"Agent with ID {agent_id} not found for node '{node_name}'")
+            if not agent.graph_config:
+                raise ValueError(f"Agent {agent_id} has no graph_config")
+            llm_provider = self.agent_llms.get(node_name)
+            if not llm_provider:
+                raise ValueError(f"No LLM selected for agent node '{node_name}'")
+            provider_config = resolve_provider_config(self.llm_config, llm_provider)
+
+            sub_agents: Dict[str, BuiltAgent] = {}
+            for sub_node_id, sub_config in agent.graph_config.get("nodes", {}).items():
+                tool_ids = sub_config.get("tool_ids", [])
+                tool_records = [t for t in (get_tool_by_id(self.session, tid) for tid in tool_ids) if t]
+                sub_agents[sub_node_id] = compile_agent(sub_config, tool_records, provider_config)
+            agents[node_name] = sub_agents
+            graphs[node_name] = agent.graph_config
+        return agents, graphs
+
     def _compute_sequence(self) -> Dict[str, int]:
         """Precompute a stable node_id -> sequence from graph topology."""
         chains, _ = decompose_into_chains(self.graph_config)
@@ -486,6 +521,7 @@ class FlowRunner:
 
     def _build_context(self, root_id: int, conda_env: Optional[str]) -> FlowRunContext:
         functions, schemas = self._prepare_tools()
+        agents, agent_graphs = self._prepare_agents()
         return FlowRunContext(
             flow_id=self.flow_id,
             user_id=self.user_id,
@@ -497,6 +533,8 @@ class FlowRunner:
             entry_point=self.graph_config["entry_point"],
             functions_by_node=functions,
             tool_schemas=schemas,
+            agents_by_node=agents,
+            agent_graphs=agent_graphs,
             sequence_by_node=self._compute_sequence(),
         )
 
@@ -603,6 +641,7 @@ class FlowRunner:
             self.graph_config = flow.graph_config
 
             functions, schemas = self._prepare_tools()
+            agents, agent_graphs = self._prepare_agents()
             new_fps = _compute_fingerprints(session, self.graph_config)
             new_nodes = set(self.graph_config.get("nodes", {}))
 
@@ -624,6 +663,8 @@ class FlowRunner:
             ctx.entry_point = self.graph_config["entry_point"]
             ctx.functions_by_node = functions
             ctx.tool_schemas = schemas
+            ctx.agents_by_node = agents
+            ctx.agent_graphs = agent_graphs
             ctx.sequence_by_node = self._compute_sequence()
             ctx.fingerprints = new_fps
 

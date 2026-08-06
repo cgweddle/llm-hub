@@ -64,6 +64,11 @@ def run_async(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
+def builts_for(graph_config):
+    """built_agents map for mocked _run_sub_agent — values are never inspected."""
+    return {node_id: Mock() for node_id in graph_config["nodes"]}
+
+
 # ============================================================================
 # Test _build_output_path_types
 # ============================================================================
@@ -127,8 +132,8 @@ class TestExecuteGraphLoops:
 
         call_log = []
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, message_history=None):
-            call_log.append((node_id, node_input, message_history))
+        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
+            call_log.append((node_id, node_input, predecessor_messages))
             if node_id == "writer":
                 return ("Draft text", [], None)
             else:
@@ -146,7 +151,7 @@ class TestExecuteGraphLoops:
             "exit_points": ["summarizer"],
         }
 
-        result = await executor._execute_graph(graph_config, "Write something", None)
+        result = await executor._execute_graph(graph_config, "Write something", None, builts_for(graph_config))
 
         assert result["status"] == "completed"
         assert result["result"] == "Summary of draft"
@@ -164,7 +169,7 @@ class TestExecuteGraphLoops:
 
         call_count = {"writer": 0, "reviewer": 0}
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, message_history=None):
+        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
             call_count[node_id] += 1
             return (f"Output from {node_id}", [], None)
 
@@ -184,7 +189,7 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 1,
         }
 
-        result = await executor._execute_graph(graph_config, "Write a poem", None)
+        result = await executor._execute_graph(graph_config, "Write a poem", None, builts_for(graph_config))
 
         assert result["status"] == "completed"
         # With max_loop_iterations=1: writer→reviewer (loop back)→writer→reviewer (limit hit)
@@ -199,7 +204,7 @@ class TestExecuteGraphLoops:
 
         call_count = {"total": 0}
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, message_history=None):
+        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
             call_count["total"] += 1
             return (f"Output from {node_id}", [], None)
 
@@ -219,7 +224,7 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 2,
         }
 
-        result = await executor._execute_graph(graph_config, "Start", None)
+        result = await executor._execute_graph(graph_config, "Start", None, builts_for(graph_config))
 
         # a→b (loop back) → a→b (loop back) → a→b (limit reached, stop)
         # That's 3 iterations of a + 3 of b = 6 total, but b loops back only 2 times
@@ -229,21 +234,23 @@ class TestExecuteGraphLoops:
         assert call_count["total"] <= 6  # Safety: shouldn't exceed this
 
     @pytest.mark.asyncio
-    async def test_message_history_passed_on_reentry(self):
-        """When a node re-enters via loop, it should receive its previous message_history."""
+    async def test_predecessor_messages_passed_on_reentry(self):
+        """When a node re-enters via loop, it should receive its previous predecessor_messages."""
         executor = self._make_executor()
 
         histories_received = []
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, message_history=None):
+        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
             if node_id == "writer":
-                histories_received.append(message_history)
+                histories_received.append(predecessor_messages)
                 fake_messages = [{"role": "user", "content": node_input}]
-                if message_history:
-                    fake_messages = message_history + fake_messages
+                if predecessor_messages:
+                    fake_messages = predecessor_messages + fake_messages
                 return ("Draft", fake_messages, None)
             else:
-                return ("Feedback", [], None)
+                # A real run always returns non-empty all_messages()
+                history = (predecessor_messages or []) + [{"role": "assistant", "content": "Feedback"}]
+                return ("Feedback", history, None)
 
         executor._run_sub_agent = mock_run_sub_agent
 
@@ -261,7 +268,7 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 1,
         }
 
-        await executor._execute_graph(graph_config, "Write a poem", None)
+        await executor._execute_graph(graph_config, "Write a poem", None, builts_for(graph_config))
 
         # First call: no history
         assert histories_received[0] is None
@@ -277,7 +284,7 @@ class TestExecuteGraphLoops:
 
         visited = []
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, message_history=None):
+        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
             visited.append(node_id)
             if node_id == "reviewer":
                 # Choose "approve" path
@@ -302,7 +309,7 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 3,
         }
 
-        result = await executor._execute_graph(graph_config, "Write a blog", None)
+        result = await executor._execute_graph(graph_config, "Write a blog", None, builts_for(graph_config))
 
         # Reviewer chose "approve" → should go to formatter, NOT loop back to writer
         assert result["status"] == "completed"
@@ -316,7 +323,7 @@ class TestExecuteGraphLoops:
         visited = []
         reviewer_calls = 0
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, message_history=None):
+        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
             nonlocal reviewer_calls
             visited.append(node_id)
             if node_id == "reviewer":
@@ -344,7 +351,7 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 5,
         }
 
-        result = await executor._execute_graph(graph_config, "Write a blog", None)
+        result = await executor._execute_graph(graph_config, "Write a blog", None, builts_for(graph_config))
 
         # writer → reviewer (revise) → writer → reviewer (approve) → formatter
         assert result["status"] == "completed"
@@ -355,7 +362,7 @@ class TestExecuteGraphLoops:
         """Single-node agent should work identically to before."""
         executor = self._make_executor()
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, message_history=None):
+        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
             return ("Hello world", [], None)
 
         executor._run_sub_agent = mock_run_sub_agent
@@ -367,7 +374,7 @@ class TestExecuteGraphLoops:
             "exit_points": ["main"],
         }
 
-        result = await executor._execute_graph(graph_config, "Hi", None)
+        result = await executor._execute_graph(graph_config, "Hi", None, builts_for(graph_config))
 
         assert result["status"] == "completed"
         assert result["result"] == "Hello world"
