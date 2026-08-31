@@ -41,6 +41,7 @@
     createFlow,
     updateFlow,
     executeFlow,
+    exportFlow,
     resumeFlow,
     getFlowDetails,
     deleteFlow,
@@ -698,6 +699,29 @@
     }
 
     return {};
+  }
+
+  /**
+   * Export the current flow as a standalone Python module (zip download)
+   */
+  async function handleExportFlow() {
+    if (!currentFlowId) return;
+    try {
+      const agentLlms: Record<string, string> = {};
+      for (const node of nodes) {
+        if (node.data.isAgent && node.data.runtimeLLM?.name) {
+          agentLlms[node.id] = node.data.runtimeLLM.name;
+        }
+      }
+      const userId = data.user?.id || 1;
+      await exportFlow(currentFlowId, userId, agentLlms);
+    } catch (error) {
+      console.error('Flow export error:', error);
+      validationSuccess = false;
+      validationMessage = `Failed to export flow: ${error instanceof Error ? error.message : error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
   }
 
   /**
@@ -1770,6 +1794,14 @@
           class="ml-2 bg-green-600 hover:bg-green-700 text-white"
         >
           ▶ Run
+        </Button>
+        <Button
+          variant="outline"
+          onclick={handleExportFlow}
+          disabled={!currentFlowId}
+          class="ml-2"
+        >
+          Export flow
         </Button>
         <label class="evals-toggle">
           <input type="checkbox" bind:checked={evalsEnabled} />

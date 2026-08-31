@@ -687,6 +687,36 @@ export async function deleteFlow(flowId: number): Promise<void> {
   }
 }
 
+export async function exportFlow(flowId: number, userId: number = 1, agentLlms: Record<string, string> = {}): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/flows/${flowId}/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, agent_llms: agentLlms })
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => null);
+      throw new Error(err?.detail || `Failed to export flow: ${response.statusText}`);
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition');
+    const filename = disposition?.match(/filename="?([^"]+)"?/)?.[1] ?? `flow_${flowId}.zip`;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error('Error exporting flow:', error);
+    throw error;
+  }
+}
+
 export async function deleteAgent(agentId: number): Promise<void> {
   try {
     const response = await fetch(`${API_BASE_URL}/agents/${agentId}`, {

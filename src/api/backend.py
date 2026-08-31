@@ -1,5 +1,6 @@
 # api.py
 import sys
+import io
 import os
 import json
 import subprocess
@@ -37,6 +38,7 @@ from src.runners.local_flow_child import spawn_local_flow_child
 from src.runners.live_run_store import live_run_store
 from src.factories.python_script_tool_factory import PythonScriptToolFactory
 from src.factories.pigar_import_detector import detect_required_packages
+from src.exporters.flow_exporter import FlowExportError, export_flow_zip
 
 
 def load_request_llm_config(user_id: Optional[int], session=None) -> Dict[str, Any]:
@@ -231,6 +233,10 @@ class FlowExecuteRequest(BaseModel):
     user_id: int
     initial_input: dict
     conda_env: Optional[str] = None
+    agent_llms: Dict[str, str] = {}
+
+class FlowExportRequest(BaseModel):
+    user_id: int = 1
     agent_llms: Dict[str, str] = {}
 
 class ExecutionResponse(BaseModel):
@@ -866,6 +872,32 @@ def get_flow_endpoint(flow_id: int, db: Session = Depends(get_db)):
         "created_at": flow.created_at,
         "updated_at": flow.updated_at
     }
+
+@app.post("/flows/{flow_id}/export")
+def export_flow_endpoint(flow_id: int, request: FlowExportRequest, db: Session = Depends(get_db)):
+    """Export a flow as a standalone Python module (zip download).
+
+    agent_llms maps agent node ids to LLM config names — the same selection
+    the execute endpoint takes; providers/models are baked into the export
+    but credentials are read from env vars at run time, never embedded.
+    """
+    flow = get_flow_by_id(db, flow_id)
+    if not flow:
+        raise HTTPException(status_code=404, detail="Flow not found")
+    try:
+        llm_config = load_request_llm_config(request.user_id, session=db)
+        zip_bytes, filename = export_flow_zip(flow, db, llm_config, request.agent_llms)
+    except FlowExportError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Flow export failed: {str(e)}")
+    return StreamingResponse(
+        io.BytesIO(zip_bytes),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 def _watch_local_flow_child(child, execution_id: int, flow_id: int,
                             prev_completed_at=None) -> dict:
