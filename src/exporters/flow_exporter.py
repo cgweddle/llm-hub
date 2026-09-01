@@ -175,12 +175,22 @@ class _Node:
     agent_module: Optional[_AgentModule] = None
 
 
-def _static_output_kind(node: _Node) -> Tuple[str, Optional[Set[str]]]:
+def _classify_type_str(type_str: Optional[str]) -> str:
+    """Classify a schema type string as "dict", "nondict", or "unknown"."""
+    t = str(type_str or "").strip()
+    if t.lower().startswith(("dict", "mapping")):
+        return "dict"
+    if not t or t in ("Any", "object"):
+        return "unknown"
+    return "nondict"
+
+
+def _static_output_kind(node: _Node) -> Tuple[str, Optional[Dict[str, Optional[str]]]]:
     """Classify a node's output for static wiring.
 
     Returns (kind, known_fields): kind is "text" (agents/triggers),
-    "dict" (fields known when the output_schema lists properties),
-    "nondict", or "unknown".
+    "dict" (fields known when the output_schema lists properties — a
+    {name: type_string} map), "nondict", or "unknown".
     """
     if node.node_type in ("agent", "trigger"):
         return "text", None
@@ -188,13 +198,12 @@ def _static_output_kind(node: _Node) -> Tuple[str, Optional[Set[str]]]:
     if not isinstance(schema, dict):
         return "unknown", None
     if schema.get("type") == "object" and isinstance(schema.get("properties"), dict):
-        return "dict", set(schema["properties"].keys())
-    type_str = str(schema.get("type") or "").strip()
-    if type_str.lower().startswith(("dict", "mapping")):
-        return "dict", None
-    if not type_str or type_str in ("Any", "object"):
-        return "unknown", None
-    return "nondict", None
+        fields = {
+            name: (prop.get("type") if isinstance(prop, dict) else None)
+            for name, prop in schema["properties"].items()
+        }
+        return "dict", fields
+    return _classify_type_str(schema.get("type")), None
 
 
 # ─── flow.py emitter ─────────────────────────────────────────────────────────
@@ -202,10 +211,12 @@ def _static_output_kind(node: _Node) -> Tuple[str, Optional[Set[str]]]:
 class _FlowEmitter:
     """Builds flow.py: static input wiring + level-ordered orchestration."""
 
-    def __init__(self, flow, graph_config: dict, nodes: Dict[str, _Node]):
+    def __init__(self, flow, graph_config: dict, nodes: Dict[str, _Node],
+                 parallel: bool = True):
         self.flow = flow
         self.graph = graph_config
         self.nodes = nodes
+        self.parallel = parallel
         self.entry_point = graph_config.get("entry_point")
         self.helpers_used: Set[str] = set()
         self.needs_asyncio = False
@@ -232,31 +243,16 @@ class _FlowEmitter:
         # Params known to be filled so far; None once a merge of unknown keys occurs.
         filled: Optional[Set[str]] = {k for _, k, _ in items}
 
-        for edge in incoming:
-            upstream = self.nodes[edge["from_node"]]
-            kind, fields = _static_output_kind(upstream)
-            mapping = edge.get("mapping")
-            if mapping:
-                for out_field, in_param in mapping.items():
-                    if out_field == "":
-                        expr = upstream.var
-                    elif kind == "dict" and fields is not None and out_field in fields:
-                        expr = f'{upstream.var}[{out_field!r}]'
-                    elif kind in ("text", "nondict"):
-                        expr = upstream.var
-                    else:
-                        self.helpers_used.add("_pick")
-                        expr = f'_pick({upstream.var}, {out_field!r})'
-                    items.append(("kw", in_param, expr))
-                    if filled is not None:
-                        filled.add(in_param)
-            elif kind == "dict":
-                items.append(("splat", upstream.var))
-                if fields is not None and filled is not None:
-                    filled.update(fields)
+        def add_whole(expr, value_kind, value_fields, source_node):
+            """Merge a whole-input value: an unmapped edge or a {field: ""} selection."""
+            nonlocal filled
+            if value_kind == "dict":
+                items.append(("splat", expr))
+                if value_fields is not None and filled is not None:
+                    filled.update(value_fields)
                 else:
                     filled = None
-            elif kind in ("text", "nondict") and filled is not None:
+            elif value_kind in ("text", "nondict") and filled is not None:
                 if len(params) == 1:
                     target = params[0]
                 else:
@@ -264,16 +260,43 @@ class _FlowEmitter:
                     if not unfilled:
                         raise FlowExportError(
                             f"Tool node '{node.node_id}' has no free parameter for the "
-                            f"unmapped output of '{edge['from_node']}'. Add an edge "
+                            f"unmapped output of '{source_node}'. Add an edge "
                             f"mapping to say which parameter it should fill."
                         )
                     target = unfilled[0]
-                items.append(("kw", target, upstream.var))
+                items.append(("kw", target, expr))
                 filled.add(target)
             else:
                 self.helpers_used.add("_merge_auto")
-                items.append(("auto", upstream.var, params))
+                items.append(("auto", expr, params))
                 filled = None
+
+        for edge in incoming:
+            upstream = self.nodes[edge["from_node"]]
+            kind, fields = _static_output_kind(upstream)
+            mapping = edge.get("mapping")
+            if mapping:
+                for out_field, in_param in mapping.items():
+                    if out_field == "":
+                        expr, value_kind, value_fields = upstream.var, kind, fields
+                    elif kind == "dict" and fields is not None and out_field in fields:
+                        expr = f'{upstream.var}[{out_field!r}]'
+                        value_kind = _classify_type_str(fields[out_field])
+                        value_fields = None
+                    elif kind in ("text", "nondict"):
+                        expr, value_kind, value_fields = upstream.var, kind, None
+                    else:
+                        self.helpers_used.add("_pick")
+                        expr = f'_pick({upstream.var}, {out_field!r})'
+                        value_kind, value_fields = "unknown", None
+                    if in_param == "":
+                        add_whole(expr, value_kind, value_fields, edge["from_node"])
+                    else:
+                        items.append(("kw", in_param, expr))
+                        if filled is not None:
+                            filled.add(in_param)
+            else:
+                add_whole(upstream.var, kind, fields, edge["from_node"])
         return self._render_args(items)
 
     @staticmethod
@@ -302,6 +325,22 @@ class _FlowEmitter:
             return parts[0]
         return "**{" + ", ".join(parts) + "}"
 
+    def _selected_upstream_expr(self, edge: dict) -> Tuple[str, str]:
+        """(expression, kind) for a whole-input edge, honoring its field
+        selection ({out_field: ""} from an expanded dict output)."""
+        upstream = self.nodes[edge["from_node"]]
+        kind, fields = _static_output_kind(upstream)
+        mapping = edge.get("mapping")
+        out_field = next(iter(mapping)) if mapping else ""
+        if not out_field or kind in ("text", "nondict"):
+            return upstream.var, kind
+        if kind == "dict" and fields is not None and out_field in fields:
+            expr = f'{upstream.var}[{out_field!r}]'
+            field_type = str(fields[out_field] or "")
+            return expr, ("text" if field_type == "str" else _classify_type_str(field_type))
+        self.helpers_used.add("_pick")
+        return f'_pick({upstream.var}, {out_field!r})', "unknown"
+
     def _agent_input_expr(self, node: _Node) -> str:
         incoming = _incoming_edges(self.graph, node.node_id)
         if not incoming:
@@ -309,17 +348,16 @@ class _FlowEmitter:
                 self.helpers_used.add("_as_text")
                 return "_as_text(initial_input)"
             return repr(node.config.get("input_value", "") or "")
-        upstream = self.nodes[incoming[0]["from_node"]]
-        kind, _ = _static_output_kind(upstream)
+        expr, kind = self._selected_upstream_expr(incoming[0])
         if kind == "text":
-            return upstream.var
+            return expr
         self.helpers_used.add("_as_text")
-        return f"_as_text({upstream.var})"
+        return f"_as_text({expr})"
 
     def _trigger_expr(self, node: _Node) -> str:
         incoming = _incoming_edges(self.graph, node.node_id)
         if incoming:
-            return self.nodes[incoming[0]["from_node"]].var
+            return self._selected_upstream_expr(incoming[0])[0]
         input_value = node.config.get("input_value")
         if node.node_id == self.entry_point:
             if input_value:
@@ -367,7 +405,7 @@ class _FlowEmitter:
         body: List[str] = []
         for index, level in enumerate(levels, start=1):
             awaitable = [c for c in level if not (len(c.nodes) == 1 and self.nodes[c.nodes[0]].node_type == "trigger")]
-            parallel = len(awaitable) > 1
+            parallel = self.parallel and len(awaitable) > 1
             body.append(self._level_comment(index, level, parallel))
 
             if not parallel:
@@ -446,10 +484,13 @@ class _FlowEmitter:
             ) if name in self.helpers_used
         ]
 
+        if self.parallel:
+            mode_line = ("Exported from LLM Hub. Nodes run in dependency order; nodes at the\n"
+                         "same level run concurrently with asyncio.gather.")
+        else:
+            mode_line = "Exported from LLM Hub. Nodes run sequentially in dependency order."
         parts = [
-            f'"""Standalone orchestrator for flow "{self.flow.name}".\n\n'
-            "Exported from LLM Hub. Nodes run in dependency order; nodes at the\n"
-            'same level run concurrently with asyncio.gather.\n"""'
+            f'"""Standalone orchestrator for flow "{self.flow.name}".\n\n{mode_line}\n"""'
         ]
         if imports:
             parts.append("\n".join(imports))
@@ -777,12 +818,16 @@ def _load_tool(session, tool_id, node_label: str):
 # ─── Public API ──────────────────────────────────────────────────────────────
 
 def export_flow(flow, session, llm_config: dict,
-                agent_llms: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+                agent_llms: Optional[Dict[str, str]] = None,
+                parallel: bool = True) -> Dict[str, str]:
     """Build the standalone module for a flow.
 
     Returns {relative_path: file_content}. Raises FlowExportError for
     anything that makes the flow unexportable (Phase-1 limits, missing
     records, unresolvable providers, unmappable wiring).
+
+    parallel=False emits a fully sequential flow.py: same-level branches
+    run one after another instead of via asyncio.gather.
     """
     graph_config = flow.graph_config or {}
     if not graph_config.get("nodes"):
@@ -847,7 +892,7 @@ def export_flow(flow, session, llm_config: dict,
         for am in agent_modules:
             files[f"agents/{am.module}.py"] = _emit_agent_module(am)
 
-    files["flow.py"] = _FlowEmitter(flow, graph_config, nodes).emit()
+    files["flow.py"] = _FlowEmitter(flow, graph_config, nodes, parallel=parallel).emit()
 
     entry_node = nodes.get(graph_config.get("entry_point"))
     all_tools = [tm.tool for tm in tool_modules_by_id.values()]
@@ -859,9 +904,10 @@ def export_flow(flow, session, llm_config: dict,
 
 
 def export_flow_zip(flow, session, llm_config: dict,
-                    agent_llms: Optional[Dict[str, str]] = None) -> Tuple[bytes, str]:
+                    agent_llms: Optional[Dict[str, str]] = None,
+                    parallel: bool = True) -> Tuple[bytes, str]:
     """Zip the export under a <flow_slug>/ prefix. Returns (bytes, filename)."""
-    files = export_flow(flow, session, llm_config, agent_llms)
+    files = export_flow(flow, session, llm_config, agent_llms, parallel=parallel)
     slug = _slugify(flow.name, set(), fallback=f"flow_{flow.id}")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:

@@ -238,6 +238,7 @@ class FlowExecuteRequest(BaseModel):
 class FlowExportRequest(BaseModel):
     user_id: int = 1
     agent_llms: Dict[str, str] = {}
+    parallel: bool = True
 
 class ExecutionResponse(BaseModel):
     """Recursive execution tree node."""
@@ -729,6 +730,7 @@ def update_tool_endpoint(tool_id: int, tool_update: ToolUpdate, db: Session = De
 
                 if main_function in functions:
                     schema_gen = factory.schema_generator
+                    schema_gen.typed_dicts = analyzer.typed_dicts
                     update_data['input_schema'] = schema_gen.generate_input_schema(functions[main_function])
                     update_data['output_schema'] = schema_gen.generate_output_schema(functions[main_function])
             except Exception as e:
@@ -886,7 +888,8 @@ def export_flow_endpoint(flow_id: int, request: FlowExportRequest, db: Session =
         raise HTTPException(status_code=404, detail="Flow not found")
     try:
         llm_config = load_request_llm_config(request.user_id, session=db)
-        zip_bytes, filename = export_flow_zip(flow, db, llm_config, request.agent_llms)
+        zip_bytes, filename = export_flow_zip(flow, db, llm_config, request.agent_llms,
+                                              parallel=request.parallel)
     except FlowExportError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except HTTPException:

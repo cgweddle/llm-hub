@@ -182,6 +182,35 @@ def test_parallel_flow_wiring(db):
     assert "return join_out" in flow_py
 
 
+def test_parallel_false_emits_sequential_flow(db):
+    """parallel=False: same wiring, but branches run one after another."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    summarize = make_summarize_tool(session, user)
+    flow = make_flow(
+        session, user,
+        nodes={
+            "T": {"node_type": "trigger", "id": 0, "name": "Trigger",
+                  "input_value": "hi"},
+            "F": {"node_type": "tool", "id": fetch.id, "name": "Fetch Page"},
+            "S": {"node_type": "tool", "id": summarize.id, "name": "Summarize",
+                  "input_values": {"max_words": 100}},
+        },
+        edges=[
+            {"from_node": "T", "to_node": "F", "mapping": {"": "url"}},
+            {"from_node": "T", "to_node": "S"},
+        ],
+        entry="T", exits=["F", "S"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG, parallel=False)
+    assert_all_compile(files)
+    flow_py = files["flow.py"]
+    assert "await asyncio.gather(" not in flow_py and "to_thread(" not in flow_py
+    assert "fetch_page_out = fetch_page(url=trigger_out)" in flow_py
+    assert "summarize_out = summarize_text(" in flow_py
+    assert "sequentially in dependency order" in flow_py
+
+
 def test_sequential_flow_direct_calls(db):
     session, user = db
     fetch = make_fetch_tool(session, user)
@@ -420,6 +449,88 @@ def test_multi_node_agent_rejected(db):
     flow = agent_flow(session, user, agent, fetch)
     with pytest.raises(FlowExportError, match="single-node agents only"):
         export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+
+
+def test_agent_gets_selected_field_from_expanded_output(db):
+    """{field: ""} mapping (expanded dict output → agent) feeds just that field."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, single_node_agent_config())
+    flow = make_flow(
+        session, user,
+        nodes={
+            "F": {"node_type": "tool", "id": fetch.id, "name": "Fetch"},
+            "AG": {"node_type": "agent", "id": agent.id, "name": "Reviewer"},
+        },
+        edges=[{"from_node": "F", "to_node": "AG", "mapping": {"text": ""}}],
+        entry="F", exits=["AG"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+    flow_py = files["flow.py"]
+    # "text" is a str field in the schema — direct subscript, no _as_text
+    assert "await run_reviewer(fetch_out['text'])" in flow_py
+
+
+def test_agent_selected_nonstr_field_is_stringified(db):
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, single_node_agent_config())
+    flow = make_flow(
+        session, user,
+        nodes={
+            "F": {"node_type": "tool", "id": fetch.id, "name": "Fetch"},
+            "AG": {"node_type": "agent", "id": agent.id, "name": "Reviewer"},
+        },
+        edges=[{"from_node": "F", "to_node": "AG", "mapping": {"status": ""}}],
+        entry="F", exits=["AG"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert "await run_reviewer(_as_text(fetch_out['status']))" in files["flow.py"]
+
+
+def test_tool_generic_input_autowraps_selected_field(db):
+    """{field: ""} into a tool merges the field like an unmapped scalar."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    summarize = make_summarize_tool(session, user)
+    flow = make_flow(
+        session, user,
+        nodes={
+            "F": {"node_type": "tool", "id": fetch.id, "name": "Fetch"},
+            "S": {"node_type": "tool", "id": summarize.id, "name": "Summarize",
+                  "input_values": {"max_words": 10}},
+        },
+        edges=[{"from_node": "F", "to_node": "S", "mapping": {"text": ""}}],
+        entry="F", exits=["S"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG)
+    assert_all_compile(files)
+    assert "text=fetch_out['text']" in files["flow.py"]
+
+
+def test_agent_selected_field_from_unknown_output_uses_pick(db):
+    session, user = db
+    mystery = make_tool(
+        session, user, "Mystery", "def mystery(x):\n    return x\n", "mystery",
+        input_schema={"properties": {"x": {"type": "str"}}},
+        output_schema={"type": "Any"},
+    )
+    agent = make_agent(session, user, single_node_agent_config())
+    flow = make_flow(
+        session, user,
+        nodes={
+            "M": {"node_type": "tool", "id": mystery.id, "name": "Mystery"},
+            "AG": {"node_type": "agent", "id": agent.id, "name": "Reviewer"},
+        },
+        edges=[{"from_node": "M", "to_node": "AG", "mapping": {"text": ""}}],
+        entry="M", exits=["AG"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+    flow_py = files["flow.py"]
+    assert "_as_text(_pick(mystery_out, 'text'))" in flow_py
+    assert "def _pick(" in flow_py
 
 
 # ─── Zip wrapper ─────────────────────────────────────────────────────────────

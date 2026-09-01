@@ -687,12 +687,12 @@ export async function deleteFlow(flowId: number): Promise<void> {
   }
 }
 
-export async function exportFlow(flowId: number, userId: number = 1, agentLlms: Record<string, string> = {}): Promise<void> {
+export async function exportFlow(flowId: number, userId: number = 1, agentLlms: Record<string, string> = {}, parallel: boolean = true): Promise<void> {
   try {
     const response = await fetch(`${API_BASE_URL}/flows/${flowId}/export`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId, agent_llms: agentLlms })
+      body: JSON.stringify({ user_id: userId, agent_llms: agentLlms, parallel })
     });
 
     if (!response.ok) {

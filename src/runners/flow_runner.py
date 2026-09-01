@@ -132,6 +132,41 @@ def _stringify_for_agent(value: Any) -> str:
     return json.dumps(value, indent=2, default=str)
 
 
+def _select_output_field(upstream: Any, mapping: Optional[dict]) -> Any:
+    """Apply an edge's field selection to a whole-input target.
+
+    An expanded dict output connected to a generic input (agent or
+    schema-less tool) stores {out_field: ""}: pick that key from the
+    upstream dict; fall back to the whole value."""
+    if not mapping:
+        return upstream
+    out_field = next(iter(mapping))
+    if out_field and isinstance(upstream, dict) and out_field in upstream:
+        return upstream[out_field]
+    return upstream
+
+
+def _merge_into_base(base: dict, value: Any, props: dict) -> bool:
+    """Merge an unmapped/whole-input value into a tool's kwargs.
+
+    Dict values merge key by key; anything else fills the tool's only
+    parameter or the first parameter not already provided. Returns False
+    when there is nowhere to put a non-dict value — the caller then uses
+    the value as the node's entire input."""
+    if isinstance(value, dict):
+        base.update(value)
+        return True
+    param_names = list(props.keys())
+    unfilled = [p for p in param_names if p not in base]
+    if len(param_names) == 1:
+        base[param_names[0]] = value
+        return True
+    if unfilled:
+        base[unfilled[0]] = value
+        return True
+    return False
+
+
 def _build_node_input(ctx: FlowRunContext, node_id: str, stage_input: Any) -> Any:
     """Derive a node's real input from ctx.state + incoming-edge mappings.
 
@@ -157,13 +192,16 @@ def _build_node_input(ctx: FlowRunContext, node_id: str, stage_input: Any) -> An
             return node_config.get("input_value", "") or ""
         return dict(node_config.get("input_values", {}))
 
-    # Agents consume text: take the first upstream output, coerce to text.
+    # Agents consume text: take the first upstream output (or its selected
+    # field, for edges from an expanded dict output), coerce to text.
     if node_type == "agent":
-        upstream = ctx.state.get(incoming[0]["from_node"])
+        edge = incoming[0]
+        upstream = _select_output_field(ctx.state.get(edge["from_node"]), edge.get("mapping"))
         return _stringify_for_agent(upstream)
 
     if node_type == "trigger":  # unusual, but be safe
-        return ctx.state.get(incoming[0]["from_node"])
+        edge = incoming[0]
+        return _select_output_field(ctx.state.get(edge["from_node"]), edge.get("mapping"))
 
     # Tool target: base = typed-in values, overlay edge-mapped upstream values.
     base = dict(node_config.get("input_values", {}))
@@ -175,24 +213,18 @@ def _build_node_input(ctx: FlowRunContext, node_id: str, stage_input: Any) -> An
         mapping = edge.get("mapping")
         if mapping:
             for out_field, in_param in mapping.items():
-                if out_field == "":
-                    base[in_param] = upstream            # whole output
-                elif isinstance(upstream, dict) and out_field in upstream:
-                    base[in_param] = upstream[out_field]
+                if out_field == "" or not (isinstance(upstream, dict) and out_field in upstream):
+                    value = upstream                     # whole output / scalar upstream
                 else:
-                    base[in_param] = upstream            # text/scalar upstream
-        elif isinstance(upstream, dict):
-            base.update(upstream)                        # passthrough merge
-        else:
-            # Non-dict upstream, no mapping: auto-wrap into an unfilled param.
-            param_names = list(props.keys())
-            unfilled = [p for p in param_names if p not in base]
-            if len(param_names) == 1:
-                base[param_names[0]] = upstream
-            elif unfilled:
-                base[unfilled[0]] = upstream
-            else:
-                return upstream                          # nothing to map into
+                    value = upstream[out_field]
+                if in_param == "":
+                    # Generic whole-input target: merge the selected value.
+                    if not _merge_into_base(base, value, props):
+                        return value                     # nothing to map into
+                else:
+                    base[in_param] = value
+        elif not _merge_into_base(base, upstream, props):
+            return upstream                              # nothing to map into
     return base
 
 

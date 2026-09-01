@@ -110,17 +110,22 @@ function determineMappingFromEdge(
   targetNode: XYFlowNode | undefined,
   tools: Tool[]
 ): Record<string, string> | undefined {
-  // If edge has explicit sourceHandle and targetHandle, use them
-  if (edge.sourceHandle !== undefined && edge.targetHandle !== undefined) {
-    // Empty string means whole output
-    // Non-empty string is the field/parameter name
+  // If edge has explicit handle info, use it. xyflow reports a handle with
+  // id="" as either "" or null depending on the code path — treat both as
+  // "the generic whole-output/whole-input handle".
+  if (edge.sourceHandle != null || edge.targetHandle != null) {
+    const sourceHandle = edge.sourceHandle ?? "";
+    const targetHandle = edge.targetHandle ?? "";
 
-    const sourceHandle = edge.sourceHandle;
-    const targetHandle = edge.targetHandle;
-
-    // If targetHandle is empty, something is wrong (inputs are always named)
+    // Empty targetHandle = generic whole-input target (agent nodes, tools
+    // without an input schema). A named sourceHandle still selects one
+    // field from an expanded dict output: store {field: ""} so the backend
+    // feeds that field (not the whole dict) to the node.
     if (targetHandle === "") {
-      return undefined; // Fallback to auto-detect
+      if (sourceHandle !== "") {
+        return { [sourceHandle]: "" };
+      }
+      return undefined; // whole output → whole input: plain passthrough
     }
 
     // Whole output → Specific parameter (e.g., "" → "inputs")
