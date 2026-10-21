@@ -41,6 +41,11 @@ npm run build    # Production build
 ### Running Both Together
 Start the backend first (`python start_backend.py`), then the frontend (`cd frontend && npm run dev`). The frontend talks to the backend at `http://localhost:8000`.
 
+## Testing policy
+- All new features go through the TDD subagent chain
+- No test code and implementation code in the same Claude session
+- Skip TDD only for one-line typo fixes and docs
+
 ## Architecture
 
 ### Backend Stack

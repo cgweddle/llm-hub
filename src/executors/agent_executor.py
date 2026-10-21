@@ -35,6 +35,7 @@ from database.database import create_execution, update_execution
 from database.database_setup import Execution
 from utils.prompt_template import resolve_user_prompt_template
 from runners.agent_runner import BuiltAgent
+from executors.agent_graph_engine import run_graph
 
 # Import retry utilities
 try:
@@ -144,200 +145,85 @@ class AgentExecutor:
     ) -> Dict[str, Any]:
         """
         Execute an agent graph via BFS traversal with cycle support.
-        Records sub-agent nodes as child Execution rows for structural tracking.
-        Internal tool call details are captured by LangFuse.
+
+        Traversal lives in the pure agent_graph_engine.run_graph; this method
+        supplies the effectful callables it injects. run_node wraps each run
+        with LangFuse trace capture + retry (delegating to _run_sub_agent);
+        record_node writes structural Execution rows for multi-node agents
+        (single-node agents reuse the parent execution). Internal tool call
+        details are captured by LangFuse.
         """
-        nodes_config = graph_config.get("nodes", {})
-        edges_config = graph_config.get("edges", [])
-        entry_point = graph_config.get("entry_point")
-        exit_points = graph_config.get("exit_points", [])
+        is_multi_node = len(graph_config.get("nodes", {})) > 1
+        step = {"seq": 0}
 
-        if max_loop_iterations is None:
-            max_loop_iterations = graph_config.get("max_loop_iterations", 5)
+        async def run_node(node_id, node_config, node_input, predecessor_messages):
+            built = built_agents.get(node_id)
+            if built is None:
+                raise ValueError(f"No compiled agent for sub-node '{node_id}'")
 
-        if not entry_point or not nodes_config:
-            raise ValueError("Invalid graph_config: missing entry_point or nodes")
-
-        logger.info(
-            f"Graph execution: {len(nodes_config)} nodes, {len(edges_config)} edges, "
-            f"entry: {entry_point}, exits: {exit_points}"
-        )
-
-        # Build adjacency list and edge metadata
-        adjacency: Dict[str, list] = {node_id: [] for node_id in nodes_config}
-        loop_edges: set = set()
-        edge_output_paths: Dict[tuple, str] = {}  # (from, to) → output_path name
-        for edge in edges_config:
-            from_node = edge.get("from_node")
-            to_node = edge.get("to_node")
-            is_loop = edge.get("is_loop", False)
-            output_path = edge.get("output_path")
-            if from_node and to_node:
-                adjacency[from_node].append(to_node)
-                if is_loop:
-                    loop_edges.add((from_node, to_node))
-                if output_path:
-                    edge_output_paths[(from_node, to_node)] = output_path
-
-        # Track execution
-        execution_trace = []
-        node_outputs: Dict[str, Any] = {}
-        messages: List = []  # Accumulating PydanticAI message history across all nodes
-        loop_counts: Dict[tuple, int] = {}
-        step_sequence = 0
-
-        # BFS traversal
-        current_nodes = [entry_point]
-        current_input = input_data
-
-        while current_nodes:
-            next_nodes = []
-
-            for node_id in current_nodes:
-                if node_id not in nodes_config:
-                    logger.warning(f"Node {node_id} not found in config, skipping")
-                    continue
-
-                # Determine input for this node
-                node_input = node_outputs.get(node_id + "_input", current_input)
-
-                built = built_agents.get(node_id)
-                if built is None:
-                    raise ValueError(f"No compiled agent for sub-node '{node_id}'")
-
-                # Execute the sub-agent node
-                chosen_path = None
-                # Read by the except handler below even when LangFuse is off,
-                # so it must be bound outside the LANGFUSE_AVAILABLE branch.
-                _captured_trace_id = None
-                try:
-                    trace_id = None
-                    predecessor_msgs = messages if messages else None
-
-                    if LANGFUSE_AVAILABLE and langfuse_observe:
-                        # Capture trace ID even if the agent fails
-                        @langfuse_observe(name=nodes_config[node_id].get("name", node_id))
-                        async def _observed_run():
-                            nonlocal _captured_trace_id
-                            _captured_trace_id = langfuse_client.get_current_trace_id()
-                            result = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, built, predecessor_messages=predecessor_msgs)
-                            return result
-
-                        output, node_result_messages, chosen_path = await _observed_run()
-                        trace_id = _captured_trace_id
-                        langfuse_client.flush()
-                    else:
-                        output, node_result_messages, chosen_path = await self._run_sub_agent(node_id, nodes_config[node_id], node_input, built, predecessor_messages=predecessor_msgs)
-                    # Apply return behavior for the chosen path
-                    if chosen_path:
-                        node_output_paths = nodes_config[node_id].get("output_paths", {})
-                        path_config = node_output_paths.get(chosen_path, {})
-                        if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
-                            output = node_input
-
-                    node_outputs[node_id] = output
-                    if node_result_messages is not None:
-                        messages = node_result_messages
-
-                    execution_trace.append({
-                        "node": node_id,
-                        "name": nodes_config[node_id].get("name", node_id),
-                        "agent_type": nodes_config[node_id].get("agent_type"),
-                        "input": node_input[:200] + "..." if len(str(node_input)) > 200 else node_input,
-                        "output": output[:200] + "..." if len(str(output)) > 200 else output,
-                        "status": "completed"
-                    })
-
-                    # Record structural node execution for multi-node agents only.
-                    # Single-node agents already have a parent execution representing them.
-                    is_multi_node = len(nodes_config) > 1
-                    if execution and is_multi_node:
-                        create_execution(
-                            self.session,
-                            parent_id=execution.id,
-                            user_id=execution.user_id,
-                            execution_type='agent',
-                            node_id=node_id,
-                            name=nodes_config[node_id].get("name", node_id),
-                            sequence=step_sequence,
-                            input_data={"input": str(node_input)[:2000]},
-                            output_data={"result": str(output)[:2000]},
-                            status='completed',
-                            started_at=datetime.now(),
-                            completed_at=datetime.now(),
-                            execution_metadata={
-                                "agent_type": nodes_config[node_id].get("agent_type"),
-                            },
-                            langfuse_trace_id=trace_id
+            # Bound outside the LANGFUSE branch so the failure handler can read it.
+            captured_trace_id = None
+            try:
+                if LANGFUSE_AVAILABLE and langfuse_observe:
+                    # Capture the trace ID even if the agent fails
+                    @langfuse_observe(name=node_config.get("name", node_id))
+                    async def _observed_run():
+                        nonlocal captured_trace_id
+                        captured_trace_id = langfuse_client.get_current_trace_id()
+                        return await self._run_sub_agent(
+                            node_id, node_config, node_input, built,
+                            predecessor_messages=predecessor_messages,
                         )
-                        step_sequence += 1
-                    elif execution and trace_id:
-                        update_execution(self.session, execution.id, langfuse_trace_id=trace_id)
 
-                    logger.debug(f"Sub-agent {node_id} completed")
+                    output, node_messages, chosen_path = await _observed_run()
+                    langfuse_client.flush()
+                else:
+                    output, node_messages, chosen_path = await self._run_sub_agent(
+                        node_id, node_config, node_input, built,
+                        predecessor_messages=predecessor_messages,
+                    )
+            except Exception:
+                # Store trace ID even on failure so the LangFuse trace is accessible
+                if execution and captured_trace_id:
+                    langfuse_client.flush()
+                    update_execution(self.session, execution.id, langfuse_trace_id=captured_trace_id)
+                raise
 
-                except Exception as e:
-                    # Store trace ID even on failure so the LangFuse trace is accessible
-                    if execution and _captured_trace_id:
-                        langfuse_client.flush()
-                        update_execution(self.session, execution.id, langfuse_trace_id=_captured_trace_id)
+            return output, node_messages, chosen_path, captured_trace_id
 
-                    logger.error(f"Sub-agent {node_id} failed: {e}")
-                    raise RuntimeError(
-                        f"Agent node '{nodes_config[node_id].get('name', node_id)}' failed: {e}"
-                    ) from e
+        def record_node(node_id, node_config, node_input, output, chosen_path, trace_id):
+            if execution and is_multi_node:
+                create_execution(
+                    self.session,
+                    parent_id=execution.id,
+                    user_id=execution.user_id,
+                    execution_type='agent',
+                    node_id=node_id,
+                    name=node_config.get("name", node_id),
+                    sequence=step["seq"],
+                    input_data={"input": str(node_input)[:2000]},
+                    output_data={"result": str(output)[:2000]},
+                    status='completed',
+                    started_at=datetime.now(),
+                    completed_at=datetime.now(),
+                    execution_metadata={
+                        "agent_type": node_config.get("agent_type"),
+                    },
+                    langfuse_trace_id=trace_id,
+                )
+                step["seq"] += 1
+            elif execution and trace_id:
+                update_execution(self.session, execution.id, langfuse_trace_id=trace_id)
 
-                # Traverse successor nodes
-                # Exit points skip forward edges but still follow loop edges
-                is_exit = node_id in exit_points
-                for successor in adjacency.get(node_id, []):
-                    edge_key = (node_id, successor)
-                    is_loop_edge = edge_key in loop_edges
-
-                    # Exit points only follow loop edges back, not forward edges
-                    if is_exit and not is_loop_edge:
-                        continue
-
-                    # Filter by output_path when the node chose a specific path
-                    edge_path = edge_output_paths.get(edge_key)
-                    if chosen_path is not None and edge_path is not None:
-                        if edge_path != chosen_path:
-                            continue
-
-                    # Handle loop edges with iteration limit
-                    if is_loop_edge:
-                        loop_counts[edge_key] = loop_counts.get(edge_key, 0) + 1
-                        if loop_counts[edge_key] > max_loop_iterations:
-                            logger.warning(
-                                f"Loop limit reached for edge {node_id} -> {successor}, skipping"
-                            )
-                            continue
-
-                    # Pass output as input to successor
-                    node_outputs[successor + "_input"] = output
-                    if successor not in next_nodes:
-                        next_nodes.append(successor)
-
-            current_nodes = next_nodes
-
-        # Collect final outputs from exit points
-        final_outputs = {
-            node_id: node_outputs.get(node_id, "")
-            for node_id in exit_points
-            if node_id in node_outputs
-        }
-
-        main_result = final_outputs.get(exit_points[0], "") if exit_points else ""
-
-        return {
-            "execution_id": execution.id if execution else None,
-            "status": "completed",
-            "result": main_result,
-            "all_outputs": final_outputs,
-            "execution_trace": execution_trace,
-            "messages": execution_trace,
-            "sub_agent_count": len(nodes_config)
-        }
+        result = await run_graph(
+            graph_config,
+            input_data,
+            run_node,
+            record_node=record_node,
+            max_loop_iterations=max_loop_iterations,
+        )
+        result["execution_id"] = execution.id if execution else None
+        return result
 
     async def _run_sub_agent(
         self, node_id: str, node_config: Dict, node_input: str,
