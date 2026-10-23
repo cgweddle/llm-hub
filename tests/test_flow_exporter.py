@@ -959,6 +959,135 @@ def test_subagent_tool_name_clash(db, import_exported):
     assert "run" in recorded["names"]
 
 
+def test_single_node_output_path_named_agent(db, import_exported):
+    """An output path literally named "agent" would define a top-level
+    `class Agent(BaseModel)` that replaces the imported pydantic_ai.Agent.
+    The exporter must detect the clash and emit the output-path classes
+    inside a `_output_types()` function instead (same shape multi-node
+    sub-agent files already use for clashing path names)."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, single_node_agent_config(
+        output_paths={
+            "human": {"description": "For a person"},
+            "agent": {"description": "For another agent"},
+        },
+    ))
+    flow = agent_flow(session, user, agent, fetch)
+
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+    assert_standalone(files)
+
+    agent_py = files["agents/reviewer.py"]
+    assert "def _output_types():" in agent_py
+    assert "output_type=_output_types()" in agent_py
+    agent_call_line = next(
+        l for l in agent_py.splitlines() if l.startswith("agent = Agent("))
+    assert "output_type=_output_types()" in agent_call_line
+
+    module = import_exported(files, "agents.reviewer")
+    assert module.Agent is pydantic_ai.Agent
+    assert {c.__name__ for c in typing.get_args(module._output_types())} == {
+        "Human", "Agent"}
+
+    def fn(messages, info):
+        return ModelResponse(parts=[ToolCallPart(
+            "final_result_Agent", {"content": "to agent"})])
+
+    with module.agent.override(model=FunctionModel(fn)):
+        result = asyncio.run(module.run_reviewer("x"))
+    assert result == "to agent"
+
+
+def test_single_node_tool_name_clash(db, import_exported):
+    """A tool whose main function is named model/agent/os would be imported
+    under that bare name and silently overwritten by the LLM model object
+    (or shadow the real os module), then get registered as an LLM tool
+    instead of a callable. The exporter must alias the import to
+    <module>_<func> and use that alias both for the import and for
+    agent.tool_plain(...); pydantic-ai still names the tool after the
+    function's __name__, so the LLM-visible tool name is unaffected."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    tool_model = make_tool(
+        session, user, "Model Lookup",
+        "def model(x):\n    return x\n", "model",
+        input_schema={"properties": {"x": {"type": "str"}}},
+    )
+    tool_agent = make_tool(
+        session, user, "Agent Lookup",
+        "def agent(x):\n    return x\n", "agent",
+        input_schema={"properties": {"x": {"type": "str"}}},
+    )
+    tool_os = make_tool(
+        session, user, "Os Lookup",
+        "def os(x):\n    return x\n", "os",
+        input_schema={"properties": {"x": {"type": "str"}}},
+    )
+    agent = make_agent(session, user, single_node_agent_config(
+        tool_ids=[tool_model.id, tool_agent.id, tool_os.id],
+    ))
+    flow = agent_flow(session, user, agent, fetch)
+
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+    assert_standalone(files)
+
+    agent_py = files["agents/reviewer.py"]
+    assert "from tools.model_lookup import model as model_lookup_model" in agent_py
+    assert "from tools.agent_lookup import agent as agent_lookup_agent" in agent_py
+    assert "from tools.os_lookup import os as os_lookup_os" in agent_py
+    assert "agent.tool_plain(model_lookup_model)" in agent_py
+    assert "agent.tool_plain(agent_lookup_agent)" in agent_py
+    assert "agent.tool_plain(os_lookup_os)" in agent_py
+
+    module = import_exported(files, "agents.reviewer")
+    assert isinstance(module.model, Model)
+    assert module.os is os
+
+    recorded = {}
+
+    def fn(messages, info):
+        recorded["names"] = [t.name for t in info.function_tools]
+        return ModelResponse(parts=[TextPart("ok")])
+
+    with module.agent.override(model=FunctionModel(fn)):
+        asyncio.run(module.agent.run("hi"))
+
+    assert "model" in recorded["names"]
+    assert "agent" in recorded["names"]
+    assert "os" in recorded["names"]
+
+
+def test_single_node_ordinary_names_unchanged(db):
+    """Sanity/regression guard: a normal single-node agent (no clashing
+    output-path or tool names) must keep emitting plain top-level output
+    classes and a bare import — i.e. every agent that exports correctly
+    today must stay byte-identical once the clash fixes land."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, single_node_agent_config(
+        tool_ids=[fetch.id],
+        output_paths={
+            "approve": {"description": "Looks good"},
+            "revise": {"description": "Needs changes"},
+        },
+    ))
+    flow = agent_flow(session, user, agent, fetch)
+
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+
+    agent_py = files["agents/reviewer.py"]
+    assert re.search(r"^class Approve\(BaseModel\):", agent_py, re.MULTILINE)
+    assert re.search(r"^class Revise\(BaseModel\):", agent_py, re.MULTILINE)
+    assert "output_type=Approve | Revise" in agent_py
+    assert "_output_types" not in agent_py
+    assert "from tools.fetch_page import fetch_page" in agent_py
+    assert " as fetch_page" not in agent_py
+
+
 def test_agent_gets_selected_field_from_expanded_output(db):
     """{field: ""} mapping (expanded dict output → agent) feeds just that field."""
     session, user = db

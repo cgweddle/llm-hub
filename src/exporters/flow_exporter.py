@@ -655,6 +655,15 @@ def _output_path_routing_suffix(output_paths: dict) -> str:
     return "\n".join(routing_lines)
 
 
+def _single_node_file_names(am: "_AgentModule", model_cls: str, provider_cls: str) -> Set[str]:
+    """Top-level names a single-node agent file defines or imports."""
+    return {
+        "os", "Agent", "BaseModel", model_cls, provider_cls,
+        "SYSTEM_PROMPT", "USER_PROMPT", "CLASS_TO_PATH", "PREVIOUS_OUTPUT_PATHS",
+        "model", "agent", am.run_func, "_output_types",
+    }
+
+
 def _emit_single_node_agent(am: _AgentModule) -> str:
     key_expr, model, base_url, model_cls, provider_cls, module_suffix = (
         _resolve_provider_model(am.provider_config)
@@ -668,6 +677,24 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
     output_paths = sub_config.get("output_paths") or {}
     system_prompt += _output_path_routing_suffix(output_paths)
 
+    file_names = _single_node_file_names(am, model_cls, provider_cls)
+
+    class_to_path: Dict[str, str] = {}
+    previous_output_paths = []
+    for path_name, path_config in output_paths.items():
+        class_name = path_name.capitalize()
+        if not class_name.isidentifier():
+            raise FlowExportError(
+                f"Output path '{path_name}' of agent '{am.agent.name}' is not a valid class name"
+            )
+        class_to_path[class_name] = path_name
+        if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
+            previous_output_paths.append(path_name)
+
+    wrap_classes = bool(set(class_to_path) & file_names)
+    taken = file_names if wrap_classes else file_names | set(class_to_path)
+    tool_imports = [_tool_import(tm, taken) for tm in am.tool_modules]
+
     lines: List[str] = [
         f'"""Agent "{_docstring_text(am.agent.name)}" — exported from LLM Hub agent id '
         f'{am.agent.id}."""',
@@ -679,30 +706,36 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
     ]
     if output_paths:
         lines.insert(2, "from pydantic import BaseModel")
-    for tm in am.tool_modules:
-        lines.append(_import_line("tools", tm))
+    for import_line, _ in tool_imports:
+        lines.append(import_line)
     lines.append("")
     lines.append("")
 
-    previous_output_paths = []
     if output_paths:
-        class_to_path: Dict[str, str] = {}
-        for path_name, path_config in output_paths.items():
-            class_name = path_name.capitalize()
-            if not class_name.isidentifier():
-                raise FlowExportError(
-                    f"Output path '{path_name}' of agent '{am.agent.name}' is not a valid class name"
-                )
-            class_to_path[class_name] = path_name
-            if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
-                previous_output_paths.append(path_name)
-            lines.append(f"class {class_name}(BaseModel):")
-            description = _get_path_description(path_config)
-            if description:
-                lines.append(f'    """{_docstring_text(description)}"""')
-            lines.append("    content: str")
+        if wrap_classes:
+            lines.append("def _output_types():")
+            for path_name, path_config in output_paths.items():
+                class_name = path_name.capitalize()
+                lines.append(f"    class {class_name}(BaseModel):")
+                description = _get_path_description(path_config)
+                if description:
+                    lines.append(f'        """{_docstring_text(description)}"""')
+                lines.append("        content: str")
+                lines.append("")
+            union = " | ".join(class_to_path.keys())
+            lines.append(f"    return {union}")
             lines.append("")
-        lines.append("")
+            lines.append("")
+        else:
+            for path_name, path_config in output_paths.items():
+                class_name = path_name.capitalize()
+                lines.append(f"class {class_name}(BaseModel):")
+                description = _get_path_description(path_config)
+                if description:
+                    lines.append(f'    """{_docstring_text(description)}"""')
+                lines.append("    content: str")
+                lines.append("")
+            lines.append("")
         lines.append(f"CLASS_TO_PATH = {class_to_path!r}")
         if previous_output_paths:
             lines.append(f"PREVIOUS_OUTPUT_PATHS = {previous_output_paths!r}")
@@ -724,11 +757,14 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
 
     agent_args = ["model=model", "system_prompt=SYSTEM_PROMPT"]
     if output_paths:
-        union = " | ".join(p.capitalize() for p in output_paths)
-        agent_args.append(f"output_type={union}")
+        if wrap_classes:
+            agent_args.append("output_type=_output_types()")
+        else:
+            union = " | ".join(p.capitalize() for p in output_paths)
+            agent_args.append(f"output_type={union}")
     lines.append(f"agent = Agent({', '.join(agent_args)})")
-    for tm in am.tool_modules:
-        lines.append(f"agent.tool_plain({tm.alias})")
+    for _, local_name in tool_imports:
+        lines.append(f"agent.tool_plain({local_name})")
     lines.append("")
     lines.append("")
 
@@ -776,16 +812,16 @@ def _emit_runtime_files() -> Dict[str, str]:
 # Names every sub-agent file defines or imports; a tool whose main function
 # shares one of these would shadow it (e.g. a tool named "model" would
 # replace the LLM model). Imported under an alias instead — see
-# _sub_agent_tool_import.
+# _tool_import.
 _SUB_AGENT_RESERVED_NAMES = {
     "agent", "run", "model", "apply_prompt", "Agent", "BaseModel",
     "SYSTEM_PROMPT", "USER_PROMPT", "CLASS_TO_PATH", "_output_types",
 }
 
 
-def _sub_agent_tool_import(tm: _ToolModule) -> Tuple[str, str]:
-    """(import line, local name) for a tool imported into a sub-agent file."""
-    if tm.alias in _SUB_AGENT_RESERVED_NAMES:
+def _tool_import(tm: _ToolModule, taken: Set[str]) -> Tuple[str, str]:
+    """(import line, local name) for a tool imported into an agent file."""
+    if tm.alias in taken:
         local_name = f"{tm.module}_{tm.func}"
         return f"from tools.{tm.module} import {tm.func} as {local_name}", local_name
     return _import_line("tools", tm), tm.alias
@@ -837,7 +873,7 @@ def _emit_sub_agent(am: _AgentModule, sub: _SubNode) -> str:
 
     tool_locals: List[str] = []
     for tm in sub.tool_modules:
-        import_line, local_name = _sub_agent_tool_import(tm)
+        import_line, local_name = _tool_import(tm, _SUB_AGENT_RESERVED_NAMES)
         lines.append(import_line)
         tool_locals.append(local_name)
     lines.append("")
