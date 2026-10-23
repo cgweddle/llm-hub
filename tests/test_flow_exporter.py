@@ -386,11 +386,60 @@ def test_tool_files_and_requirements(db):
     assert 'return {"text": url + "!", "status": 200}' in files["tools/fetch_page.py"]
     assert "def summarize_text(text, max_words):" in files["tools/summarize.py"]
     assert files["tools/__init__.py"] == ""
-    # union of required_packages minus infra denylist; no agent pins
+    # union of required_packages across tools; no agent pins
     requirements = files["requirements.txt"].splitlines()
     assert "requests" in requirements and "pandas" in requirements
-    assert "sqlalchemy" not in requirements
+    assert "sqlalchemy" in requirements
     assert not any(r.startswith("pydantic-ai") for r in requirements)
+
+
+def test_requirements_keep_every_tool_package(db):
+    """Every package a tool's script actually imports must survive into the
+    export's requirements.txt, including packages that used to be filtered
+    out by the (now-removed) infra denylist."""
+    session, user = db
+    tool = make_tool(
+        session, user, "Net Tool",
+        "def net_call(x):\n    return x\n",
+        "net_call",
+        input_schema={"properties": {"x": {"type": "str"}}},
+        required_packages=["httpx", "python-dotenv", "redis", "langfuse"],
+    )
+    flow = make_flow(
+        session, user,
+        nodes={"N": {"node_type": "tool", "id": tool.id, "name": "Net Tool"}},
+        edges=[],
+        entry="N", exits=["N"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG)
+    assert_all_compile(files)
+    requirements = files["requirements.txt"].splitlines()
+    for pkg in ["httpx", "python-dotenv", "redis", "langfuse"]:
+        assert pkg in requirements
+    assert requirements == sorted(set(requirements))
+    assert not any(r.startswith("pydantic-ai") for r in requirements)
+
+
+def test_requirements_agent_pin_and_tool_package_both_present(db):
+    """A tool-required package that happens to share a name with an SDK pin
+    (e.g. "openai") must still appear verbatim alongside the pinned, versioned
+    line the agent needs -- the two are distinct lines, not duplicates."""
+    session, user = db
+    tool = make_tool(
+        session, user, "OpenAI Tool",
+        "def call_openai(x):\n    return x\n",
+        "call_openai",
+        input_schema={"properties": {"x": {"type": "str"}}},
+        required_packages=["openai"],
+    )
+    agent = make_agent(session, user, single_node_agent_config(name="Reviewer"))
+    flow = agent_flow(session, user, agent, tool)
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "lm"})
+    assert_all_compile(files)
+    requirements = files["requirements.txt"].splitlines()
+    assert "openai" in requirements
+    assert "openai==2.12.0" in requirements
+    assert requirements == list(dict.fromkeys(requirements))
 
 
 def test_multi_exit_returns_tuple(db):

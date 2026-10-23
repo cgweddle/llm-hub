@@ -58,12 +58,6 @@ _SERIALIZER_SOURCE = _SRC_DIR / "utils" / "message_serializer.py"
 AGENT_BASE_PINS = ["pydantic[email]==2.12.5", "pydantic-ai==1.31.0"]
 SDK_PINS = {"anthropic": "anthropic==0.77.0", "openai": "openai==2.12.0"}
 
-# Runtime-infrastructure packages that must never leak into an export.
-PACKAGE_DENYLIST = {
-    "sqlalchemy", "psycopg2", "psycopg2-binary", "langfuse", "redis",
-    "httpx", "python-dotenv", "celery", "podman-py",
-}
-
 API_KEY_ENV_VARS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -1029,8 +1023,7 @@ def _emit_requirements(tools: List[Any], providers_used: Set[str]) -> str:
     packages: Set[str] = set()
     for tool in tools:
         for package in tool.required_packages or []:
-            if package.split("==")[0].split("[")[0].lower() not in PACKAGE_DENYLIST:
-                packages.add(package)
+            packages.add(package)
     lines = sorted(packages)
     if providers_used:
         lines += AGENT_BASE_PINS
