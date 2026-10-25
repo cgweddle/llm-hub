@@ -41,6 +41,8 @@
     createFlow,
     updateFlow,
     executeFlow,
+    exportFlow,
+    resumeFlow,
     getFlowDetails,
     deleteFlow,
     deleteAgent,
@@ -94,6 +96,9 @@
   let flowDescription = $state('');
   let flowIsPublic = $state(false);
   let showSaveDialog = $state(false);
+  let showExportDialog = $state(false);
+  let exportParallel = $state(true);
+  let isExporting = $state(false);
   let isSaving = $state(false);
 
   // Current flow tracking
@@ -102,6 +107,8 @@
   // Info panel state
   let showInfoPanel = $state(false);
   let lastExecutionId: number | null = $state(null);
+  let resumingFlow = $state(false);
+  let infoRefreshToken = $state(0);
   let evalsEnabled = $state(false);
   let evalsRunning = $state(false);
 
@@ -698,6 +705,33 @@
   }
 
   /**
+   * Export the current flow as a standalone Python module (zip download)
+   */
+  async function handleExportFlow() {
+    if (!currentFlowId) return;
+    isExporting = true;
+    try {
+      const agentLlms: Record<string, string> = {};
+      for (const node of nodes) {
+        if (node.data.isAgent && node.data.runtimeLLM?.name) {
+          agentLlms[node.id] = node.data.runtimeLLM.name;
+        }
+      }
+      const userId = data.user?.id || 1;
+      await exportFlow(currentFlowId, userId, agentLlms, exportParallel);
+      showExportDialog = false;
+    } catch (error) {
+      console.error('Flow export error:', error);
+      validationSuccess = false;
+      validationMessage = `Failed to export flow: ${error instanceof Error ? error.message : error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    } finally {
+      isExporting = false;
+    }
+  }
+
+  /**
    * Execute a saved flow
    */
   async function runFlow(flowId: number, initialInput: Record<string, any>) {
@@ -742,6 +776,39 @@
       console.error('Flow execution error:', error);
       validationSuccess = false;
       validationMessage = `Failed to execute flow: ${error}`;
+      showValidationToast = true;
+      setTimeout(() => { showValidationToast = false; }, 5000);
+    }
+  }
+
+  /**
+   * Resume the last failed flow run from its in-memory checkpoint.
+   * Only the failed/edited nodes and their downstream re-run; completed
+   * upstream results are reused from the server's retained state.
+   */
+  async function handleResumeFlow() {
+    if (!lastExecutionId || resumingFlow) return;
+    resumingFlow = true;
+    infoRefreshToken++;
+    try {
+      const result = await resumeFlow(lastExecutionId, data.user?.id || 1);
+      if (result.status === 'completed') {
+        if (evalsEnabled) {
+          runPostExecutionEvals(lastExecutionId);
+        }
+        validationSuccess = true;
+        validationMessage = `Flow completed! Output: ${JSON.stringify(result.final_output)}`;
+      } else {
+        validationSuccess = false;
+        validationMessage = `Flow failed: ${result.error}`;
+      }
+    } catch (error) {
+      console.error('Flow resume error:', error);
+      validationSuccess = false;
+      validationMessage = `${error instanceof Error ? error.message : error}`;
+    } finally {
+      resumingFlow = false;
+      infoRefreshToken++;
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
     }
@@ -1735,6 +1802,14 @@
         >
           ▶ Run
         </Button>
+        <Button
+          variant="outline"
+          onclick={() => showExportDialog = true}
+          disabled={!currentFlowId}
+          class="ml-2"
+        >
+          Export flow
+        </Button>
         <label class="evals-toggle">
           <input type="checkbox" bind:checked={evalsEnabled} />
           <span>Evals</span>
@@ -1779,7 +1854,10 @@
           userId={data.user?.id || 1}
           evalsEnabled={evalsEnabled}
           {evalsRunning}
+          resuming={resumingFlow}
+          refreshToken={infoRefreshToken}
           onclose={() => showInfoPanel = false}
+          onresume={handleResumeFlow}
         />
       {/if}
     </div>
@@ -1849,6 +1927,39 @@
           <Button variant="outline" onclick={() => showSaveDialog = false}>Cancel</Button>
           <Button onclick={saveFlow} disabled={isSaving || !flowName}>
             {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Export Flow Options Dialog -->
+  {#if showExportDialog}
+    <div class="dialog-overlay" onclick={() => showExportDialog = false}>
+      <div class="dialog-content" onclick={(e) => e.stopPropagation()}>
+        <div class="dialog-header">
+          <h3>Export Flow</h3>
+          <button class="dialog-close" onclick={() => showExportDialog = false}>×</button>
+        </div>
+
+        <div class="dialog-body">
+          <div class="form-field">
+            <label class="create-tool-radio-label">
+              <input type="checkbox" bind:checked={exportParallel} />
+              <span>Parallel</span>
+            </label>
+            <p class="text-sm text-muted-foreground">
+              {exportParallel
+                ? 'Independent branches run concurrently with asyncio.gather.'
+                : 'All nodes run one after another in dependency order.'}
+            </p>
+          </div>
+        </div>
+
+        <div class="dialog-footer">
+          <Button variant="outline" onclick={() => showExportDialog = false}>Cancel</Button>
+          <Button onclick={handleExportFlow} disabled={isExporting}>
+            {isExporting ? 'Exporting...' : 'Export'}
           </Button>
         </div>
       </div>

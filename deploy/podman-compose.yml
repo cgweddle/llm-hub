@@ -115,6 +115,7 @@ services:
       FLOW_RUNNER_USE_PODMAN: "true"
       FLOW_RUNNER_IMAGE: llmhub-flow-runner
       FLOW_RUNNER_NETWORK: llmhub-net
+      FLOW_RUNNER_RESUME_TIMEOUT_SECONDS: ${FLOW_RUNNER_RESUME_TIMEOUT_SECONDS:-1800}
       CONTAINER_HOST: unix:///run/podman/podman.sock
       FLOWRUNNER_DATABASE_URL: postgresql://flowrunner:${FLOWRUNNER_DB_PASSWORD}@postgres:5432/llm_hub
       LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}

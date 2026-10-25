@@ -11,6 +11,8 @@ is useful for local testing of the Celery layer without Podman.
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -26,6 +28,7 @@ FLOW_RUNNER_NETWORK = os.getenv("FLOW_RUNNER_NETWORK", "llmhub-net")
 FLOW_RUNNER_MEMORY = os.getenv("FLOW_RUNNER_MEMORY", "1g")
 FLOW_RUNNER_CPUS = float(os.getenv("FLOW_RUNNER_CPUS", "2"))
 FLOW_RUNNER_TIMEOUT = int(os.getenv("FLOW_RUNNER_TIMEOUT_SECONDS", "3600"))
+FLOW_RUNNER_RESUME_TIMEOUT = int(os.getenv("FLOW_RUNNER_RESUME_TIMEOUT_SECONDS", "1800"))
 PODMAN_SOCKET_URI = os.getenv("CONTAINER_HOST", "unix:///run/podman/podman.sock")
 
 # Env vars forwarded from worker into the flow-runner container.
@@ -52,6 +55,12 @@ def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_i
         if var in os.environ:
             env[var] = os.environ[var]
 
+    # Resume plumbing: the container subscribes to resume:<execution_id> on
+    # this redis after a failure and stays resident until the window expires.
+    if os.environ.get("CELERY_BROKER_URL"):
+        env["FLOW_RUNNER_REDIS_URL"] = os.environ["CELERY_BROKER_URL"]
+    env["FLOW_RUNNER_RESUME_TIMEOUT_SECONDS"] = str(FLOW_RUNNER_RESUME_TIMEOUT)
+
     # Use the restricted flowrunner DB user if configured, otherwise
     # fall back to the main DATABASE_URL (e.g., local dev without Postgres roles).
     flowrunner_db_url = os.environ.get("FLOWRUNNER_DATABASE_URL")
@@ -60,9 +69,25 @@ def _build_container_env(flow_id, user_id, initial_input, conda_env, execution_i
     return env
 
 
-def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config) -> int:
+def _get_execution_status(execution_id: int) -> Optional[str]:
+    session = DatabaseManager().get_session()
+    try:
+        ex = get_execution_by_id(session, execution_id)
+        return ex.status if ex else None
+    finally:
+        session.close()
+
+
+def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config) -> str:
     """
-    Spawn a flow-runner Podman container, stream logs, and return its exit code.
+    Spawn a flow-runner container and watch the execution row until it reaches
+    a terminal status, then detach and return that status.
+
+    The worker deliberately does NOT wait for container exit: on failure the
+    container stays resident awaiting a resume message (run_flow._await_resume)
+    and blocking here would pin a worker slot for the whole resume window.
+    The container owns its own lifecycle from the first terminal status —
+    it self-terminates on resume-window expiry and auto-removes on exit.
     """
     # Import lazily so a worker running with FLOW_RUNNER_USE_PODMAN=false
     # (e.g., local testing) doesn't require the podman python bindings.
@@ -86,42 +111,69 @@ def _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, age
             cpu_period=100_000,
             remove=True,
         )
+        watch_failed = False
         try:
             network = client.networks.get(FLOW_RUNNER_NETWORK)
             network.connect(container)
             container.start()
-            # Stream logs in the worker's log stream for observability
-            for line in container.logs(stream=True, follow=True, stdout=True, stderr=True):
-                if isinstance(line, bytes):
-                    line = line.decode("utf-8", errors="replace")
-                logger.info("[flow-runner] %s", line.rstrip())
 
-            result = container.wait(condition="exited", timeout=FLOW_RUNNER_TIMEOUT)
-            # podman-py returns an int or dict depending on version
-            if isinstance(result, dict):
-                return int(result.get("StatusCode", 1))
-            return int(result)
+            def _relay_logs():
+                try:
+                    for line in container.logs(stream=True, follow=True, stdout=True, stderr=True):
+                        if isinstance(line, bytes):
+                            line = line.decode("utf-8", errors="replace")
+                        logger.info("[flow-runner] %s", line.rstrip())
+                except Exception:
+                    logger.info("[flow-runner] log stream ended")
+
+            threading.Thread(target=_relay_logs, daemon=True).start()
+
+            deadline = time.monotonic() + FLOW_RUNNER_TIMEOUT
+            while time.monotonic() < deadline:
+                status = _get_execution_status(execution_id)
+                if status in ("completed", "failed"):
+                    logger.info(
+                        "Execution %s reached status=%s; detaching from container",
+                        execution_id, status,
+                    )
+                    return status
+                time.sleep(5)
+
+            # Never reached a terminal status: the container is stuck or died
+            # before writing to the DB. Reap it.
+            watch_failed = True
+            _mark_failed_if_still_running(
+                execution_id,
+                f"flow-runner did not reach a terminal status within {FLOW_RUNNER_TIMEOUT}s",
+            )
+            return "failed"
+        except Exception:
+            watch_failed = True
+            raise
         finally:
-            # Container was created with remove=True, but in case of early failure:
-            try:
-                container.reload()
-                if container.status == "running":
-                    container.kill()
-            except Exception:
-                pass
+            # Kill only on the timeout/error path. A clean detach after
+            # status='failed' must leave the resident container (and its
+            # in-memory checkpoint) alive.
+            if watch_failed:
+                try:
+                    container.reload()
+                    if container.status == "running":
+                        container.kill()
+                except Exception:
+                    pass
 
 
 def _run_inline(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config):
     """
-    Fallback: run FlowExecutor directly in the worker process (Phase 1 behavior).
+    Fallback: run FlowRunner directly in the worker process (Phase 1 behavior).
     Selected via FLOW_RUNNER_USE_PODMAN=false.
     """
-    from src.executors.flow_executor import FlowExecutor
+    from src.runners.flow_runner import FlowRunner
 
     session = DatabaseManager().get_session()
     try:
-        executor = FlowExecutor(session, flow_id, user_id, llm_config=llm_config, agent_llms=agent_llms)
-        result = executor.execute_flow(initial_input, conda_env, execution_id=execution_id)
+        runner = FlowRunner(session, flow_id, user_id, llm_config=llm_config, agent_llms=agent_llms)
+        result = runner.run(initial_input, conda_env, execution_id=execution_id)
         return {"execution_id": execution_id, "status": result.get("status")}
     finally:
         session.close()
@@ -232,16 +284,10 @@ def execute_flow_task(
             raise
 
     try:
-        returncode = _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config)
+        final_status = _run_in_podman(flow_id, user_id, initial_input, conda_env, execution_id, agent_llms, llm_config)
     except Exception as e:
         logger.exception("flow-runner container launch failed for execution_id=%s", execution_id)
         _mark_failed_if_still_running(execution_id, f"podman spawn error: {e}")
         raise
 
-    if returncode != 0:
-        _mark_failed_if_still_running(
-            execution_id,
-            f"flow-runner container exited with code {returncode}",
-        )
-
-    return {"execution_id": execution_id, "returncode": returncode}
+    return {"execution_id": execution_id, "status": final_status}
