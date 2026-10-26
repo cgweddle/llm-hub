@@ -53,6 +53,11 @@ from src.factories.flow_to_script_factory import (
     decompose_into_chains,
     compute_chain_levels,
 )
+from src.validate.agent_graph_inputs import (
+    agent_target_input,
+    validate_agent_graph,
+    validate_flow_agent_edges,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,20 +189,24 @@ def _build_node_input(ctx: FlowRunContext, node_id: str, stage_input: Any) -> An
             if node_type == "trigger":
                 iv = node_config.get("input_value")
                 return iv if iv else stage_input
-            return stage_input  # tool/agent entry: initial_input as-is
+            if node_type == "agent":
+                return {"input": stage_input}
+            return stage_input  # tool entry: initial_input as-is
         # Non-entry source node: run on its own typed-in values only.
         if node_type == "trigger":
             return node_config.get("input_value", "")
         if node_type == "agent":
-            return node_config.get("input_value", "") or ""
+            return {"input": node_config.get("input_value", "") or ""}
         return dict(node_config.get("input_values", {}))
 
-    # Agents consume text: take the first upstream output (or its selected
-    # field, for edges from an expanded dict output), coerce to text.
+    # Agents have named inputs: every incoming edge delivers to a specific
+    # input (agent_target_input — mapping -> name, ""/missing -> "input").
     if node_type == "agent":
-        edge = incoming[0]
-        upstream = _select_output_field(ctx.state.get(edge["from_node"]), edge.get("mapping"))
-        return _stringify_for_agent(upstream)
+        result: Dict[str, str] = {}
+        for edge in incoming:
+            upstream = _select_output_field(ctx.state.get(edge["from_node"]), edge.get("mapping"))
+            result[agent_target_input(edge)] = _stringify_for_agent(upstream)
+        return result
 
     if node_type == "trigger":  # unusual, but be safe
         edge = incoming[0]
@@ -261,8 +270,7 @@ async def _execute_node_async(ctx: FlowRunContext, node_id: str, node_input: Any
             exec_kwargs["input_data"] = _preview(node_input)
         elif node_type == "agent":
             exec_kwargs["agent_id"] = node_config.get("id")
-            input_text = _stringify_for_agent(node_input)
-            exec_kwargs["input_data"] = _preview(input_text)
+            exec_kwargs["input_data"] = {name: _preview(value) for name, value in node_input.items()}
         else:  # trigger
             exec_kwargs["input_data"] = _preview(node_input)
 
@@ -289,7 +297,7 @@ async def _execute_node_async(ctx: FlowRunContext, node_id: str, node_input: Any
             if node_type == "tool":
                 output = await _run_tool_node(ctx, node_id, node_input)
             elif node_type == "agent":
-                output = await _run_agent_node(ctx, session, node_id, node_config, input_text, child)
+                output = await _run_agent_node(ctx, session, node_id, node_config, node_input, child)
             else:  # trigger
                 output = node_input
 
@@ -337,7 +345,7 @@ async def _run_tool_node(ctx: FlowRunContext, node_id: str, node_input: Any) -> 
 
 
 async def _run_agent_node(ctx: FlowRunContext, session: Session, node_id: str,
-                          node_config: dict, input_text: str, child) -> str:
+                          node_config: dict, inputs: Dict[str, Any], child) -> str:
     """Run an agent node's pre-built sub-agents via AgentExecutor (async)."""
     from src.executors.agent_executor import AgentExecutor
 
@@ -348,7 +356,7 @@ async def _run_agent_node(ctx: FlowRunContext, session: Session, node_id: str,
 
     executor = AgentExecutor(session)
     return await executor.execute_agent_node(
-        graph_config, input_text, built_agents, parent_execution=child
+        graph_config, inputs, built_agents, parent_execution=child
     )
 
 
@@ -512,9 +520,16 @@ class FlowRunner:
         One provider per flow agent node (from agent_llms); credentials are
         bound into each BuiltAgent's model object at compile time, so no
         env-var state is shared between agents.
+
+        Validates every agent's own graph_config plus the flow edges feeding
+        it (claude_plans/named-agent-inputs.md, decision 16) before compiling
+        anything, so a bad edge or a renamed input fails before any node runs.
         """
         agents: Dict[str, Dict[str, BuiltAgent]] = {}
         graphs: Dict[str, dict] = {}
+        agent_records: Dict[str, Any] = {}
+        problems: List[str] = []
+
         for node_name, node_info in self.graph_config["nodes"].items():
             if node_info.get("node_type") != "agent":
                 continue
@@ -524,6 +539,15 @@ class FlowRunner:
                 raise ValueError(f"Agent with ID {agent_id} not found for node '{node_name}'")
             if not agent.graph_config:
                 raise ValueError(f"Agent {agent_id} has no graph_config")
+            agent_records[node_name] = agent
+            graphs[node_name] = agent.graph_config
+            problems.extend(validate_agent_graph(agent.graph_config))
+
+        problems.extend(validate_flow_agent_edges(self.graph_config, graphs))
+        if problems:
+            raise ValueError("Agent graph validation failed: " + "; ".join(problems))
+
+        for node_name, agent in agent_records.items():
             llm_provider = self.agent_llms.get(node_name)
             if not llm_provider:
                 raise ValueError(f"No LLM selected for agent node '{node_name}'")
@@ -535,7 +559,6 @@ class FlowRunner:
                 tool_records = [t for t in (get_tool_by_id(self.session, tid) for tid in tool_ids) if t]
                 sub_agents[sub_node_id] = compile_agent(sub_config, tool_records, provider_config)
             agents[node_name] = sub_agents
-            graphs[node_name] = agent.graph_config
         return agents, graphs
 
     def _compute_sequence(self) -> Dict[str, int]:

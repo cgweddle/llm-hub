@@ -1,9 +1,17 @@
 """
 Pure agent-graph traversal engine.
 
-BFS over an agent ``graph_config`` with cycle support: output-path routing,
-per-edge loop-iteration limits, ``previous_output`` return behavior, and
-message-history threading between nodes.
+Named-inputs readiness engine (claude_plans/named-agent-inputs.md, "Engine
+algorithm"): each node accumulates a dict of named inputs (one value per
+`{name}` placeholder in its user_prompt) rather than a single input string.
+Edges deliver their value to a specific named input (`target_input`, legacy
+edges with none target `"input"`), and a node only runs once every one of its
+forward (non-loop) incoming edges has fired. When nothing else is ready, the
+earliest-in-topological-order waiting node is unstuck and runs with its still
+missing inputs left absent (callers read them with `.get(name, "")`). Loop
+edges never gate readiness; after a node runs, the "fired" mark is cleared for
+any forward edge whose sender shares the node's strongly-connected component
+(loop refinement), forcing a fresh value before that edge can fire again.
 
 This module is deliberately free of side effects — no database, no LangFuse,
 no PydanticAI imports. Node execution and structural recording are supplied as
@@ -13,72 +21,146 @@ this file verbatim and supplies plain ``agent.run`` callables).
 
 Injected callables:
 
-``run_node(node_id, node_config, node_input, predecessor_messages)``
+``run_node(node_id, node_config, inputs, predecessor_messages)``
     async → ``(output, messages, chosen_path, trace_id)``. Runs one node.
-    ``messages`` is that run's full history (or None to leave it unchanged),
-    ``chosen_path`` is the selected output-path name (or None), ``trace_id`` is
-    an opaque observability handle passed on to ``record_node`` (or None).
+    ``inputs`` is that node's accumulated named-inputs dict. ``messages`` is
+    that run's full history (or None to leave it unchanged), ``chosen_path``
+    is the selected output-path name (or None), ``trace_id`` is an opaque
+    observability handle passed on to ``record_node`` (or None).
 
-``record_node(node_id, node_config, node_input, output, chosen_path, trace_id)``
+``record_node(node_id, node_config, inputs, output, chosen_path, trace_id)``
     Optional. Records the completed node (e.g. a structural execution row).
     Called after ``previous_output`` has been applied, so ``output`` is final.
 """
 
 import logging
+from collections import deque
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 RunNode = Callable[
-    [str, Dict[str, Any], str, Optional[List]],
+    [str, Dict[str, Any], Dict[str, str], Optional[List]],
     Awaitable[Tuple[str, Optional[List], Optional[str], Optional[str]]],
 ]
-RecordNode = Callable[[str, Dict[str, Any], str, str, Optional[str], Optional[str]], None]
-
-
-def build_adjacency(graph_config: Dict[str, Any]):
-    """Build (adjacency, loop_edges, edge_output_paths) from a graph_config.
-
-    - adjacency:          node_id → [successor node_ids]
-    - loop_edges:         set of (from, to) pairs marked is_loop
-    - edge_output_paths:  (from, to) → output_path name for path-conditioned edges
-    """
-    nodes_config = graph_config.get("nodes", {})
-    adjacency: Dict[str, list] = {node_id: [] for node_id in nodes_config}
-    loop_edges: set = set()
-    edge_output_paths: Dict[tuple, str] = {}
-    for edge in graph_config.get("edges", []):
-        from_node = edge.get("from_node")
-        to_node = edge.get("to_node")
-        if from_node and to_node:
-            adjacency[from_node].append(to_node)
-            if edge.get("is_loop", False):
-                loop_edges.add((from_node, to_node))
-            if edge.get("output_path"):
-                edge_output_paths[(from_node, to_node)] = edge["output_path"]
-    return adjacency, loop_edges, edge_output_paths
+RecordNode = Callable[[str, Dict[str, Any], Dict[str, str], str, Optional[str], Optional[str]], None]
 
 
 def _preview(value: Any, limit: int = 200) -> Any:
     """Truncate a value's string form for the informational execution trace."""
-    return str(value)[:limit] + "..." if len(str(value)) > limit else value
+    s = str(value)
+    return s[:limit] + "..." if len(s) > limit else value
+
+
+def _target_input(edge: Dict[str, Any]) -> str:
+    return edge.get("target_input") or "input"
+
+
+def _build_graph_structures(nodes_config: Dict[str, Any], edges: List[Dict[str, Any]]):
+    """outgoing: node -> [(edge_index, edge)]; forward_in: node -> [(edge_index, edge)]
+    over non-loop incoming edges only. Edges are tracked by list index, never
+    collapsed by a (from, to) pair."""
+    outgoing: Dict[str, list] = {n: [] for n in nodes_config}
+    forward_in: Dict[str, list] = {n: [] for n in nodes_config}
+    for idx, edge in enumerate(edges):
+        from_node, to_node = edge.get("from_node"), edge.get("to_node")
+        if from_node not in outgoing or to_node not in outgoing:
+            continue
+        outgoing[from_node].append((idx, edge))
+        if not edge.get("is_loop"):
+            forward_in[to_node].append((idx, edge))
+    return outgoing, forward_in
+
+
+def _topo_rank(nodes_config: Dict[str, Any], forward_in: Dict[str, list]) -> Dict[str, int]:
+    """Topological order over forward (non-loop) edges only — these form a
+    DAG, since cycles are always marked is_loop."""
+    forward_out: Dict[str, list] = {n: [] for n in nodes_config}
+    indegree: Dict[str, int] = {n: len(in_edges) for n, in_edges in forward_in.items()}
+    for n, in_edges in forward_in.items():
+        for _, edge in in_edges:
+            forward_out[edge["from_node"]].append(n)
+
+    order = []
+    remaining = dict(indegree)
+    queue = deque(n for n in nodes_config if indegree.get(n, 0) == 0)
+    seen = set()
+    while queue:
+        n = queue.popleft()
+        if n in seen:
+            continue
+        seen.add(n)
+        order.append(n)
+        for succ in forward_out.get(n, []):
+            remaining[succ] -= 1
+            if remaining[succ] == 0:
+                queue.append(succ)
+    for n in nodes_config:
+        if n not in seen:
+            order.append(n)
+    return {n: i for i, n in enumerate(order)}
+
+
+def strongly_connected(nodes_config: Dict[str, Any], edges: List[Dict[str, Any]]):
+    """component_id: node -> component id, component_size: id -> size.
+    Computed over ALL edges (forward + loop) — a node's loop membership
+    reflects the whole graph's topology, not just the forward DAG.
+
+    Not private: also used by validate.agent_graph_inputs for the
+    shared-input exclusivity check, which needs the same notion of "inside
+    a loop" (component size > 1)."""
+    adjacency: Dict[str, list] = {n: [] for n in nodes_config}
+    for edge in edges:
+        from_node, to_node = edge.get("from_node"), edge.get("to_node")
+        if from_node in adjacency and to_node in adjacency:
+            adjacency[from_node].append(to_node)
+
+    def reachable(start: str):
+        seen = {start}
+        stack = [start]
+        while stack:
+            n = stack.pop()
+            for nxt in adjacency.get(n, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return seen
+
+    reach = {n: reachable(n) for n in nodes_config}
+    component_id: Dict[str, int] = {}
+    next_id = 0
+    for n in nodes_config:
+        if n in component_id:
+            continue
+        component = {m for m in reach[n] if n in reach[m]}
+        for m in component:
+            component_id[m] = next_id
+        next_id += 1
+
+    component_size: Dict[int, int] = {}
+    for cid in component_id.values():
+        component_size[cid] = component_size.get(cid, 0) + 1
+    return component_id, component_size
 
 
 async def run_graph(
     graph_config: Dict[str, Any],
-    input_data: str,
+    inputs: Dict[str, Any],
     run_node: RunNode,
     record_node: Optional[RecordNode] = None,
     max_loop_iterations: int = None,
 ) -> Dict[str, Any]:
-    """Execute an agent graph via BFS traversal with cycle support.
+    """Execute an agent graph via the lazy-readiness traversal (see module
+    docstring and claude_plans/named-agent-inputs.md, "Engine algorithm").
 
     Side effects (tracing, DB writes) are the responsibility of the injected
-    ``run_node`` / ``record_node`` callables; this function only walks the graph.
+    ``run_node`` / ``record_node`` callables; this function only walks the
+    graph.
     """
     nodes_config = graph_config.get("nodes", {})
     entry_point = graph_config.get("entry_point")
     exit_points = graph_config.get("exit_points", [])
+    edges = graph_config.get("edges", [])
 
     if max_loop_iterations is None:
         max_loop_iterations = graph_config.get("max_loop_iterations", 5)
@@ -86,102 +168,122 @@ async def run_graph(
     if not entry_point or not nodes_config:
         raise ValueError("Invalid graph_config: missing entry_point or nodes")
 
-    adjacency, loop_edges, edge_output_paths = build_adjacency(graph_config)
+    outgoing, forward_in = _build_graph_structures(nodes_config, edges)
+    topo_rank = _topo_rank(nodes_config, forward_in)
+    component_id, component_size = strongly_connected(nodes_config, edges)
 
     logger.info(
-        f"Graph execution: {len(nodes_config)} nodes, "
-        f"{len(graph_config.get('edges', []))} edges, "
+        f"Graph execution: {len(nodes_config)} nodes, {len(edges)} edges, "
         f"entry: {entry_point}, exits: {exit_points}"
     )
 
+    node_inputs: Dict[str, Dict[str, Any]] = {n: {} for n in nodes_config}
+    node_inputs[entry_point] = dict(inputs)
+
+    fired: set = set()
+    waiting: set = set()
+    outputs: Dict[str, Any] = {}
+    loop_counts: Dict[int, int] = {}
     execution_trace = []
-    node_outputs: Dict[str, Any] = {}
-    messages: List = []  # Accumulating message history across all nodes
-    loop_counts: Dict[tuple, int] = {}
+    messages: List = []
 
-    current_nodes = [entry_point]
+    queue = deque([entry_point])
 
-    while current_nodes:
-        next_nodes = []
+    async def run(node_id: str) -> None:
+        nonlocal messages
+        node_config = nodes_config[node_id]
 
-        for node_id in current_nodes:
-            if node_id not in nodes_config:
-                logger.warning(f"Node {node_id} not found in config, skipping")
+        for idx, edge in forward_in[node_id]:
+            if idx not in fired:
+                node_inputs[node_id].setdefault(_target_input(edge), "")
+
+        predecessor_msgs = messages if messages else None
+
+        try:
+            output, node_messages, chosen_path, trace_id = await run_node(
+                node_id, node_config, node_inputs[node_id], predecessor_msgs
+            )
+        except Exception as e:
+            logger.error(f"Sub-agent {node_id} failed: {e}")
+            raise RuntimeError(
+                f"Agent node '{node_config.get('name', node_id)}' failed: {e}"
+            ) from e
+
+        if chosen_path:
+            path_config = node_config.get("output_paths", {}).get(chosen_path, {})
+            if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
+                return_input = path_config.get("return_input") or "input"
+                output = node_inputs[node_id].get(return_input, "")
+
+        outputs[node_id] = output
+        if node_messages is not None:
+            messages = node_messages
+
+        execution_trace.append({
+            "node": node_id,
+            "name": node_config.get("name", node_id),
+            "agent_type": node_config.get("agent_type"),
+            "input": _preview(node_inputs[node_id]),
+            "output": _preview(output),
+            "status": "completed",
+        })
+
+        if record_node is not None:
+            record_node(node_id, node_config, node_inputs[node_id], output, chosen_path, trace_id)
+
+        logger.debug(f"Sub-agent {node_id} completed")
+
+        cid = component_id.get(node_id)
+        for idx, edge in forward_in[node_id]:
+            sender_cid = component_id.get(edge.get("from_node"))
+            if sender_cid == cid and component_size.get(cid, 1) > 1:
+                fired.discard(idx)
+
+        is_exit = node_id in exit_points
+        for idx, edge in outgoing[node_id]:
+            to_node = edge.get("to_node")
+            is_loop_edge = bool(edge.get("is_loop"))
+
+            if is_exit and not is_loop_edge:
                 continue
 
-            node_config = nodes_config[node_id]
-            node_input = node_outputs.get(node_id + "_input", input_data)
-            predecessor_msgs = messages if messages else None
+            edge_path = edge.get("output_path")
+            if chosen_path is not None and edge_path is not None and edge_path != chosen_path:
+                continue
 
-            try:
-                output, node_messages, chosen_path, trace_id = await run_node(
-                    node_id, node_config, node_input, predecessor_msgs
-                )
-            except Exception as e:
-                logger.error(f"Sub-agent {node_id} failed: {e}")
-                raise RuntimeError(
-                    f"Agent node '{node_config.get('name', node_id)}' failed: {e}"
-                ) from e
-
-            # Apply return behavior for the chosen path
-            if chosen_path:
-                path_config = node_config.get("output_paths", {}).get(chosen_path, {})
-                if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
-                    output = node_input
-
-            node_outputs[node_id] = output
-            if node_messages is not None:
-                messages = node_messages
-
-            execution_trace.append({
-                "node": node_id,
-                "name": node_config.get("name", node_id),
-                "agent_type": node_config.get("agent_type"),
-                "input": _preview(node_input),
-                "output": _preview(output),
-                "status": "completed",
-            })
-
-            if record_node is not None:
-                record_node(node_id, node_config, node_input, output, chosen_path, trace_id)
-
-            logger.debug(f"Sub-agent {node_id} completed")
-
-            # Traverse successors. Exit points skip forward edges but still
-            # follow loop edges back.
-            is_exit = node_id in exit_points
-            for successor in adjacency.get(node_id, []):
-                edge_key = (node_id, successor)
-                is_loop_edge = edge_key in loop_edges
-
-                if is_exit and not is_loop_edge:
+            if is_loop_edge:
+                loop_counts[idx] = loop_counts.get(idx, 0) + 1
+                if loop_counts[idx] > max_loop_iterations:
+                    logger.warning(
+                        f"Loop limit reached for edge {node_id} -> {to_node}, skipping"
+                    )
                     continue
 
-                # Filter by output_path when the node chose a specific path
-                edge_path = edge_output_paths.get(edge_key)
-                if chosen_path is not None and edge_path is not None:
-                    if edge_path != chosen_path:
-                        continue
+            node_inputs[to_node][_target_input(edge)] = output
 
-                # Bound loop edges by the iteration limit
-                if is_loop_edge:
-                    loop_counts[edge_key] = loop_counts.get(edge_key, 0) + 1
-                    if loop_counts[edge_key] > max_loop_iterations:
-                        logger.warning(
-                            f"Loop limit reached for edge {node_id} -> {successor}, skipping"
-                        )
-                        continue
+            if is_loop_edge:
+                queue.append(to_node)
+            else:
+                fired.add(idx)
+                if all(i in fired for i, _ in forward_in[to_node]):
+                    waiting.discard(to_node)
+                    queue.append(to_node)
+                else:
+                    waiting.add(to_node)
 
-                node_outputs[successor + "_input"] = output
-                if successor not in next_nodes:
-                    next_nodes.append(successor)
-
-        current_nodes = next_nodes
+    while True:
+        while queue:
+            await run(queue.popleft())
+        if not waiting:
+            break
+        n = min(waiting, key=lambda node_id: topo_rank.get(node_id, 0))
+        waiting.discard(n)
+        queue.append(n)
 
     final_outputs = {
-        node_id: node_outputs.get(node_id, "")
+        node_id: outputs.get(node_id, "")
         for node_id in exit_points
-        if node_id in node_outputs
+        if node_id in outputs
     }
     main_result = final_outputs.get(exit_points[0], "") if exit_points else ""
 

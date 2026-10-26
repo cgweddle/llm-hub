@@ -109,7 +109,7 @@ class AgentExecutor:
     async def execute_agent_node(
         self,
         graph_config: Dict[str, Any],
-        input_text: str,
+        inputs: Dict[str, Any],
         built_agents: Dict[str, BuiltAgent],
         parent_execution: Optional[Execution] = None
     ) -> str:
@@ -120,7 +120,7 @@ class AgentExecutor:
 
         Args:
             graph_config: The agent's graph_config, captured at flow prepare time
-            input_text: Input text
+            inputs: Named input values for the entry sub-agent
             built_agents: sub-node id → BuiltAgent, compiled at flow prepare time
             parent_execution: Parent Execution record from FlowRunner
 
@@ -131,14 +131,14 @@ class AgentExecutor:
             raise ValueError("Agent has no graph_config")
 
         result = await self._execute_graph(
-            graph_config, input_text, execution=parent_execution, built_agents=built_agents
+            graph_config, inputs, execution=parent_execution, built_agents=built_agents
         )
         return str(result.get("result", ""))
 
     async def _execute_graph(
         self,
         graph_config: Dict[str, Any],
-        input_data: str,
+        inputs: Dict[str, Any],
         execution: Optional[Execution],
         built_agents: Dict[str, BuiltAgent],
         max_loop_iterations: int = None
@@ -156,7 +156,7 @@ class AgentExecutor:
         is_multi_node = len(graph_config.get("nodes", {})) > 1
         step = {"seq": 0}
 
-        async def run_node(node_id, node_config, node_input, predecessor_messages):
+        async def run_node(node_id, node_config, node_inputs, predecessor_messages):
             built = built_agents.get(node_id)
             if built is None:
                 raise ValueError(f"No compiled agent for sub-node '{node_id}'")
@@ -171,7 +171,7 @@ class AgentExecutor:
                         nonlocal captured_trace_id
                         captured_trace_id = langfuse_client.get_current_trace_id()
                         return await self._run_sub_agent(
-                            node_id, node_config, node_input, built,
+                            node_id, node_config, node_inputs, built,
                             predecessor_messages=predecessor_messages,
                         )
 
@@ -179,7 +179,7 @@ class AgentExecutor:
                     langfuse_client.flush()
                 else:
                     output, node_messages, chosen_path = await self._run_sub_agent(
-                        node_id, node_config, node_input, built,
+                        node_id, node_config, node_inputs, built,
                         predecessor_messages=predecessor_messages,
                     )
             except Exception:
@@ -191,7 +191,7 @@ class AgentExecutor:
 
             return output, node_messages, chosen_path, captured_trace_id
 
-        def record_node(node_id, node_config, node_input, output, chosen_path, trace_id):
+        def record_node(node_id, node_config, node_inputs, output, chosen_path, trace_id):
             if execution and is_multi_node:
                 create_execution(
                     self.session,
@@ -201,7 +201,7 @@ class AgentExecutor:
                     node_id=node_id,
                     name=node_config.get("name", node_id),
                     sequence=step["seq"],
-                    input_data={"input": str(node_input)[:2000]},
+                    input_data={name: str(value)[:2000] for name, value in node_inputs.items()},
                     output_data={"result": str(output)[:2000]},
                     status='completed',
                     started_at=datetime.now(),
@@ -217,7 +217,7 @@ class AgentExecutor:
 
         result = await run_graph(
             graph_config,
-            input_data,
+            inputs,
             run_node,
             record_node=record_node,
             max_loop_iterations=max_loop_iterations,
@@ -226,7 +226,7 @@ class AgentExecutor:
         return result
 
     async def _run_sub_agent(
-        self, node_id: str, node_config: Dict, node_input: str,
+        self, node_id: str, node_config: Dict, inputs: Dict[str, Any],
         built: BuiltAgent,
         predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, Optional[List], Optional[str]]:
@@ -242,25 +242,18 @@ class AgentExecutor:
             f"(type: {node_config.get('agent_type')})"
         )
 
-        return await self._run_pydanticai_node(node_config, node_input, built, predecessor_messages=predecessor_messages)
+        return await self._run_pydanticai_node(node_config, inputs, built, predecessor_messages=predecessor_messages)
 
     @staticmethod
-    def _apply_user_prompt(node_config: Dict, node_input: str,
+    def _apply_user_prompt(node_config: Dict, inputs: Dict[str, Any],
                            predecessor_messages: Optional[List] = None) -> str:
-        """Resolve user_prompt templates into the final user message.
-
-        If the user_prompt contains {input}, it replaces it with node_input
-        and the resolved template IS the user message. If no user_prompt is
-        set, node_input is used directly."""
-        user_prompt = node_config.get("user_prompt", "").strip()
-        if user_prompt:
-            return resolve_user_prompt_template(
-                user_prompt, node_input, predecessor_messages
-            )
-        return node_input
+        """Resolve a node's user_prompt into the final user message from its
+        named inputs (claude_plans/named-agent-inputs.md)."""
+        user_prompt = node_config.get("user_prompt", "")
+        return resolve_user_prompt_template(user_prompt, inputs, predecessor_messages)
 
     async def _run_pydanticai_node(
-        self, node_config: Dict, node_input: str,
+        self, node_config: Dict, inputs: Dict[str, Any],
         built: BuiltAgent,
         predecessor_messages: Optional[List] = None,
     ) -> Tuple[str, List, Optional[str]]:
@@ -268,7 +261,7 @@ class AgentExecutor:
         Returns (output_text, all_messages, chosen_path).
         chosen_path is None for nodes without output_paths.
         LangFuse auto-captures internal tool calls and LLM I/O."""
-        node_input = self._apply_user_prompt(node_config, node_input, predecessor_messages)
+        node_input = self._apply_user_prompt(node_config, inputs, predecessor_messages)
 
         # Run with retry if enabled
         async def run():

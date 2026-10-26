@@ -40,6 +40,7 @@ from src.factories.flow_to_script_factory import (
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from utils.prompt_template import resolve_system_prompt_template
+from validate.agent_graph_inputs import agent_target_input
 
 
 class FlowExportError(ValueError):
@@ -100,19 +101,89 @@ def _merge_auto(base, upstream, params):
     raise TypeError(f"No free parameter to receive upstream value {upstream!r}")
 '''
 
+_HELPER_SINGLE_NODE_PROMPT = '''\
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _apply_user_prompt(inputs):
+    """Fill {name} placeholders from `inputs`; {{name}} is a literal escape;
+    a missing input resolves to ""."""
+    result = []
+    i, n = 0, len(USER_PROMPT)
+    while i < n:
+        c = USER_PROMPT[i]
+        if c == "{":
+            if i + 1 < n and USER_PROMPT[i + 1] == "{":
+                result.append("{")
+                i += 2
+                continue
+            close = USER_PROMPT.find("}", i + 1)
+            if close == -1:
+                result.append(c)
+                i += 1
+                continue
+            name = USER_PROMPT[i + 1:close]
+            if name == "message_history":
+                result.append("")
+            elif _NAME_RE.match(name):
+                result.append(str(inputs.get(name, "")))
+            else:
+                result.append(USER_PROMPT[i:close + 1])
+            i = close + 1
+        elif c == "}" and i + 1 < n and USER_PROMPT[i + 1] == "}":
+            result.append("}")
+            i += 2
+        else:
+            result.append(c)
+            i += 1
+    return "".join(result)
+'''
+
 _HELPER_RUNTIME_PROMPTS = '''\
-"""Build a sub-agent's user message from its prompt template."""
+"""Build a sub-agent's user message from its named-inputs prompt template."""
+import re
+
 from agents._runtime.message_serializer import serialize_messages
 
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-def apply_prompt(user_prompt, node_input, messages):
-    """Fill {input} and {message_history}; an empty template sends the input as-is."""
-    if not user_prompt:
-        return node_input
-    result = user_prompt.replace("{input}", node_input)
-    if messages:
-        return result.replace("{message_history}", serialize_messages(messages))
-    return result.replace("{message_history}", "")
+
+def apply_prompt(user_prompt, inputs, messages):
+    """Fill {name} placeholders from `inputs`; {{name}} is a literal escape;
+    an empty template sends inputs["input"] as-is; a missing input resolves
+    to ""."""
+    if not user_prompt or not user_prompt.strip():
+        return inputs.get("input", "")
+
+    result = []
+    i, n = 0, len(user_prompt)
+    while i < n:
+        c = user_prompt[i]
+        if c == "{":
+            if i + 1 < n and user_prompt[i + 1] == "{":
+                result.append("{")
+                i += 2
+                continue
+            close = user_prompt.find("}", i + 1)
+            if close == -1:
+                result.append(c)
+                i += 1
+                continue
+            name = user_prompt[i + 1:close]
+            if name == "message_history":
+                result.append(serialize_messages(messages) if messages else "")
+            elif _NAME_RE.match(name):
+                result.append(str(inputs.get(name, "")))
+            else:
+                result.append(user_prompt[i:close + 1])
+            i = close + 1
+        elif c == "}" and i + 1 < n and user_prompt[i + 1] == "}":
+            result.append("}")
+            i += 2
+        else:
+            result.append(c)
+            i += 1
+    return "".join(result)
 '''
 
 
@@ -433,17 +504,24 @@ class _FlowEmitter:
         return f'_pick({upstream.var}, {out_field!r})', "unknown"
 
     def _agent_input_expr(self, node: _Node) -> str:
+        """A dict literal over every incoming edge (claude_plans/named-agent-inputs.md,
+        plan step 6) — mirrors flow_runner._build_node_input's agent branch."""
         incoming = _incoming_edges(self.graph, node.node_id)
         if not incoming:
             if node.node_id == self.entry_point:
                 self.helpers_used.add("_as_text")
-                return "_as_text(initial_input)"
-            return repr(node.config.get("input_value", "") or "")
-        expr, kind = self._selected_upstream_expr(incoming[0])
-        if kind == "text":
-            return expr
-        self.helpers_used.add("_as_text")
-        return f"_as_text({expr})"
+                return '{"input": _as_text(initial_input)}'
+            value = node.config.get("input_value", "") or ""
+            return "{" + _double_quoted("input") + ": " + repr(value) + "}"
+        items = []
+        for edge in incoming:
+            expr, kind = self._selected_upstream_expr(edge)
+            if kind != "text":
+                self.helpers_used.add("_as_text")
+                expr = f"_as_text({expr})"
+            target = agent_target_input(edge)
+            items.append(f"{_double_quoted(target)}: {expr}")
+        return "{" + ", ".join(items) + "}"
 
     def _trigger_expr(self, node: _Node) -> str:
         incoming = _incoming_edges(self.graph, node.node_id)
@@ -652,9 +730,10 @@ def _output_path_routing_suffix(output_paths: dict) -> str:
 def _single_node_file_names(am: "_AgentModule", model_cls: str, provider_cls: str) -> Set[str]:
     """Top-level names a single-node agent file defines or imports."""
     return {
-        "os", "Agent", "BaseModel", model_cls, provider_cls,
+        "os", "re", "Agent", "BaseModel", model_cls, provider_cls,
         "SYSTEM_PROMPT", "USER_PROMPT", "CLASS_TO_PATH", "PREVIOUS_OUTPUT_PATHS",
-        "model", "agent", am.run_func, "_output_types",
+        "PREVIOUS_OUTPUT_RETURN_INPUT", "model", "agent", am.run_func,
+        "_output_types", "_apply_user_prompt", "_NAME_RE",
     }
 
 
@@ -670,11 +749,13 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
 
     output_paths = sub_config.get("output_paths") or {}
     system_prompt += _output_path_routing_suffix(output_paths)
+    user_prompt = (sub_config.get("user_prompt") or "").strip()
 
     file_names = _single_node_file_names(am, model_cls, provider_cls)
 
     class_to_path: Dict[str, str] = {}
     previous_output_paths = []
+    previous_output_returns: Dict[str, str] = {}
     for path_name, path_config in output_paths.items():
         class_name = path_name.capitalize()
         if not class_name.isidentifier():
@@ -684,6 +765,7 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
         class_to_path[class_name] = path_name
         if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
             previous_output_paths.append(path_name)
+            previous_output_returns[path_name] = path_config.get("return_input") or "input"
 
     wrap_classes = bool(set(class_to_path) & file_names)
     taken = file_names if wrap_classes else file_names | set(class_to_path)
@@ -693,13 +775,17 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
         f'"""Agent "{_docstring_text(am.agent.name)}" — exported from LLM Hub agent id '
         f'{am.agent.id}."""',
         "import os",
-        "",
+    ]
+    if user_prompt:
+        lines.append("import re")
+    lines.append("")
+    if output_paths:
+        lines.append("from pydantic import BaseModel")
+    lines += [
         "from pydantic_ai import Agent",
         f"from pydantic_ai.models.{module_suffix} import {model_cls}",
         f"from pydantic_ai.providers.{module_suffix} import {provider_cls}",
     ]
-    if output_paths:
-        lines.insert(2, "from pydantic import BaseModel")
     for import_line, _ in tool_imports:
         lines.append(import_line)
     lines.append("")
@@ -733,13 +819,16 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
         lines.append(f"CLASS_TO_PATH = {class_to_path!r}")
         if previous_output_paths:
             lines.append(f"PREVIOUS_OUTPUT_PATHS = {previous_output_paths!r}")
+            lines.append(f"PREVIOUS_OUTPUT_RETURN_INPUT = {previous_output_returns!r}")
         lines.append("")
 
     lines.append(f"SYSTEM_PROMPT = {_py_string(system_prompt)}")
-    user_prompt = (sub_config.get("user_prompt") or "").strip()
     if user_prompt:
         lines.append(f"USER_PROMPT = {_py_string(user_prompt)}")
     lines.append("")
+
+    if user_prompt:
+        lines.append(_HELPER_SINGLE_NODE_PROMPT)
 
     provider_args = [f"api_key={key_expr}"]
     if base_url:
@@ -762,18 +851,19 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
     lines.append("")
     lines.append("")
 
-    lines.append(f"async def {am.run_func}(node_input: str) -> str:")
+    lines.append(f"async def {am.run_func}(inputs: dict) -> str:")
     if user_prompt:
-        lines.append('    prompt = USER_PROMPT.replace("{input}", node_input).replace("{message_history}", "")')
+        lines.append("    prompt = _apply_user_prompt(inputs)")
     else:
-        lines.append("    prompt = node_input")
+        lines.append('    prompt = inputs.get("input", "")')
     lines.append("    result = await agent.run(prompt)")
     lines.append("    output = result.output")
     if output_paths:
         if previous_output_paths:
-            lines.append("    # Paths with return_behavior \"previous_output\" hand the input back unchanged.")
-            lines.append("    if CLASS_TO_PATH.get(type(output).__name__) in PREVIOUS_OUTPUT_PATHS:")
-            lines.append("        return node_input")
+            lines.append("    # Paths with return_behavior \"previous_output\" hand a named input back unchanged.")
+            lines.append("    chosen_path = CLASS_TO_PATH.get(type(output).__name__)")
+            lines.append("    if chosen_path in PREVIOUS_OUTPUT_PATHS:")
+            lines.append('        return inputs.get(PREVIOUS_OUTPUT_RETURN_INPUT[chosen_path], "")')
         lines.append('    if hasattr(output, "content"):')
         lines.append("        return str(output.content)")
         lines.append("    return str(output)")
@@ -984,13 +1074,13 @@ def _emit_agent_orchestrator(am: _AgentModule) -> str:
         'GRAPH_CONFIG = json.loads((Path(__file__).parent / "graph.json").read_text(encoding="utf-8"))',
         "",
         "",
-        "async def _run_node(node_id, node_config, node_input, messages):",
-        "    output, msgs, chosen_path = await RUNNERS[node_id](node_input, messages)",
+        "async def _run_node(node_id, node_config, inputs, messages):",
+        "    output, msgs, chosen_path = await RUNNERS[node_id](inputs, messages)",
         "    return output, msgs, chosen_path, None",
         "",
         "",
-        f"async def {am.run_func}(node_input: str) -> str:",
-        '    return (await run_graph(GRAPH_CONFIG, node_input, _run_node))["result"]',
+        f"async def {am.run_func}(inputs: dict) -> str:",
+        '    return (await run_graph(GRAPH_CONFIG, inputs, _run_node))["result"]',
     ]
     return "\n".join(lines) + "\n"
 
@@ -1164,9 +1254,9 @@ def _emit_main(flow, entry_node: Optional[_Node]) -> str:
 
 def _validate_agent_graph(agent) -> dict:
     """Return the agent's graph_config; reject only what the vendored engine
-    can't run. build_adjacency crashes with a bare KeyError on an unknown
-    from_node and silently skips an unknown to_node, so both are rejected
-    here with a message naming the agent and the bad edge."""
+    can't run. The engine silently drops any edge whose from_node or to_node
+    isn't a known node, so both are rejected here with a message naming the
+    agent and the bad edge."""
     graph = agent.graph_config or {}
     nodes = graph.get("nodes") or {}
     if not nodes:

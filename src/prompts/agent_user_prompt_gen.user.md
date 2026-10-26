@@ -12,6 +12,6 @@ The agent's system prompt is:
 {SYSTEM_PROMPT}
 ---
 
-Write a concise user prompt template that complements this system prompt. Use {input} to reference the runtime input. Only use {message_history} if the agent's role requires awareness of previous conversation context.
+Write a concise user prompt template that complements this system prompt. Use at least one named input such as {input} to reference the runtime input, with a separate descriptive name for each distinct piece of incoming data. Only use {message_history} if the agent's role requires awareness of previous conversation context.
 
 Write the user prompt template now.

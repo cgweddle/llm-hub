@@ -8,6 +8,12 @@ Tests cover:
 - max_loop_iterations safety limit
 - Backward compatibility with single-node and simple DAG agents
 
+Named-inputs contract (claude_plans/named-agent-inputs.md, plan step 4):
+`AgentExecutor._execute_graph` / `execute_agent_node` take `inputs: dict`
+instead of a single input string, and `_run_sub_agent` (mocked below)
+receives that same per-node named-inputs dict — a legacy edge with no
+target_input delivers under the "input" key.
+
 Run with: pytest tests/test_agent_executor_loops.py -v
 """
 
@@ -127,13 +133,15 @@ class TestExecuteGraphLoops:
 
     @pytest.mark.asyncio
     async def test_simple_dag_backward_compatible(self):
-        """Two-node DAG (no loops) should work identically to before."""
+        """Two-node DAG (no loops) should work identically to before, with
+        named inputs: each node's input is now a dict (legacy edges land
+        under the "input" key)."""
         executor = self._make_executor()
 
         call_log = []
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
-            call_log.append((node_id, node_input, predecessor_messages))
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
+            call_log.append((node_id, inputs, predecessor_messages))
             if node_id == "writer":
                 return ("Draft text", [], None)
             else:
@@ -151,15 +159,16 @@ class TestExecuteGraphLoops:
             "exit_points": ["summarizer"],
         }
 
-        result = await executor._execute_graph(graph_config, "Write something", None, builts_for(graph_config))
+        result = await executor._execute_graph(
+            graph_config, {"input": "Write something"}, None, builts_for(graph_config))
 
         assert result["status"] == "completed"
         assert result["result"] == "Summary of draft"
         assert len(call_log) == 2
-        # Writer gets original input, no history
-        assert call_log[0] == ("writer", "Write something", None)
-        # Summarizer gets Writer's output, no history
-        assert call_log[1] == ("summarizer", "Draft text", None)
+        # Writer gets the original external inputs dict, no history
+        assert call_log[0] == ("writer", {"input": "Write something"}, None)
+        # Summarizer gets Writer's output under the legacy "input" key, no history
+        assert call_log[1] == ("summarizer", {"input": "Draft text"}, None)
 
     @pytest.mark.asyncio
     async def test_exit_point_follows_loop_edges(self):
@@ -169,7 +178,7 @@ class TestExecuteGraphLoops:
 
         call_count = {"writer": 0, "reviewer": 0}
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
             call_count[node_id] += 1
             return (f"Output from {node_id}", [], None)
 
@@ -189,7 +198,8 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 1,
         }
 
-        result = await executor._execute_graph(graph_config, "Write a poem", None, builts_for(graph_config))
+        result = await executor._execute_graph(
+            graph_config, {"input": "Write a poem"}, None, builts_for(graph_config))
 
         assert result["status"] == "completed"
         # With max_loop_iterations=1: writer→reviewer (loop back)→writer→reviewer (limit hit)
@@ -204,7 +214,7 @@ class TestExecuteGraphLoops:
 
         call_count = {"total": 0}
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
             call_count["total"] += 1
             return (f"Output from {node_id}", [], None)
 
@@ -224,7 +234,8 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 2,
         }
 
-        result = await executor._execute_graph(graph_config, "Start", None, builts_for(graph_config))
+        result = await executor._execute_graph(
+            graph_config, {"input": "Start"}, None, builts_for(graph_config))
 
         # a→b (loop back) → a→b (loop back) → a→b (limit reached, stop)
         # That's 3 iterations of a + 3 of b = 6 total, but b loops back only 2 times
@@ -240,10 +251,10 @@ class TestExecuteGraphLoops:
 
         histories_received = []
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
             if node_id == "writer":
                 histories_received.append(predecessor_messages)
-                fake_messages = [{"role": "user", "content": node_input}]
+                fake_messages = [{"role": "user", "content": inputs}]
                 if predecessor_messages:
                     fake_messages = predecessor_messages + fake_messages
                 return ("Draft", fake_messages, None)
@@ -268,7 +279,8 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 1,
         }
 
-        await executor._execute_graph(graph_config, "Write a poem", None, builts_for(graph_config))
+        await executor._execute_graph(
+            graph_config, {"input": "Write a poem"}, None, builts_for(graph_config))
 
         # First call: no history
         assert histories_received[0] is None
@@ -284,7 +296,7 @@ class TestExecuteGraphLoops:
 
         visited = []
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
             visited.append(node_id)
             if node_id == "reviewer":
                 # Choose "approve" path
@@ -309,7 +321,8 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 3,
         }
 
-        result = await executor._execute_graph(graph_config, "Write a blog", None, builts_for(graph_config))
+        result = await executor._execute_graph(
+            graph_config, {"input": "Write a blog"}, None, builts_for(graph_config))
 
         # Reviewer chose "approve" → should go to formatter, NOT loop back to writer
         assert result["status"] == "completed"
@@ -323,7 +336,7 @@ class TestExecuteGraphLoops:
         visited = []
         reviewer_calls = 0
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
             nonlocal reviewer_calls
             visited.append(node_id)
             if node_id == "reviewer":
@@ -351,7 +364,8 @@ class TestExecuteGraphLoops:
             "max_loop_iterations": 5,
         }
 
-        result = await executor._execute_graph(graph_config, "Write a blog", None, builts_for(graph_config))
+        result = await executor._execute_graph(
+            graph_config, {"input": "Write a blog"}, None, builts_for(graph_config))
 
         # writer → reviewer (revise) → writer → reviewer (approve) → formatter
         assert result["status"] == "completed"
@@ -362,7 +376,7 @@ class TestExecuteGraphLoops:
         """Single-node agent should work identically to before."""
         executor = self._make_executor()
 
-        async def mock_run_sub_agent(node_id, node_config, node_input, built, predecessor_messages=None):
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
             return ("Hello world", [], None)
 
         executor._run_sub_agent = mock_run_sub_agent
@@ -374,7 +388,50 @@ class TestExecuteGraphLoops:
             "exit_points": ["main"],
         }
 
-        result = await executor._execute_graph(graph_config, "Hi", None, builts_for(graph_config))
+        result = await executor._execute_graph(
+            graph_config, {"input": "Hi"}, None, builts_for(graph_config))
 
         assert result["status"] == "completed"
         assert result["result"] == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_named_inputs_both_delivered_to_single_node(self):
+        """Two edges into one node, each targeting a different named input,
+        must both arrive — a dict, not the old single string."""
+        executor = self._make_executor()
+
+        received = []
+
+        graph_config = {
+            "nodes": {
+                "planner": {"agent_type": "pydanticai", "name": "Planner"},
+                "researcher": {"agent_type": "pydanticai", "name": "Researcher"},
+                "writer": {"agent_type": "pydanticai", "name": "Writer"},
+            },
+            "edges": [
+                {"from_node": "planner", "to_node": "writer", "target_input": "plan"},
+                {"from_node": "planner", "to_node": "researcher"},
+                {"from_node": "researcher", "to_node": "writer", "target_input": "research"},
+            ],
+            "entry_point": "planner",
+            "exit_points": ["writer"],
+        }
+
+        async def run_with_outputs(node_id, node_config, inputs, built, predecessor_messages=None):
+            received.append((node_id, dict(inputs)))
+            if node_id == "planner":
+                return ("PLAN", [], None)
+            if node_id == "researcher":
+                return (f"RESEARCH({inputs.get('input')})", [], None)
+            return (f"combined:{inputs.get('plan')}+{inputs.get('research')}", [], None)
+
+        executor._run_sub_agent = run_with_outputs
+
+        result = await executor._execute_graph(
+            graph_config, {"input": "go"}, None, builts_for(graph_config))
+
+        assert result["status"] == "completed"
+        writer_calls = [inp for nid, inp in received if nid == "writer"]
+        assert len(writer_calls) == 1
+        assert writer_calls[0] == {"plan": "PLAN", "research": "RESEARCH(PLAN)"}
+        assert result["result"] == "combined:PLAN+RESEARCH(PLAN)"

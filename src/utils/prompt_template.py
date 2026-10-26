@@ -6,16 +6,23 @@ System prompt placeholders (resolved at agent creation):
   {AGENT_DESCRIPTION} → node description
   {TOOLS_SECTION}     → formatted list of tool names
 
-User prompt placeholders (resolved at execution time):
-  {input}             → node_input text (preceding node's output or user's runtime input)
-  {message_history}   → serialized PydanticAI message history from previous nodes
+User prompt placeholders (named inputs, resolved at execution time, see
+claude_plans/named-agent-inputs.md): every {name} placeholder in a
+sub-agent's user_prompt is a named input (decision 2); {{name}} is an escape
+for the literal text "{name}" and creates no input (decision 3);
+{message_history} is reserved and is not an input — it is replaced with the
+serialized PydanticAI message history from previous nodes; an empty
+user_prompt is treated as "{input}" (decision 2).
 
 Backward compatible: prompts without placeholders pass through unchanged.
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 from utils.message_serializer import serialize_messages
+
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def resolve_system_prompt_template(
@@ -53,29 +60,108 @@ def resolve_system_prompt_template(
     return result
 
 
+def extract_prompt_inputs(user_prompt: str) -> List[str]:
+    """
+    List a user prompt's named inputs: ordered, de-duplicated, skipping
+    {{escaped}} braces and the reserved {message_history} placeholder.
+
+    An empty (or whitespace-only) prompt implicitly means "{input}" (decision
+    2), so it returns ["input"]. A non-empty prompt with zero {name}
+    placeholders returns [].
+    """
+    if not user_prompt or not user_prompt.strip():
+        return ["input"]
+
+    names: List[str] = []
+    seen = set()
+    i = 0
+    n = len(user_prompt)
+    while i < n:
+        if user_prompt[i] == "{":
+            if i + 1 < n and user_prompt[i + 1] == "{":
+                i += 2
+                continue
+            close = user_prompt.find("}", i + 1)
+            if close == -1:
+                i += 1
+                continue
+            name = user_prompt[i + 1:close]
+            if name != "message_history" and _NAME_RE.match(name) and name not in seen:
+                seen.add(name)
+                names.append(name)
+            i = close + 1
+        else:
+            i += 1
+    return names
+
+
 def resolve_user_prompt_template(
     user_prompt: str,
-    node_input: str,
+    inputs: Dict[str, str],
     predecessor_messages: Optional[List] = None,
 ) -> str:
     """
-    Replace template placeholders in a user prompt with runtime values.
+    Replace a user prompt's named-input placeholders with runtime values.
 
     Args:
-        user_prompt: Raw user prompt, possibly containing {input} and {message_history}.
-        node_input: The node's input text (preceding node's output or user's runtime input).
+        user_prompt: Raw user prompt — {name} placeholders, {{name}} escapes,
+            and the reserved {message_history} placeholder.
+        inputs: Named input values for this node. A missing input resolves
+            to "" (decision 6).
         predecessor_messages: Accumulated PydanticAI messages from previous nodes.
 
     Returns:
         User prompt with placeholders resolved.
     """
-    result = user_prompt
+    if not user_prompt or not user_prompt.strip():
+        return inputs.get("input", "")
 
-    result = result.replace("{input}", node_input)
+    result: List[str] = []
+    i = 0
+    n = len(user_prompt)
+    while i < n:
+        c = user_prompt[i]
+        if c == "{":
+            if i + 1 < n and user_prompt[i + 1] == "{":
+                result.append("{")
+                i += 2
+                continue
+            close = user_prompt.find("}", i + 1)
+            if close == -1:
+                result.append(c)
+                i += 1
+                continue
+            name = user_prompt[i + 1:close]
+            if name == "message_history":
+                result.append(serialize_messages(predecessor_messages) if predecessor_messages else "")
+            elif _NAME_RE.match(name):
+                result.append(str(inputs.get(name, "")))
+            else:
+                result.append(user_prompt[i:close + 1])
+            i = close + 1
+        elif c == "}" and i + 1 < n and user_prompt[i + 1] == "}":
+            result.append("}")
+            i += 2
+        else:
+            result.append(c)
+            i += 1
+    return "".join(result)
 
-    if predecessor_messages:
-        result = result.replace("{message_history}", serialize_messages(predecessor_messages))
-    else:
-        result = result.replace("{message_history}", "")
 
-    return result
+def agent_external_inputs(graph_config: Dict[str, Any]) -> List[str]:
+    """
+    The agent's flow-level inputs (decision 8): the entry sub-agent's inputs
+    that no internal edge feeds. These are the handles shown on the agent
+    node on the flow canvas.
+    """
+    nodes_config = graph_config.get("nodes", {})
+    entry_point = graph_config.get("entry_point")
+    entry_config = nodes_config.get(entry_point, {})
+    entry_inputs = extract_prompt_inputs(entry_config.get("user_prompt", ""))
+
+    fed = {
+        edge.get("target_input") or "input"
+        for edge in graph_config.get("edges", [])
+        if edge.get("to_node") == entry_point
+    }
+    return [name for name in entry_inputs if name not in fed]

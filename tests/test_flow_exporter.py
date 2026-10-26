@@ -511,15 +511,15 @@ def test_agent_module_anthropic(db):
     assert "PREVIOUS_OUTPUT_PATHS = ['approve']" in agent_py
     # system prompt template resolved at export time
     assert "You are Reviewer." in agent_py
-    # user prompt template resolved at run time
-    assert 'USER_PROMPT.replace("{input}", node_input)' in agent_py
+    # user prompt template resolved at run time, from a NAMED-inputs dict
+    assert "async def run_reviewer(inputs: dict) -> str:" in agent_py
     # agent tool registered as the raw imported function
     assert "from tools.fetch_page import fetch_page" in agent_py
     assert "agent.tool_plain(fetch_page)" in agent_py
 
     flow_py = files["flow.py"]
     assert "from agents.reviewer import run_reviewer" in flow_py
-    assert "await run_reviewer(_as_text(fetch_out))" in flow_py
+    assert 'await run_reviewer({"input": _as_text(fetch_out)})' in flow_py
 
     requirements = files["requirements.txt"].splitlines()
     assert "pydantic-ai==1.31.0" in requirements
@@ -631,8 +631,8 @@ def test_reflection_loop_agent_wiring(db):
     agent_py = files[f"{pkg}/agent.py"]
     assert "from agents._runtime.graph_engine import run_graph" in agent_py
     assert "from agents.reviewer.agents import RUNNERS" in agent_py
-    assert "async def run_reviewer(node_input" in agent_py
-    assert "run_graph(GRAPH_CONFIG" in agent_py
+    assert "async def run_reviewer(inputs: dict) -> str:" in agent_py
+    assert "run_graph(GRAPH_CONFIG, inputs" in agent_py
 
     init_py = files[f"{pkg}/__init__.py"]
     assert "run_reviewer" in init_py
@@ -710,9 +710,9 @@ def test_multinode_user_prompts(db, import_exported):
     assert 'USER_PROMPT = ""' in files3["agents/whitespace/agents/a.py"]
 
     module = import_exported(files, "agents._runtime.prompts")
-    assert module.apply_prompt("", "hi", None) == "hi"
-    assert module.apply_prompt("Q: {input}", "hi", None) == "Q: hi"
-    assert module.apply_prompt("{input} / {message_history}", "hi", None) == "hi / "
+    assert module.apply_prompt("", {"input": "hi"}, None) == "hi"
+    assert module.apply_prompt("Q: {input}", {"input": "hi"}, None) == "Q: hi"
+    assert module.apply_prompt("{input} / {message_history}", {"input": "hi"}, None) == "hi / "
 
 
 def test_multinode_previous_output(db):
@@ -892,7 +892,7 @@ def test_reflection_loop_runs(db, import_exported):
         writer_calls, reviewer_prompts = [], []
         with writer_mod.agent.override(model=FunctionModel(make_writer_fn(writer_calls))), \
              reviewer_mod.agent.override(model=FunctionModel(make_reviewer_fn(list(script), reviewer_prompts))):
-            result = asyncio.run(pkg_module.run_reflection("otters"))
+            result = asyncio.run(pkg_module.run_reflection({"input": "otters"}))
         return result, writer_calls, reviewer_prompts
 
     # approve after revising: previous_output returns the writer's draft
@@ -1045,7 +1045,7 @@ def test_single_node_output_path_named_agent(db, import_exported):
             "final_result_Agent", {"content": "to agent"})])
 
     with module.agent.override(model=FunctionModel(fn)):
-        result = asyncio.run(module.run_reviewer("x"))
+        result = asyncio.run(module.run_reviewer({"input": "x"}))
     assert result == "to agent"
 
 
@@ -1154,8 +1154,9 @@ def test_agent_gets_selected_field_from_expanded_output(db):
     files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
     assert_all_compile(files)
     flow_py = files["flow.py"]
-    # "text" is a str field in the schema — direct subscript, no _as_text
-    assert "await run_reviewer(fetch_out['text'])" in flow_py
+    # "text" is a str field in the schema — direct subscript, no _as_text;
+    # {field: ""} targets the agent's legacy "input" input (decision 5).
+    assert 'await run_reviewer({"input": fetch_out[\'text\']})' in flow_py
 
 
 def test_agent_selected_nonstr_field_is_stringified(db):
@@ -1172,7 +1173,7 @@ def test_agent_selected_nonstr_field_is_stringified(db):
         entry="F", exits=["AG"],
     )
     files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
-    assert "await run_reviewer(_as_text(fetch_out['status']))" in files["flow.py"]
+    assert 'await run_reviewer({"input": _as_text(fetch_out[\'status\'])})' in files["flow.py"]
 
 
 def test_tool_generic_input_autowraps_selected_field(db):
@@ -1670,3 +1671,171 @@ def test_zip_round_trip(db):
         assert "my_flow/tools/fetch_page.py" in names
         assert "my_flow/README.md" in names
         assert "my_flow/__main__.py" in names
+
+
+# ─── Named inputs (claude_plans/named-agent-inputs.md, plan step 6) ──────────
+#
+# Flow edges into an agent emit a dict literal over every incoming edge
+# (not just incoming[0]); single-node agents emit `run(inputs: dict)` and
+# resolve every {name} placeholder (plus the {{name}} escape) from that
+# dict; multi-node agents thread the same dict through run_graph end to end.
+
+def test_single_node_agent_dict_literal_input_in_flow_py(db, import_exported):
+    """Two flow edges into one agent node, each selecting a different field
+    of the same upstream dict output, must both appear as entries of a
+    single dict literal passed to the agent's run() — not just
+    incoming[0]."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, single_node_agent_config(
+        user_prompt="Draft: {draft}\nNotes: {notes}\nTemplate: {{literal}}",
+    ))
+    flow = make_flow(
+        session, user,
+        nodes={
+            "F": {"node_type": "tool", "id": fetch.id, "name": "Fetch"},
+            "AG": {"node_type": "agent", "id": agent.id, "name": "Reviewer"},
+        },
+        edges=[
+            {"from_node": "F", "to_node": "AG", "mapping": {"text": "draft"}},
+            {"from_node": "F", "to_node": "AG", "mapping": {"status": "notes"}},
+        ],
+        entry="F", exits=["AG"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+    assert_standalone(files)
+
+    agent_py = files["agents/reviewer.py"]
+    assert "async def run_reviewer(inputs: dict) -> str:" in agent_py
+
+    flow_py = files["flow.py"]
+    assert "run_reviewer({" in flow_py
+    assert '"draft":' in flow_py
+    assert '"notes":' in flow_py
+
+    module = import_exported(files, "agents.reviewer")
+    captured = []
+
+    def fn(messages, info):
+        captured.append(messages[-1].parts[-1].content)
+        return ModelResponse(parts=[TextPart("ok")])
+
+    with module.agent.override(model=FunctionModel(fn)):
+        asyncio.run(module.run_reviewer({"draft": "D1", "notes": "N1"}))
+
+    prompt = captured[0]
+    assert "Draft: D1" in prompt
+    assert "Notes: N1" in prompt
+    # {{literal}} is an escape: literal "{literal}" text, not substituted.
+    assert "Template: {literal}" in prompt
+
+
+def test_single_node_agent_missing_input_resolves_empty(db, import_exported):
+    """An input with no connected edge resolves to "" (decision 6) — the
+    run() call must not KeyError or leave the placeholder un-substituted."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, single_node_agent_config(
+        user_prompt="Draft: {draft}\nNotes: {notes}",
+    ))
+    flow = make_flow(
+        session, user,
+        nodes={
+            "F": {"node_type": "tool", "id": fetch.id, "name": "Fetch"},
+            "AG": {"node_type": "agent", "id": agent.id, "name": "Reviewer"},
+        },
+        edges=[{"from_node": "F", "to_node": "AG", "mapping": {"text": "draft"}}],
+        entry="F", exits=["AG"],
+    )
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+
+    module = import_exported(files, "agents.reviewer")
+    captured = []
+
+    def fn(messages, info):
+        captured.append(messages[-1].parts[-1].content)
+        return ModelResponse(parts=[TextPart("ok")])
+
+    with module.agent.override(model=FunctionModel(fn)):
+        asyncio.run(module.run_reviewer({"draft": "D1"}))
+
+    assert captured[0] == "Draft: D1\nNotes: "
+
+
+def reflection_named_inputs_config():
+    return {
+        "nodes": {
+            "planner": {"agent_type": "pydanticai", "name": "planner", "system_prompt": "p",
+                        "user_prompt": "{input}"},
+            "writer": {"agent_type": "pydanticai", "name": "writer", "system_prompt": "w",
+                       "user_prompt": "{plan} / {feedback}"},
+            "reviewer": {"agent_type": "reflection", "name": "reviewer", "system_prompt": "r",
+                         "user_prompt": "{input}",
+                         "output_paths": {
+                             "revise": {"description": "Needs another pass"},
+                             "approve": {"description": "Good to go",
+                                         "return_behavior": "previous_output",
+                                         "return_input": "input"},
+                         }},
+        },
+        "edges": [
+            {"from_node": "planner", "to_node": "writer", "target_input": "plan"},
+            {"from_node": "writer", "to_node": "reviewer"},
+            {"from_node": "reviewer", "to_node": "writer", "is_loop": True,
+             "output_path": "revise", "target_input": "feedback"},
+        ],
+        "entry_point": "planner",
+        "exit_points": ["reviewer"],
+        "max_loop_iterations": 2,
+    }
+
+
+def test_multinode_reflection_loop_named_inputs_runs(db, import_exported):
+    """Behavioral, end-to-end test of the new engine through an export:
+    Planner -> Writer.plan, Writer -> Reviewer, Reviewer -(revise, loop)->
+    Writer.feedback. Writer must keep `plan` across iterations (planner is
+    outside the loop) while `feedback` updates every iteration — driven
+    with FunctionModel fakes, no network."""
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, reflection_named_inputs_config(),
+                        name="ReflectionNamed")
+    flow = agent_flow(session, user, agent, fetch)
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+
+    pkg_module = import_exported(files, "agents.reflectionnamed")
+    planner_mod = importlib.import_module("agents.reflectionnamed.agents.planner")
+    writer_mod = importlib.import_module("agents.reflectionnamed.agents.writer")
+    reviewer_mod = importlib.import_module("agents.reflectionnamed.agents.reviewer")
+
+    def planner_fn(messages, info):
+        return ModelResponse(parts=[TextPart("PLAN")])
+
+    def make_writer_fn(prompts):
+        def writer_fn(messages, info):
+            prompts.append(messages[-1].parts[-1].content)
+            return ModelResponse(parts=[TextPart(f"draft{len(prompts)}")])
+        return writer_fn
+
+    def make_reviewer_fn(script):
+        def reviewer_fn(messages, info):
+            choice = script.pop(0)
+            return ModelResponse(parts=[ToolCallPart(
+                f"final_result_{choice.capitalize()}", {"content": f"{choice} note"})])
+        return reviewer_fn
+
+    writer_prompts = []
+    with planner_mod.agent.override(model=FunctionModel(planner_fn)), \
+         writer_mod.agent.override(model=FunctionModel(make_writer_fn(writer_prompts))), \
+         reviewer_mod.agent.override(model=FunctionModel(make_reviewer_fn(["revise", "approve"]))):
+        result = asyncio.run(pkg_module.run_reflectionnamed({"input": "go"}))
+
+    assert len(writer_prompts) == 2
+    assert writer_prompts[0] == "PLAN / "
+    assert writer_prompts[1] == "PLAN / revise note"
+    # approve's previous_output returns the reviewer's own "input" (the
+    # last thing it reviewed, i.e. writer's second draft).
+    assert result == "draft2"

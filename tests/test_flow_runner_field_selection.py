@@ -1,11 +1,24 @@
 """
-Unit tests for _build_node_input's expanded-output field selection.
+Unit tests for _build_node_input's expanded-output field selection AND the
+named-inputs contract for agent targets (claude_plans/named-agent-inputs.md,
+plan step 5).
 
 An edge from an expanded dict output into a generic whole-input target
 (agent node, or tool without named param handles) stores {out_field: ""}.
-The agent/trigger branches must feed the selected field, and the tool
-branch must merge the selected value instead of creating a "" kwarg.
-Also pins the pre-existing behaviors the refactor must not change.
+The trigger branch still just feeds the selected scalar value, and the tool
+branch still merges the selected value instead of creating a "" kwarg —
+unchanged.
+
+The AGENT branch changed: it now loops over ALL incoming edges (not just
+incoming[0]) and returns a dict of named inputs, `{target_input_name:
+_stringify_for_agent(selected_upstream)}`. An edge's `mapping` is the
+tool-edge shape `{out_field: target_input_name}`; `""` (or no mapping at
+all) targets the legacy `"input"` name — the one-time read for edges that
+predate named inputs (decision 5), not a runtime fallback.
+
+Also pins the pre-existing behaviors the refactor must not change (tool /
+trigger branches stay scalar / dict-of-kwargs, never wrapped in a named
+dict).
 """
 from src.runners.flow_runner import FlowRunContext, _build_node_input
 
@@ -27,6 +40,8 @@ def make_ctx(nodes, edges, state, tool_schemas=None, entry="F"):
 
 
 def agent_input(mapping):
+    """Single edge F->AG with the given mapping (tool-edge shape:
+    {out_field: target_input_name}; "" targets the legacy "input" name)."""
     ctx = make_ctx(
         nodes={"F": {"node_type": "tool", "id": 1, "name": "F"},
                "AG": {"node_type": "agent", "id": 1, "name": "AG"}},
@@ -37,16 +52,40 @@ def agent_input(mapping):
 
 
 def test_agent_gets_selected_field():
-    assert agent_input({"text": ""}) == "body"
+    """mapping value "" targets the legacy "input" name — still a dict."""
+    assert agent_input({"text": ""}) == {"input": "body"}
+
+
+def test_agent_mapped_field_delivers_to_named_input():
+    """A non-empty mapping value is the agent's NAMED input, not "input"."""
+    assert agent_input({"text": "draft"}) == {"draft": "body"}
 
 
 def test_agent_selected_missing_field_falls_back_to_whole():
-    assert '"status": 200' in agent_input({"nope": ""})
+    result = agent_input({"nope": ""})
+    assert '"status": 200' in result["input"]
 
 
 def test_agent_without_mapping_still_gets_whole_output():
     result = agent_input(None)
-    assert '"text": "body"' in result and '"status": 200' in result
+    assert '"text": "body"' in result["input"] and '"status": 200' in result["input"]
+
+
+def test_agent_multiple_edges_deliver_separate_named_inputs():
+    """The agent branch loops over ALL incoming edges — not just
+    incoming[0] — building one dict with one entry per edge, instead of
+    the old "last writer wins" (or outright-ignored) behavior."""
+    ctx = make_ctx(
+        nodes={"F": {"node_type": "tool", "id": 1, "name": "F"},
+               "G": {"node_type": "tool", "id": 2, "name": "G"},
+               "AG": {"node_type": "agent", "id": 1, "name": "AG"}},
+        edges=[
+            {"from_node": "F", "to_node": "AG", "mapping": {"text": "draft"}},
+            {"from_node": "G", "to_node": "AG", "mapping": {"": "notes"}},
+        ],
+        state={"F": UPSTREAM, "G": "a note"},
+    )
+    assert _build_node_input(ctx, "AG", None) == {"draft": "body", "notes": "a note"}
 
 
 def test_trigger_gets_selected_field():
