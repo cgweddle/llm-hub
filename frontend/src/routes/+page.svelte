@@ -67,6 +67,7 @@
     evaluateExecution
   } from '../lib/api';
   import { buildEnhancedGraphConfig } from '$lib/flowBuilder';
+  import { extractPromptInputs, agentExternalInputs, validateFlowAgentEdges } from '$lib/promptInputs';
   import { autoLayoutNodes } from '$lib/elkLayout';
   import '@xyflow/svelte/dist/style.css';
   import type { PageData } from './$types';
@@ -158,7 +159,7 @@
   let showGeneratePromptAI = $state(false);
   let promptAdditionalInstructions = $state('');
   let isGeneratingPrompt = $state(false);
-  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string}> = $state([]);
+  let newAgentOutputPaths: Array<{name: string, description: string, return_behavior: string, return_input: string}> = $state([]);
   let createAgentUserPromptBackdrop: HTMLDivElement = $state(undefined as any);
   let isConfiguringComplexNode = $state(false);
   let pendingAgentTemplate: AgentTemplate | null = $state(null);
@@ -305,6 +306,44 @@
       }
       return n;
     });
+
+    recomputeFlowAgentInputs();
+  }
+
+  /**
+   * Re-derive each flow-canvas agent node's external inputs
+   * and flag edges whose targetHandle is no longer one of them: they stay
+   * attached but render red, and their names collect in the
+   * target node's data.missingInputs so ToolNode can render a "(removed)"
+   * handle for them.
+   */
+  function recomputeFlowAgentInputs() {
+    const missingByNode = new Map<string, Set<string>>();
+
+    edges = edges.map(edge => {
+      const targetNode = nodes.find(n => n.id === edge.target);
+      if (!targetNode?.data?.isAgent) return edge;
+
+      const externalInputs = agentExternalInputs(targetNode.data.graph_config as any);
+      const targetHandle = edge.targetHandle || 'input';
+      const broken = !externalInputs.includes(targetHandle);
+
+      if (broken) {
+        if (!missingByNode.has(edge.target)) missingByNode.set(edge.target, new Set());
+        missingByNode.get(edge.target)!.add(targetHandle);
+      }
+
+      return {
+        ...edge,
+        style: broken ? 'stroke-width: 3; stroke: #ef4444;' : 'stroke-width: 3; stroke: black;'
+      };
+    });
+
+    nodes = nodes.map(n => {
+      if (!n.data?.isAgent) return n;
+      const missing = missingByNode.has(n.id) ? Array.from(missingByNode.get(n.id)!) : [];
+      return { ...n, data: { ...n.data, missingInputs: missing } };
+    });
   }
 
   // Use tools and agents from database instead of hardcoded nodes
@@ -439,6 +478,7 @@
 
       // Create the edge
       edges = addEdge(params, edges);
+      recomputeFlowAgentInputs();
       console.log('Edges after connection:', edges);
     } catch (error) {
       console.error('Error creating edge:', error);
@@ -458,6 +498,24 @@
 
       // Convert visual flow to graph_config
       const graphConfig = buildEnhancedGraphConfig(nodes, edges, data.tools);
+
+      // Block save on broken agent-input edges
+      const agentGraphsByNodeId: Record<string, any> = {};
+      for (const node of nodes) {
+        if (node.data?.isAgent && node.data?.graph_config && Object.keys((node.data.graph_config as any).nodes || {}).length > 0) {
+          agentGraphsByNodeId[node.id] = node.data.graph_config;
+        }
+      }
+      const hasBrokenEdges = nodes.some(n => ((n.data?.missingInputs as string[] | undefined)?.length ?? 0) > 0);
+      const edgeProblems = validateFlowAgentEdges(graphConfig, agentGraphsByNodeId);
+      if (hasBrokenEdges || edgeProblems.length > 0) {
+        validationSuccess = false;
+        validationMessage = edgeProblems.length > 0
+          ? edgeProblems.join('; ')
+          : 'Cannot save flow: an agent input is missing or disconnected.';
+        showValidationToast = true;
+        return;
+      }
 
       if (currentFlowId) {
         // Update existing flow - only update graph_config and conda_env
@@ -628,22 +686,36 @@
         }
       }
 
-      // Recreate edges from graph_config
+      // Recreate edges from graph_config. Handles aren't set on these edge
+      // objects yet (ELK errors if an edge references a port the node
+      // doesn't declare) — only the id reflects the resolved handles, computed
+      // the same way they're restored below.
       const newEdges: Edge[] = [];
+      const pushedEdgeHandles: Array<{ sourceHandle?: string; targetHandle?: string }> = [];
       for (const edgeConfig of graphConfig.edges) {
         if (nodeMap.has(edgeConfig.from_node) && nodeMap.has(edgeConfig.to_node)) {
+          const targetNode = nodeMap.get(edgeConfig.to_node);
+          let sourceHandle: string | undefined;
+          let targetHandle: string | undefined;
+          if (edgeConfig.mapping && Object.keys(edgeConfig.mapping).length > 0) {
+            const [outputField, inputParam] = Object.entries(edgeConfig.mapping)[0];
+            sourceHandle = (outputField as string) || undefined;
+            targetHandle = (inputParam as string) || undefined;
+          }
+          // Legacy edges into agents with no mapping, or {field: ""}, target "input"
+          if (targetNode?.data?.isAgent && !targetHandle) {
+            targetHandle = 'input';
+          }
+
           const edge: Edge = {
-            id: `${edgeConfig.from_node}-${edgeConfig.to_node}`,
+            id: `${edgeConfig.from_node}:${sourceHandle ?? ''}->${edgeConfig.to_node}:${targetHandle ?? ''}`,
             source: edgeConfig.from_node,
             target: edgeConfig.to_node,
             ...defaultEdgeOptions
           };
 
-          // Note: We don't restore sourceHandle/targetHandle here
-          // The mapping is stored in graph_config and used by the backend
-          // Visual edges don't need handle information when loading
-
           newEdges.push(edge);
+          pushedEdgeHandles.push({ sourceHandle, targetHandle });
         }
       }
 
@@ -651,17 +723,18 @@
       const layoutedNodes = await autoLayoutNodes(Array.from(nodeMap.values()), newEdges);
       nodes = layoutedNodes;
 
-      // Now restore sourceHandle/targetHandle from mappings (after layout to avoid ELK errors)
-      for (const edgeConfig of graphConfig.edges) {
-        const edge = newEdges.find(e => e.source === edgeConfig.from_node && e.target === edgeConfig.to_node);
-        if (edge && edgeConfig.mapping && Object.keys(edgeConfig.mapping).length > 0) {
-          const [outputField, inputParam] = Object.entries(edgeConfig.mapping)[0];
-          edge.sourceHandle = outputField;
-          edge.targetHandle = inputParam;
-        }
-      }
+      // Now restore sourceHandle/targetHandle (after layout to avoid ELK
+      // errors), matched by list position — not find(from, to), since two
+      // edges can share the same endpoints with different handles
+      pushedEdgeHandles.forEach(({ sourceHandle, targetHandle }, index) => {
+        const edge = newEdges[index];
+        if (!edge) return;
+        if (sourceHandle !== undefined) edge.sourceHandle = sourceHandle;
+        if (targetHandle !== undefined) edge.targetHandle = targetHandle;
+      });
 
       edges = newEdges;
+      recomputeFlowAgentInputs();
 
       // Set the conda environment from the loaded flow
       selectedCondaEnv = flow.conda_env;
@@ -1270,9 +1343,9 @@
       return;
     }
 
-    if (!newAgentUserPrompt.includes('{input}')) {
+    if (extractPromptInputs(newAgentUserPrompt).length === 0) {
       validationSuccess = false;
-      validationMessage = 'User prompt must contain {input} so the agent receives runtime input';
+      validationMessage = 'User prompt has no {name} placeholders — the agent needs at least one input';
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
       return;
@@ -1302,7 +1375,8 @@
                     .filter(p => p.name.trim())
                     .map(p => [p.name.trim(), {
                       description: p.description.trim(),
-                      return_behavior: p.return_behavior
+                      return_behavior: p.return_behavior,
+                      ...(p.return_behavior === 'previous_output' ? { return_input: p.return_input || 'input' } : {})
                     }])
                 )
               } : {})
@@ -1454,7 +1528,7 @@
   }
 
   function addAgentOutputPath() {
-    newAgentOutputPaths = [...newAgentOutputPaths, { name: '', description: '', return_behavior: 'node_output' }];
+    newAgentOutputPaths = [...newAgentOutputPaths, { name: '', description: '', return_behavior: 'node_output', return_input: 'input' }];
   }
 
   function removeAgentOutputPath(index: number) {
@@ -1557,9 +1631,9 @@
   function handleAddNodeToCanvas() {
     if (!pendingAgentTemplate) return;
 
-    if (!newAgentUserPrompt.includes('{input}')) {
+    if (extractPromptInputs(newAgentUserPrompt).length === 0) {
       validationSuccess = false;
-      validationMessage = 'User prompt must contain {input} so the agent receives runtime input';
+      validationMessage = 'User prompt has no {name} placeholders — the agent needs at least one input';
       showValidationToast = true;
       setTimeout(() => { showValidationToast = false; }, 5000);
       return;
@@ -1571,7 +1645,8 @@
             .filter(p => p.name.trim())
             .map(p => [p.name.trim(), {
               description: p.description.trim(),
-              return_behavior: p.return_behavior
+              return_behavior: p.return_behavior,
+              ...(p.return_behavior === 'previous_output' ? { return_input: p.return_input || 'input' } : {})
             }])
         )
       : undefined;
@@ -2257,7 +2332,13 @@
           <div class="create-tool-section">
             <div class="create-tool-section-label">User Prompt</div>
             <div class="create-tool-helper-text" style="margin-bottom: 8px;">
-              Use &#123;input&#125; where the runtime input should appear. Use &#123;message_history&#125; to include the full conversation history from previous nodes.
+              Each &#123;name&#125; placeholder becomes a named input. Use &#123;&#123;name&#125;&#125; to escape a literal &#123;name&#125;. Use &#123;message_history&#125; to include the full conversation history from previous nodes.
+            </div>
+            <div class="prompt-inputs-list">
+              <span class="prompt-inputs-label">Inputs:</span>
+              {#each extractPromptInputs(newAgentUserPrompt) as inputName}
+                <span class="prompt-input-badge">{inputName}</span>
+              {/each}
             </div>
             <div class="highlighted-textarea-container">
               <div class="highlighted-textarea-backdrop" bind:this={createAgentUserPromptBackdrop} aria-hidden="true">
@@ -2442,6 +2523,16 @@
                       <option value="node_output">Node Output</option>
                       <option value="previous_output">Previous Output</option>
                     </select>
+                    {#if path.return_behavior === 'previous_output'}
+                      <select
+                        class="create-tool-input output-path-behavior"
+                        bind:value={path.return_input}
+                      >
+                        {#each extractPromptInputs(newAgentUserPrompt) as inputName}
+                          <option value={inputName}>{inputName}</option>
+                        {/each}
+                      </select>
+                    {/if}
                     <button class="output-path-remove" onclick={() => removeAgentOutputPath(index)}>
                       &times;
                     </button>
@@ -3115,6 +3206,29 @@
 
   .create-tool-textarea::placeholder {
     color: #6e6e6e;
+  }
+
+  .prompt-inputs-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+
+  .prompt-inputs-label {
+    font-size: 12px;
+    color: #858585;
+  }
+
+  .prompt-input-badge {
+    padding: 2px 8px;
+    background: #1a3a5c;
+    color: #4ec9b0;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'Consolas', 'Courier New', monospace;
   }
 
   .highlighted-textarea-container {

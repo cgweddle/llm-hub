@@ -1,6 +1,5 @@
 """
-Agent-graph named-input validation (claude_plans/named-agent-inputs.md, plan
-step 2). Shared by the agent create/update endpoints, the flow save
+Agent-graph named-input validation. Shared by the agent create/update endpoints, the flow save
 endpoint, and ``FlowRunner._prepare_agents``.
 
     validate_agent_graph(graph_config: dict) -> list[str]
@@ -10,17 +9,16 @@ endpoint, and ``FlowRunner._prepare_agents``.
         Checks:
           - every sub-node has at least one input, i.e.
             extract_prompt_inputs(node["user_prompt"]) is non-empty
-            (decision 4)
-          - every edge's target_input (missing -> "input", decision 5) is
+          - every edge's target_input (missing -> "input") is
             one of the target sub-node's own inputs
           - no two edges are fully identical: same from_node, output_path,
-            to_node, and target_input (decision 10)
+            to_node, and target_input
           - edges that share a (to_node, target_input) pair must be
             pairwise "exclusive" per the exclusivity algorithm below
-            (decision 11) — otherwise rejected
+            — otherwise rejected
           - every output path with return_behavior == "previous_output"
             has a return_input that is one of that sub-node's OWN inputs;
-            a missing return_input legacy-reads as "input" (decision 9),
+            a missing return_input legacy-reads as "input",
             so it's also a problem when "input" isn't one of that node's
             inputs
 
@@ -38,7 +36,7 @@ endpoint, and ``FlowRunner._prepare_agents``.
           - a flow edge whose resolved input name is not in
             agent_external_inputs(agent_graphs_by_node_id[to_node])
           - two (or more) flow edges resolving to the same input of the
-            same agent node (flow edges have no output paths, so decision 11's
+            same agent node (flow edges have no output paths, so the
             exclusivity proof never applies on the canvas — always rejected)
 
 Exclusivity algorithm ("Shared-input exclusivity check"):
@@ -70,7 +68,7 @@ from utils.prompt_template import extract_prompt_inputs, agent_external_inputs
 def agent_target_input(edge: Dict[str, Any]) -> str:
     """Flow-edge mapping shape -> the agent input it targets. Reuses the
     tool-edge `mapping` shape ({out_field_or_"": input_name}); missing
-    mapping, or a mapping whose value is "", targets "input" (decision 5)."""
+    mapping, or a mapping whose value is "", targets "input"."""
     mapping = edge.get("mapping")
     if not mapping:
         return "input"
@@ -129,7 +127,7 @@ def _compute_edge_req(nodes_config: Dict[str, Any], edges: List[Dict[str, Any]])
 def _compute_loop_nodes(nodes_config: Dict[str, Any], edges: List[Dict[str, Any]]) -> set:
     """Node ids whose strongly-connected component (over ALL edges) has
     size > 1 — "inside a loop" for the exclusivity check. Reuses the agent
-    graph engine's own SCC computation (same notion of "loop" as decision 13's
+    graph engine's own SCC computation (same notion of "loop" as the engine's
     loop refinement)."""
     component_id, component_size = strongly_connected(nodes_config, edges)
     return {n for n, cid in component_id.items() if component_size[cid] > 1}

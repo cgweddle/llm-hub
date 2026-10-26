@@ -6,6 +6,7 @@
 
 import type { Node as XYFlowNode, Edge as XYFlowEdge } from '@xyflow/svelte';
 import type { AgentTypeKey } from './agentTemplates';
+import { validateAgentGraphInputs } from './promptInputs';
 
 /**
  * Configuration for a single sub-agent in the composed agent
@@ -17,7 +18,7 @@ export interface SubAgentConfig {
   system_prompt: string;
   user_prompt: string;
   tool_ids: number[];
-  output_paths?: Record<string, string | { description: string; return_behavior: string }>;  // path_name → config for conditional routing
+  output_paths?: Record<string, string | { description: string; return_behavior: string; return_input?: string }>;  // path_name → config for conditional routing
 }
 
 /**
@@ -28,6 +29,7 @@ export interface AgentEdge {
   to_node: string;
   is_loop: boolean;
   output_path?: string;  // Which output path this edge corresponds to
+  target_input?: string;  // Which named input of to_node this edge feeds (default "input")
 }
 
 /**
@@ -161,7 +163,8 @@ export function buildAgentGraph(
     const agentEdge: AgentEdge = {
       from_node: edge.source,
       to_node: edge.target,
-      is_loop: backEdgeIndices.has(idx)
+      is_loop: backEdgeIndices.has(idx),
+      target_input: edge.targetHandle || 'input'
     };
 
     if (edge.sourceHandle) {
@@ -227,10 +230,13 @@ export function validateAgentGraph(
     }
   }
 
-  // Try building the graph to catch Start node and topology issues
+  // Try building the graph to catch Start node and topology issues, then
+  // validate named inputs/edges the same way the backend does — this also catches edges left
+  // pointing at an input that no longer exists.
   if (agentNodes.length > 0) {
     try {
-      buildAgentGraph(nodes, edges);
+      const graphConfig = buildAgentGraph(nodes, edges);
+      errors.push(...validateAgentGraphInputs(graphConfig));
     } catch (e) {
       errors.push((e as Error).message);
     }

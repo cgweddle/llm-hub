@@ -4,6 +4,7 @@
   import type { LLMProvider } from '$lib/store';
   import { getContext } from 'svelte';
   import type { Writable } from 'svelte/store';
+  import { extractPromptInputs, agentExternalInputs } from '$lib/promptInputs';
 
   interface Props {
     data: NodeProps['data'];
@@ -31,8 +32,19 @@
   // Get the function to update node internals when handles change
   const updateNodeInternals = useUpdateNodeInternals();
 
-  // Extract input parameter names from the input schema
+  // Extract input parameter names from the input schema (tools) or the
+  // agent's named inputs (agents).
+  // A flow-canvas agent node carries its full graph_config (non-empty
+  // `nodes`); an Agent Builder sub-agent node carries `graph_config: {}`
+  // and its own `user_prompt` directly.
   const inputParameters = $derived.by(() => {
+    if (data.isAgent) {
+      const graphConfig = data.graph_config as { nodes?: Record<string, any> } | undefined;
+      if (graphConfig && Object.keys(graphConfig.nodes || {}).length > 0) {
+        return agentExternalInputs(graphConfig);
+      }
+      return extractPromptInputs(data.user_prompt as string);
+    }
     if (input_schema && typeof input_schema === 'object') {
       if (input_schema.properties) {
         return Object.keys(input_schema.properties);
@@ -41,6 +53,11 @@
     }
     return [] as string[];
   });
+
+  // Broken edges: names present in data.missingInputs get
+  // their own red "removed" handle so the (still attached) edge has
+  // somewhere to render.
+  const missingInputs = $derived((data.missingInputs as string[] | undefined) || []);
 
   // Extract output properties if the output is a dictionary
   const outputIsDictionary = $derived(
@@ -71,6 +88,8 @@
     // Reads below establish this effect's dependencies
     void outputExpanded;
     void outputPathEntries.length;
+    void inputParameters.length;
+    void missingInputs.length;
     updateNodeInternals(id);
   });
 
@@ -247,7 +266,11 @@
 {#if inputParameters.length > 0}
   {#each inputParameters as paramName, index}
     <div class="input-handle-wrapper" style="top: {60 + index * 35}px;">
-      {#if editingParameter === paramName}
+      {#if data.isAgent}
+        <span class="handle-label-outside">
+          <span class="param-name">{paramName}</span>
+        </span>
+      {:else if editingParameter === paramName}
         <div class="parameter-input-container">
           <input
             type="text"
@@ -289,6 +312,22 @@
   <!-- Default single target handle if no input schema -->
   <Handle type="target" position={Position.Left} id="" style="background: #007acc; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;" {isConnectable} />
 {/if}
+
+<!-- Broken-edge handles: removed inputs still attached to an edge -->
+{#each missingInputs as paramName, index}
+  <div class="input-handle-wrapper" style="top: {60 + (inputParameters.length + index) * 35}px;">
+    <span class="handle-label-outside handle-label-missing">
+      <span class="param-name">{paramName} (removed)</span>
+    </span>
+    <Handle
+      type="target"
+      position={Position.Left}
+      id={paramName}
+      style="background: #c42b1c; border: 2px solid black; width: 10px; height: 10px; border-radius: 50%;"
+      {isConnectable}
+    />
+  </div>
+{/each}
 
 <!-- Output Handles (Source) -->
 {#if outputPathEntries.length > 0}
@@ -625,6 +664,13 @@
   .handle-label-outside:hover {
     background: #005a9e;
     box-shadow: 0 3px 8px rgba(0, 122, 204, 0.5);
+  }
+
+  .handle-label-missing {
+    background: #c42b1c;
+    border-right-color: #c42b1c;
+    box-shadow: 0 2px 6px rgba(196, 43, 28, 0.3);
+    cursor: default;
   }
 
   .param-content {

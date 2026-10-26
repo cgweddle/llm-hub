@@ -1,8 +1,7 @@
 """
 Pure agent-graph traversal engine.
 
-Named-inputs readiness engine (claude_plans/named-agent-inputs.md, "Engine
-algorithm"): each node accumulates a dict of named inputs (one value per
+Named-inputs readiness engine: each node accumulates a dict of named inputs (one value per
 `{name}` placeholder in its user_prompt) rather than a single input string.
 Edges deliver their value to a specific named input (`target_input`, legacy
 edges with none target `"input"`), and a node only runs once every one of its
@@ -151,7 +150,7 @@ async def run_graph(
     max_loop_iterations: int = None,
 ) -> Dict[str, Any]:
     """Execute an agent graph via the lazy-readiness traversal (see module
-    docstring and claude_plans/named-agent-inputs.md, "Engine algorithm").
+    docstring).
 
     Side effects (tracing, DB writes) are the responsibility of the injected
     ``run_node`` / ``record_node`` callables; this function only walks the

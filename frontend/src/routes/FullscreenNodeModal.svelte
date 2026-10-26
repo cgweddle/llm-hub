@@ -8,6 +8,7 @@
   import { editToolCodeStream, updateAgent, API_BASE_URL } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
   import type { Tool, Evaluation } from '$lib/api';
+  import { extractPromptInputs } from '$lib/promptInputs';
 
   export let llmProviders: LLMProvider[] = [];
   export let allTools: Tool[] = [];
@@ -36,8 +37,10 @@
   let editedAgentUserPrompt = '';
   let editedAgentToolIds: number[] = [];
   let editedAgentEvalIds: number[] = [];
-  let editedOutputPaths: Array<{name: string, description: string, return_behavior: string}> = [];
+  let editedOutputPaths: Array<{name: string, description: string, return_behavior: string, return_input: string}> = [];
   let userPromptBackdrop: HTMLDivElement;
+
+  $: editedPromptInputs = extractPromptInputs(editedAgentUserPrompt);
 
   // Initialize agent edit state when entering edit mode
   function startEditingAgent() {
@@ -50,16 +53,17 @@
     editedAgentEvalIds = [...(nodeData.data.eval_ids || [])];
     // Load output paths as array of {name, description, return_behavior}
     const paths = nodeData.data.output_paths || {};
-    editedOutputPaths = Object.entries(paths).map(([name, pathConfig]) => ({
+    editedOutputPaths = Object.entries(paths).map(([name, pathConfig]: [string, any]) => ({
       name,
       description: typeof pathConfig === 'string' ? pathConfig : pathConfig.description || '',
-      return_behavior: typeof pathConfig === 'string' ? 'node_output' : pathConfig.return_behavior || 'node_output'
+      return_behavior: typeof pathConfig === 'string' ? 'node_output' : pathConfig.return_behavior || 'node_output',
+      return_input: typeof pathConfig === 'string' ? 'input' : pathConfig.return_input || 'input'
     }));
     isEditingAgent = true;
   }
 
   function addOutputPath() {
-    editedOutputPaths = [...editedOutputPaths, { name: '', description: '', return_behavior: 'node_output' }];
+    editedOutputPaths = [...editedOutputPaths, { name: '', description: '', return_behavior: 'node_output', return_input: 'input' }];
   }
 
   function removeOutputPath(index: number) {
@@ -94,7 +98,8 @@
             .filter(p => p.name.trim())
             .map(p => [p.name.trim(), {
               description: p.description.trim(),
-              return_behavior: p.return_behavior || 'node_output'
+              return_behavior: p.return_behavior || 'node_output',
+              ...(p.return_behavior === 'previous_output' ? { return_input: p.return_input || 'input' } : {})
             }])
         )
       : undefined;
@@ -726,6 +731,12 @@
           <div class="section">
             <div class="section-label">User Prompt</div>
             {#if isEditingAgent}
+              <div class="prompt-inputs-list">
+                <span class="prompt-inputs-label">Inputs:</span>
+                {#each editedPromptInputs as inputName}
+                  <span class="prompt-input-badge">{inputName}</span>
+                {/each}
+              </div>
               <div class="highlighted-textarea-container">
                 <div class="highlighted-textarea-backdrop" bind:this={userPromptBackdrop} aria-hidden="true">
                   {@html editedAgentUserPrompt
@@ -860,6 +871,16 @@
                       <option value="node_output">Node Output</option>
                       <option value="previous_output">Previous Output</option>
                     </select>
+                    {#if path.return_behavior === 'previous_output'}
+                      <select
+                        class="output-path-behavior"
+                        bind:value={path.return_input}
+                      >
+                        {#each editedPromptInputs as inputName}
+                          <option value={inputName}>{inputName}</option>
+                        {/each}
+                      </select>
+                    {/if}
                     <button class="output-path-remove" on:click={() => removeOutputPath(index)}>
                       &times;
                     </button>
@@ -871,12 +892,13 @@
               </div>
             {:else if nodeData.data.output_paths && Object.keys(nodeData.data.output_paths).length > 0}
               <div class="output-paths-list">
-                {#each Object.entries(nodeData.data.output_paths) as [pathName, pathDesc]}
+                {#each Object.entries(nodeData.data.output_paths) as [pathName, pathDescRaw]}
+                  {@const pathDesc = pathDescRaw as any}
                   <div class="output-path-display">
                     <span class="output-path-badge">{pathName}</span>
                     <span class="output-path-desc-text">{typeof pathDesc === 'string' ? pathDesc : pathDesc.description}</span>
                     <span class="output-path-behavior-badge {typeof pathDesc === 'object' && pathDesc.return_behavior === 'previous_output' ? 'previous' : 'node'}">
-                      {typeof pathDesc === 'object' && pathDesc.return_behavior === 'previous_output' ? 'Previous Output' : 'Node Output'}
+                      {typeof pathDesc === 'object' && pathDesc.return_behavior === 'previous_output' ? `Previous Output (${pathDesc.return_input || 'input'})` : 'Node Output'}
                     </span>
                   </div>
                 {/each}
@@ -1487,6 +1509,29 @@
   .agent-edit-textarea:focus {
     outline: none;
     border-color: #007acc;
+  }
+
+  .prompt-inputs-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+
+  .prompt-inputs-label {
+    font-size: 12px;
+    color: #858585;
+  }
+
+  .prompt-input-badge {
+    padding: 2px 8px;
+    background: #1a3a5c;
+    color: #4ec9b0;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'Consolas', 'Courier New', monospace;
   }
 
   .highlighted-textarea-container {

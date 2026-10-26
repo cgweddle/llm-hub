@@ -504,8 +504,7 @@ class _FlowEmitter:
         return f'_pick({upstream.var}, {out_field!r})', "unknown"
 
     def _agent_input_expr(self, node: _Node) -> str:
-        """A dict literal over every incoming edge (claude_plans/named-agent-inputs.md,
-        plan step 6) — mirrors flow_runner._build_node_input's agent branch."""
+        """A dict literal over every incoming edge — mirrors flow_runner._build_node_input's agent branch."""
         incoming = _incoming_edges(self.graph, node.node_id)
         if not incoming:
             if node.node_id == self.entry_point:

@@ -6,13 +6,12 @@ System prompt placeholders (resolved at agent creation):
   {AGENT_DESCRIPTION} → node description
   {TOOLS_SECTION}     → formatted list of tool names
 
-User prompt placeholders (named inputs, resolved at execution time, see
-claude_plans/named-agent-inputs.md): every {name} placeholder in a
-sub-agent's user_prompt is a named input (decision 2); {{name}} is an escape
-for the literal text "{name}" and creates no input (decision 3);
+User prompt placeholders (named inputs, resolved at execution time): every {name} placeholder in a
+sub-agent's user_prompt is a named input; {{name}} is an escape
+for the literal text "{name}" and creates no input;
 {message_history} is reserved and is not an input — it is replaced with the
 serialized PydanticAI message history from previous nodes; an empty
-user_prompt is treated as "{input}" (decision 2).
+user_prompt is treated as "{input}".
 
 Backward compatible: prompts without placeholders pass through unchanged.
 """
@@ -107,7 +106,7 @@ def resolve_user_prompt_template(
         user_prompt: Raw user prompt — {name} placeholders, {{name}} escapes,
             and the reserved {message_history} placeholder.
         inputs: Named input values for this node. A missing input resolves
-            to "" (decision 6).
+            to "".
         predecessor_messages: Accumulated PydanticAI messages from previous nodes.
 
     Returns:
@@ -150,7 +149,7 @@ def resolve_user_prompt_template(
 
 def agent_external_inputs(graph_config: Dict[str, Any]) -> List[str]:
     """
-    The agent's flow-level inputs (decision 8): the entry sub-agent's inputs
+    The agent's flow-level inputs: the entry sub-agent's inputs
     that no internal edge feeds. These are the handles shown on the agent
     node on the flow canvas.
     """

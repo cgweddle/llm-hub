@@ -522,7 +522,7 @@ class FlowRunner:
         env-var state is shared between agents.
 
         Validates every agent's own graph_config plus the flow edges feeding
-        it (claude_plans/named-agent-inputs.md, decision 16) before compiling
+        it before compiling
         anything, so a bad edge or a renamed input fails before any node runs.
         """
         agents: Dict[str, Dict[str, BuiltAgent]] = {}

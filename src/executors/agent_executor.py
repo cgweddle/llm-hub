@@ -248,7 +248,7 @@ class AgentExecutor:
     def _apply_user_prompt(node_config: Dict, inputs: Dict[str, Any],
                            predecessor_messages: Optional[List] = None) -> str:
         """Resolve a node's user_prompt into the final user message from its
-        named inputs (claude_plans/named-agent-inputs.md)."""
+        named inputs."""
         user_prompt = node_config.get("user_prompt", "")
         return resolve_user_prompt_template(user_prompt, inputs, predecessor_messages)
 

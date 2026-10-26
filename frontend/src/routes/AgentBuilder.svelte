@@ -23,6 +23,7 @@
 
   import { getAgentTemplatesList, getAgentTemplate, type AgentTypeKey } from '$lib/agentTemplates';
   import { buildAgentGraphConfig, validateAgentGraph } from '$lib/agentGraphBuilder';
+  import { extractPromptInputs } from '$lib/promptInputs';
   import { autoLayoutNodes } from '$lib/elkLayout';
   import { createAgent, updateAgent, type Agent, type AgentCreateData, type Evaluation } from '$lib/api';
   import type { LLMProvider } from '$lib/store';
@@ -227,6 +228,44 @@
     agentNodes = agentNodes.map(n =>
       n.id === nodeId ? { ...n, data: { ...n.data, ...updatedData } } : n
     );
+    recomputeAgentInputs();
+  }
+
+  /**
+   * Re-derive each agent node's named inputs from its (possibly just-edited)
+   * user_prompt, and flag edges whose targetHandle is no longer one of
+   * them: they stay attached
+   * but render red, and their names collect in the target node's
+   * data.missingInputs so ToolNode can render a "(removed)" handle for them.
+   */
+  function recomputeAgentInputs() {
+    const missingByNode = new Map<string, Set<string>>();
+
+    agentEdges = agentEdges.map(edge => {
+      if (edge.source === START_NODE_ID) return edge;
+      const targetNode = agentNodes.find(n => n.id === edge.target);
+      if (!targetNode) return edge;
+
+      const inputs = extractPromptInputs(targetNode.data.user_prompt as string);
+      const targetHandle = edge.targetHandle || 'input';
+      const broken = !inputs.includes(targetHandle);
+
+      if (broken) {
+        if (!missingByNode.has(edge.target)) missingByNode.set(edge.target, new Set());
+        missingByNode.get(edge.target)!.add(targetHandle);
+      }
+
+      return {
+        ...edge,
+        style: broken ? 'stroke-width: 3; stroke: #ef4444;' : 'stroke-width: 3; stroke: #10b981;'
+      };
+    });
+
+    agentNodes = agentNodes.map(n => {
+      if (n.type === 'startNode') return n;
+      const missing = missingByNode.has(n.id) ? Array.from(missingByNode.get(n.id)!) : [];
+      return { ...n, data: { ...n.data, missingInputs: missing } };
+    });
   }
 
   /**
@@ -251,6 +290,7 @@
         name: agent.name,
         description: agent.description || '',
         system_prompt: nodeConfig?.system_prompt || '',
+        user_prompt: nodeConfig?.user_prompt || '',
         llm_provider: nodeConfig?.llm_provider || '',
         tool_ids: nodeConfig?.tool_ids || [],
         eval_ids: nodeConfig?.eval_ids || [],
@@ -329,9 +369,11 @@
         });
       }
 
+      const configEdgeStartIndex = newEdges.length;
       for (const edgeConfig of config.edges || []) {
+        const targetInput = edgeConfig.target_input || 'input';
         newEdges.push({
-          id: `${edgeConfig.from_node}-${edgeConfig.to_node}`,
+          id: `${edgeConfig.from_node}:${edgeConfig.output_path ?? ''}->${edgeConfig.to_node}:${targetInput}`,
           source: edgeConfig.from_node,
           target: edgeConfig.to_node,
           type: 'floating',
@@ -342,21 +384,22 @@
       // 3. Auto-layout with ELK
       const layoutedNodes = await autoLayoutNodes(newNodes, newEdges);
 
-      // 4. Restore sourceHandle from output_path after layout
-      for (const edgeConfig of config.edges || []) {
+      // 4. Restore sourceHandle/targetHandle from output_path/target_input
+      // after layout, matching by list position (not from/to — two edges can
+      // share the same endpoints with different handles)
+      (config.edges || []).forEach((edgeConfig: any, index: number) => {
+        const edge = newEdges[configEdgeStartIndex + index];
+        if (!edge) return;
         if (edgeConfig.output_path) {
-          const edge = newEdges.find(
-            e => e.source === edgeConfig.from_node && e.target === edgeConfig.to_node
-          );
-          if (edge) {
-            edge.sourceHandle = edgeConfig.output_path;
-          }
+          edge.sourceHandle = edgeConfig.output_path;
         }
-      }
+        edge.targetHandle = edgeConfig.target_input || 'input';
+      });
 
       // 5. Apply to canvas
       agentNodes = layoutedNodes;
       agentEdges = newEdges;
+      recomputeAgentInputs();
 
       // 6. Pre-fill save dialog metadata
       composedAgentName = agent.name || '';
@@ -402,10 +445,11 @@
    */
   function onConnect(params: any) {
     const newEdge: Edge = {
-      id: `${params.source}-${params.target}`,
+      id: `${params.source}:${params.sourceHandle ?? ''}->${params.target}:${params.targetHandle ?? ''}`,
       source: params.source,
       sourceHandle: params.sourceHandle || undefined,
       target: params.target,
+      targetHandle: params.targetHandle || undefined,
       type: 'floating',
       markerEnd: {
         type: MarkerType.ArrowClosed,
@@ -414,6 +458,7 @@
     };
 
     agentEdges = [...agentEdges, newEdge];
+    recomputeAgentInputs();
   }
 
 
