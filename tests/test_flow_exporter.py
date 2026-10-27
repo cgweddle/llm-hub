@@ -1839,3 +1839,42 @@ def test_multinode_reflection_loop_named_inputs_runs(db, import_exported):
     # approve's previous_output returns the reviewer's own "input" (the
     # last thing it reviewed, i.e. writer's second draft).
     assert result == "draft2"
+
+
+# ─── parallel-agent-execution: exported run_graph(..., parallel=...) ────────
+#
+# claude_plans/parallel-agent-execution.md, plan step 3: the emitted
+# multi-node orchestrator (agents/<slug>/agent.py) must forward the export's
+# `parallel` flag into its run_graph(...) call — `parallel=True` (live
+# default) when the export dialog's Parallel toggle is on, `parallel=False`
+# when it's off. Single-node agents are unaffected (no run_graph call at
+# all), so these tests only touch the writer/reviewer multi-node fixture.
+
+def test_multinode_agent_orchestrator_run_graph_parallel_true_by_default(db):
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, writer_reviewer_agent_config())
+    flow = agent_flow(session, user, agent, fetch)
+
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"})
+    assert_all_compile(files)
+
+    agent_py = files["agents/reviewer/agent.py"]
+    run_graph_line = next(
+        l for l in agent_py.splitlines() if "run_graph(GRAPH_CONFIG, inputs" in l)
+    assert "parallel=True" in run_graph_line, run_graph_line
+
+
+def test_multinode_agent_orchestrator_run_graph_parallel_false_when_exported_sequential(db):
+    session, user = db
+    fetch = make_fetch_tool(session, user)
+    agent = make_agent(session, user, writer_reviewer_agent_config())
+    flow = agent_flow(session, user, agent, fetch)
+
+    files = export_flow(flow, session, LLM_CONFIG, agent_llms={"AG": "anth"}, parallel=False)
+    assert_all_compile(files)
+
+    agent_py = files["agents/reviewer/agent.py"]
+    run_graph_line = next(
+        l for l in agent_py.splitlines() if "run_graph(GRAPH_CONFIG, inputs" in l)
+    assert "parallel=False" in run_graph_line, run_graph_line

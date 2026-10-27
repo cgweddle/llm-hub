@@ -35,6 +35,7 @@ Readiness/loop-refinement rules under test (decisions 12-13):
 Run with: pytest tests/test_agent_graph_engine.py -v
 """
 
+import asyncio
 import os
 import sys
 
@@ -183,6 +184,12 @@ class TestRunGraphBasics:
 
     @pytest.mark.asyncio
     async def test_message_history_threads_forward(self):
+        """Updated for parallel-agent-execution decision 2: history is no
+        longer a single replaced `messages` variable ("most recently
+        finished node"). It is now per-sender (`latest_messages[sender]`),
+        concatenated in forward-topological/edge order for each of a node's
+        CURRENT senders. A node with zero senders (the entry node) gets an
+        empty list, not None — there is nothing to concatenate."""
         graph = {
             "nodes": {"a": {"name": "A"}, "b": {"name": "B"}},
             "edges": [{"from_node": "a", "to_node": "b"}],
@@ -194,7 +201,7 @@ class TestRunGraphBasics:
             "b": lambda inp, i: ("out-b", [], None),
         })
         await run_graph(graph, {"input": "seed"}, run_node)
-        assert run_node.visited[0][2] is None
+        assert run_node.visited[0][2] == []
         assert run_node.visited[1][2] == [{"role": "assistant", "content": "hi"}]
 
 
@@ -434,3 +441,562 @@ class TestLoopRefinementAcrossSCC:
             draft_n = call[1]["draft"].replace("draft", "")
             summary_n = call[1]["summary"].replace("sum-of-draft", "")
             assert draft_n == summary_n
+
+
+# ============================================================================
+# Parallel sub-agent execution (claude_plans/parallel-agent-execution.md).
+#
+# New public contract under test (not yet implemented):
+#
+#     run_graph(graph_config, inputs, run_node, record_node=None,
+#               max_loop_iterations=None, parallel=True)
+#
+# Every ready node runs concurrently (asyncio tasks); results are applied
+# one at a time as tasks complete, in forward-topological-order (then node
+# id) when several finish in the same batch. `parallel=False` reproduces
+# today's one-at-a-time behavior exactly.
+#
+# These tests drive real concurrency with asyncio.Event-gated fake run_node
+# coroutines instead of sleep-based timing, so ordering is deterministic.
+# Every blocking wait is wrapped in asyncio.wait_for with a short timeout so
+# a still-sequential engine fails fast (TimeoutError) instead of hanging the
+# suite.
+# ============================================================================
+
+_GATE_TIMEOUT = 0.5
+
+
+class TestConcurrentSiblingsOverlap:
+    @pytest.mark.asyncio
+    async def test_two_researchers_fed_by_one_planner_overlap_in_time(self):
+        """Planner -> Researcher A, Researcher B. Both must be STARTED
+        before either FINISHES: each researcher signals its own "started"
+        event immediately on entry, then waits for the other's "started"
+        event before returning. Under today's one-node-at-a-time queue,
+        this deadlocks (A waits forever for B's start, since B is never
+        even popped from the queue until A's run() call returns) and the
+        wait_for below times out."""
+        a_started = asyncio.Event()
+        b_started = asyncio.Event()
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "planner":
+                return ("plan", [], None, None)
+            if node_id == "researcher_a":
+                a_started.set()
+                await asyncio.wait_for(b_started.wait(), timeout=_GATE_TIMEOUT)
+                return ("A-out", [], None, None)
+            if node_id == "researcher_b":
+                b_started.set()
+                await asyncio.wait_for(a_started.wait(), timeout=_GATE_TIMEOUT)
+                return ("B-out", [], None, None)
+            raise AssertionError(f"unexpected node {node_id}")
+
+        graph = {
+            "nodes": {
+                "planner": {"name": "Planner"},
+                "researcher_a": {"name": "Researcher A"},
+                "researcher_b": {"name": "Researcher B"},
+            },
+            "edges": [
+                {"from_node": "planner", "to_node": "researcher_a"},
+                {"from_node": "planner", "to_node": "researcher_b"},
+            ],
+            "entry_point": "planner",
+            "exit_points": ["researcher_a", "researcher_b"],
+        }
+
+        result = await run_graph(graph, {"input": "go"}, run_node, parallel=True)
+        assert result["status"] == "completed"
+        assert result["all_outputs"] == {"researcher_a": "A-out", "researcher_b": "B-out"}
+
+
+class TestCompletionOrderDeterminism:
+    """Planner -> {Researcher A, Researcher B} -> Writer. Writer must see
+    identical inputs, output and recorded order no matter which researcher's
+    LLM call happens to return first."""
+
+    def _build(self, a_delay, b_delay, recorded):
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "planner":
+                return ("plan", [], None, None)
+            if node_id == "researcher_a":
+                await asyncio.sleep(a_delay)
+                return ("A-out", [{"role": "assistant", "content": "a-said"}], None, None)
+            if node_id == "researcher_b":
+                await asyncio.sleep(b_delay)
+                return ("B-out", [{"role": "assistant", "content": "b-said"}], None, None)
+            if node_id == "writer":
+                recorded.append(("writer", dict(inputs), list(predecessor_messages or [])))
+                return (f"W(a={inputs.get('a')},b={inputs.get('b')})", [], None, None)
+            raise AssertionError(f"unexpected node {node_id}")
+
+        graph = {
+            "nodes": {
+                "planner": {"name": "Planner"},
+                "researcher_a": {"name": "Researcher A"},
+                "researcher_b": {"name": "Researcher B"},
+                "writer": {"name": "Writer"},
+            },
+            "edges": [
+                {"from_node": "planner", "to_node": "researcher_a"},
+                {"from_node": "planner", "to_node": "researcher_b"},
+                {"from_node": "researcher_a", "to_node": "writer", "target_input": "a"},
+                {"from_node": "researcher_b", "to_node": "writer", "target_input": "b"},
+            ],
+            "entry_point": "planner",
+            "exit_points": ["writer"],
+        }
+        return graph, run_node
+
+    @pytest.mark.asyncio
+    async def test_b_finishes_first_then_a(self):
+        recorded = []
+        graph, run_node = self._build(a_delay=0.05, b_delay=0.0, recorded=recorded)
+        result = await run_graph(graph, {"input": "go"}, run_node, parallel=True)
+        assert result["result"] == "W(a=A-out,b=B-out)"
+        assert len(recorded) == 1
+        assert recorded[0][1] == {"a": "A-out", "b": "B-out"}
+
+    @pytest.mark.asyncio
+    async def test_a_finishes_first_then_b(self):
+        recorded = []
+        graph, run_node = self._build(a_delay=0.0, b_delay=0.05, recorded=recorded)
+        result = await run_graph(graph, {"input": "go"}, run_node, parallel=True)
+        assert result["result"] == "W(a=A-out,b=B-out)"
+        assert len(recorded) == 1
+        assert recorded[0][1] == {"a": "A-out", "b": "B-out"}
+
+    @pytest.mark.asyncio
+    async def test_both_orders_give_identical_writer_state(self):
+        """The two completion orders above must agree byte-for-byte on
+        Writer's inputs, output and history — order of completion must not
+        leak into recorded state."""
+        recorded_b_first, recorded_a_first = [], []
+        graph1, run_node1 = self._build(a_delay=0.05, b_delay=0.0, recorded=recorded_b_first)
+        graph2, run_node2 = self._build(a_delay=0.0, b_delay=0.05, recorded=recorded_a_first)
+
+        result1 = await run_graph(graph1, {"input": "go"}, run_node1, parallel=True)
+        result2 = await run_graph(graph2, {"input": "go"}, run_node2, parallel=True)
+
+        assert result1["result"] == result2["result"]
+        assert recorded_b_first[0][1] == recorded_a_first[0][1]
+        assert recorded_b_first[0][2] == recorded_a_first[0][2]
+
+
+class TestRerunDedupAndInputSnapshot:
+    @pytest.mark.asyncio
+    async def test_loop_retrigger_while_running_is_deduped_and_reruns_with_fresh_input(self):
+        """start -> x (forward, target "a") and start -> z (forward,
+        default "input"), z -> x (is_loop, target "b"). z finishes fast and
+        fires its loop edge into x WHILE x's own first run is still pending
+        (x awaits z's completion event internally) — exercising three rules
+        at once:
+
+        - x must not be started a second time while its first run is still
+          in flight (the engine's `rerun` bookkeeping, not a second task);
+        - x's FIRST run's inputs were snapshotted when it started, so it
+          must NOT see "b" (z hasn't fired yet at that point) — proving
+          inputs are snapshotted at start, not read live;
+        - once x's first run finishes, it must run exactly once MORE (the
+          deferred retrigger), this time seeing "b" = z's delivered value —
+          proving a value that arrived mid-run is not lost, and is used on
+          the very next run (loop refinement only clears what a run's
+          snapshot actually used; a mid-run arrival was never in that
+          snapshot, so it survives untouched).
+
+        Under today's engine (no asyncio concurrency, no `parallel` kwarg),
+        x's first run can never observe z's completion (z hasn't even been
+        popped from the queue yet, since the current loop fully awaits each
+        node one at a time) — the wait_for below times out.
+        """
+        z_done = asyncio.Event()
+        x_calls = []
+        x_in_flight = False
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            nonlocal x_in_flight
+            if node_id == "start":
+                return ("S", [], None, None)
+            if node_id == "z":
+                z_done.set()
+                return ("Z-out", [], None, None)
+            if node_id == "x":
+                assert not x_in_flight, "x must never run twice concurrently"
+                x_in_flight = True
+                try:
+                    idx = len(x_calls)
+                    x_calls.append(dict(inputs))
+                    if idx == 0:
+                        await asyncio.wait_for(z_done.wait(), timeout=_GATE_TIMEOUT)
+                        return (f"x1(a={inputs.get('a')},b={inputs.get('b', '')})", [], None, None)
+                    return (f"x2(a={inputs.get('a')},b={inputs.get('b', '')})", [], None, None)
+                finally:
+                    x_in_flight = False
+            raise AssertionError(f"unexpected node {node_id}")
+
+        graph = {
+            "nodes": {"start": {"name": "Start"}, "x": {"name": "X"}, "z": {"name": "Z"}},
+            "edges": [
+                {"from_node": "start", "to_node": "x", "target_input": "a"},
+                {"from_node": "start", "to_node": "z"},
+                {"from_node": "z", "to_node": "x", "is_loop": True, "target_input": "b"},
+            ],
+            "entry_point": "start",
+            "exit_points": ["x"],
+            "max_loop_iterations": 5,
+        }
+
+        result = await run_graph(graph, {"input": "go"}, run_node, parallel=True)
+
+        assert len(x_calls) == 2, "x should run once (blocked), then exactly once more (deduped retrigger)"
+        assert x_calls[0] == {"a": "S"}  # "b" not yet arrived -> snapshotted without it
+        assert x_calls[1] == {"a": "S", "b": "Z-out"}  # mid-run arrival used on the next run
+        assert result["result"] == "x2(a=S,b=Z-out)"
+
+
+class TestUnstickWaitsForRunningSibling:
+    @pytest.mark.asyncio
+    async def test_unstick_does_not_fire_while_a_sibling_could_still_deliver(self):
+        """start -> fast (forward) and start -> slow (forward); fast -> join
+        (target "from_fast") and slow -> join (target "from_slow"). `join`
+        needs both. `slow` is genuinely still executing (a real
+        asyncio.sleep, not an immediately-resolved coroutine) when `fast`
+        completes and leaves `join` partially fired. The engine must NOT
+        treat `join` as unstickable while `slow` — a running sibling that
+        can still deliver the missing input — hasn't finished. If it
+        wrongly did, `join` would run twice: once early with
+        `from_slow=""`, and once more (legitimately re-triggered) once
+        `slow` actually delivers."""
+        join_calls = []
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "start":
+                return ("S", [], None, None)
+            if node_id == "fast":
+                return ("fast-out", [], None, None)
+            if node_id == "slow":
+                await asyncio.sleep(0.05)
+                return ("slow-out", [], None, None)
+            if node_id == "join":
+                join_calls.append(dict(inputs))
+                return (f"J(from_fast={inputs.get('from_fast')},from_slow={inputs.get('from_slow', '')})",
+                        [], None, None)
+            raise AssertionError(f"unexpected node {node_id}")
+
+        graph = {
+            "nodes": {
+                "start": {"name": "Start"}, "fast": {"name": "Fast"},
+                "slow": {"name": "Slow"}, "join": {"name": "Join"},
+            },
+            "edges": [
+                {"from_node": "start", "to_node": "fast"},
+                {"from_node": "start", "to_node": "slow"},
+                {"from_node": "fast", "to_node": "join", "target_input": "from_fast"},
+                {"from_node": "slow", "to_node": "join", "target_input": "from_slow"},
+            ],
+            "entry_point": "start",
+            "exit_points": ["join"],
+        }
+
+        result = await run_graph(graph, {"input": "go"}, run_node, parallel=True)
+
+        assert len(join_calls) == 1, "join must run exactly once, after BOTH inputs arrived"
+        assert join_calls[0] == {"from_fast": "fast-out", "from_slow": "slow-out"}
+        assert result["result"] == "J(from_fast=fast-out,from_slow=slow-out)"
+
+
+class TestFailFastCancelsSiblings:
+    @pytest.mark.asyncio
+    async def test_failure_cancels_running_sibling_and_cancelled_sibling_is_never_recorded(self):
+        """start -> boom (forward, fails quickly) and start -> slow
+        (forward, long-running). boom's failure must cancel slow's still-
+        running task and re-raise — slow must never reach record_node (rows
+        are only written on completion, per decision 4)."""
+        slow_cancelled = asyncio.Event()
+        recorded = []
+
+        def record_node(node_id, node_config, inputs, output, chosen_path, trace_id):
+            recorded.append(node_id)
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "start":
+                return ("S", [], None, None)
+            if node_id == "boom":
+                await asyncio.sleep(0.01)
+                raise RuntimeError("kaboom")
+            if node_id == "slow":
+                try:
+                    await asyncio.sleep(5)
+                    return ("slow-out", [], None, None)
+                except asyncio.CancelledError:
+                    slow_cancelled.set()
+                    raise
+            raise AssertionError(f"unexpected node {node_id}")
+
+        graph = {
+            "nodes": {"start": {"name": "Start"}, "boom": {"name": "Boom"}, "slow": {"name": "Slow"}},
+            "edges": [
+                {"from_node": "start", "to_node": "boom"},
+                {"from_node": "start", "to_node": "slow"},
+            ],
+            "entry_point": "start",
+            "exit_points": ["boom", "slow"],
+        }
+
+        with pytest.raises(RuntimeError, match="kaboom"):
+            await run_graph(graph, {"input": "go"}, run_node, record_node=record_node, parallel=True)
+
+        await asyncio.wait_for(slow_cancelled.wait(), timeout=_GATE_TIMEOUT)
+        assert "slow" not in recorded
+        assert "boom" not in recorded  # boom itself failed -> never reaches record_node either
+
+
+class TestFailFastTiebreak:
+    @pytest.mark.asyncio
+    async def test_two_same_batch_failures_report_the_earlier_topo_rank_first(self):
+        """start fans out to "zeta" and "alpha" (dict insertion order —
+        zeta first, alpha second — so topo_rank(zeta) < topo_rank(alpha)
+        despite "alpha" sorting first alphabetically). Both fail WITHOUT
+        awaiting anything, so both land in the SAME asyncio.wait()
+        completion batch. The engine must raise the earlier-topo-rank
+        node's error (zeta), not alpha's, and not whichever happened to be
+        iterated first by accident."""
+        graph = {
+            "nodes": {
+                "start": {"name": "Start"},
+                "zeta": {"name": "Zeta"},
+                "alpha": {"name": "Alpha"},
+            },
+            "edges": [
+                {"from_node": "start", "to_node": "zeta"},
+                {"from_node": "start", "to_node": "alpha"},
+            ],
+            "entry_point": "start",
+            "exit_points": ["zeta", "alpha"],
+        }
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "start":
+                return ("S", [], None, None)
+            if node_id == "zeta":
+                raise RuntimeError("zeta-boom")
+            if node_id == "alpha":
+                raise RuntimeError("alpha-boom")
+            raise AssertionError(f"unexpected node {node_id}")
+
+        with pytest.raises(RuntimeError, match="zeta-boom"):
+            await run_graph(graph, {"input": "go"}, run_node, parallel=True)
+
+
+class TestParallelFalseIsSequential:
+    @pytest.mark.asyncio
+    async def test_parallel_false_never_overlaps_and_matches_sequential_order(self):
+        concurrent = 0
+        max_concurrent = 0
+        visited_order = []
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            nonlocal concurrent, max_concurrent
+            concurrent += 1
+            max_concurrent = max(max_concurrent, concurrent)
+            visited_order.append(node_id)
+            try:
+                await asyncio.sleep(0.01)
+                return (f"{node_id}-out", [], None, None)
+            finally:
+                concurrent -= 1
+
+        graph = {
+            "nodes": {
+                "planner": {"name": "Planner"},
+                "researcher_a": {"name": "Researcher A"},
+                "researcher_b": {"name": "Researcher B"},
+                "writer": {"name": "Writer"},
+            },
+            "edges": [
+                {"from_node": "planner", "to_node": "researcher_a"},
+                {"from_node": "planner", "to_node": "researcher_b"},
+                {"from_node": "researcher_a", "to_node": "writer", "target_input": "a"},
+                {"from_node": "researcher_b", "to_node": "writer", "target_input": "b"},
+            ],
+            "entry_point": "planner",
+            "exit_points": ["writer"],
+        }
+
+        result = await run_graph(graph, {"input": "go"}, run_node, parallel=False)
+
+        assert max_concurrent == 1, "parallel=False must never run two nodes at once"
+        assert visited_order == ["planner", "researcher_a", "researcher_b", "writer"]
+        assert result["result"] == "writer-out"
+
+
+class TestMessageHistoryPerSender:
+    """Decision 2: {message_history} = the direct senders' latest
+    conversations, concatenated in forward-topological order then edge
+    order, regardless of completion order. Replaces the old single
+    `messages = node_messages` ("most recently finished node") model."""
+
+    @pytest.mark.asyncio
+    async def test_writer_gets_both_senders_histories_regardless_of_completion_order(self):
+        async def make_run_node_with_delays(a_delay, b_delay, captured):
+            async def run_node(node_id, node_config, inputs, predecessor_messages):
+                if node_id == "planner":
+                    return ("plan", [], None, None)
+                if node_id == "researcher_a":
+                    await asyncio.sleep(a_delay)
+                    return ("A-out", [{"role": "assistant", "content": "a-conversation"}], None, None)
+                if node_id == "researcher_b":
+                    await asyncio.sleep(b_delay)
+                    return ("B-out", [{"role": "assistant", "content": "b-conversation"}], None, None)
+                if node_id == "writer":
+                    captured.append(list(predecessor_messages or []))
+                    return ("done", [], None, None)
+                raise AssertionError(f"unexpected node {node_id}")
+            return run_node
+
+        graph = {
+            "nodes": {
+                "planner": {"name": "Planner"},
+                "researcher_a": {"name": "Researcher A"},
+                "researcher_b": {"name": "Researcher B"},
+                "writer": {"name": "Writer"},
+            },
+            "edges": [
+                {"from_node": "planner", "to_node": "researcher_a"},
+                {"from_node": "planner", "to_node": "researcher_b"},
+                {"from_node": "researcher_a", "to_node": "writer", "target_input": "a"},
+                {"from_node": "researcher_b", "to_node": "writer", "target_input": "b"},
+            ],
+            "entry_point": "planner",
+            "exit_points": ["writer"],
+        }
+
+        expected = [
+            {"role": "assistant", "content": "a-conversation"},
+            {"role": "assistant", "content": "b-conversation"},
+        ]
+
+        captured_b_first = []
+        run_node_b_first = await make_run_node_with_delays(0.05, 0.0, captured_b_first)
+        await run_graph(graph, {"input": "go"}, run_node_b_first, parallel=True)
+        assert captured_b_first == [expected]
+
+        captured_a_first = []
+        run_node_a_first = await make_run_node_with_delays(0.0, 0.05, captured_a_first)
+        await run_graph(graph, {"input": "go"}, run_node_a_first, parallel=True)
+        assert captured_a_first == [expected]
+
+    @pytest.mark.asyncio
+    async def test_input_that_never_arrived_contributes_nothing_to_history(self):
+        """Router picks "approve" -> Reviser never runs (same shape as
+        TestRouterSkipsDownstream). Writer is unstuck with "notes" missing,
+        so Reviser never contributes a conversation — Writer's history must
+        contain only the Router's, not an empty/None placeholder for
+        Reviser."""
+        graph = {
+            "nodes": {
+                "router": {"name": "Router", "output_paths": {
+                    "approve": {"description": "ok"}, "revise": {"description": "no"}}},
+                "reviser": {"name": "Reviser"},
+                "writer": {"name": "Writer"},
+            },
+            "edges": [
+                {"from_node": "router", "to_node": "writer"},
+                {"from_node": "router", "to_node": "reviser", "output_path": "revise"},
+                {"from_node": "reviser", "to_node": "writer", "target_input": "notes"},
+            ],
+            "entry_point": "router",
+            "exit_points": ["writer"],
+        }
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "router":
+                return ("approved", [{"role": "assistant", "content": "router-said"}], "approve", None)
+            if node_id == "reviser":
+                return ("SHOULD NOT RUN", [{"role": "assistant", "content": "reviser-said"}], None, None)
+            if node_id == "writer":
+                return ("done", [], None, None)
+            raise AssertionError(f"unexpected node {node_id}")
+
+        captured = []
+
+        async def capturing_run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "writer":
+                captured.append(list(predecessor_messages or []))
+            return await run_node(node_id, node_config, inputs, predecessor_messages)
+
+        await run_graph(graph, {"input": "go"}, capturing_run_node, parallel=True)
+
+        assert captured == [[{"role": "assistant", "content": "router-said"}]]
+
+    @pytest.mark.asyncio
+    async def test_loop_pass_gets_critics_latest_plus_persisted_forward_senders_history(self):
+        """Planner -> Writer.plan, Writer -> Critic, Critic -(revise,
+        loop)-> Writer.feedback. On Writer's SECOND run (after the loop
+        back), its history must contain Planner's conversation (an
+        out-of-loop forward sender, persisted across iterations) PLUS
+        Critic's latest conversation (the loop sender) — not just whichever
+        node happened to finish most recently."""
+        graph = {
+            "nodes": {
+                "planner": {"name": "Planner"},
+                "writer": {"name": "Writer"},
+                "critic": {"name": "Critic", "output_paths": {
+                    "revise": {"description": "no"}, "approve": {"description": "ok"}}},
+            },
+            "edges": [
+                {"from_node": "planner", "to_node": "writer", "target_input": "plan"},
+                {"from_node": "writer", "to_node": "critic"},
+                {"from_node": "critic", "to_node": "writer", "is_loop": True,
+                 "output_path": "revise", "target_input": "feedback"},
+            ],
+            "entry_point": "planner",
+            "exit_points": ["critic"],
+            "max_loop_iterations": 5,
+        }
+
+        writer_histories = []
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            if node_id == "planner":
+                return ("TopicPlan", [{"role": "assistant", "content": "planner-said"}], None, None)
+            if node_id == "writer":
+                writer_histories.append(list(predecessor_messages or []))
+                idx = len(writer_histories) - 1
+                return (f"draft{idx + 1}", [{"role": "assistant", "content": f"writer-said-{idx}"}], None, None)
+            if node_id == "critic":
+                if len(writer_histories) == 1:
+                    return ("needs more work", [{"role": "assistant", "content": "critic-said-1"}], "revise", None)
+                return ("approved!", [{"role": "assistant", "content": "critic-said-2"}], "approve", None)
+            raise AssertionError(f"unexpected node {node_id}")
+
+        await run_graph(graph, {"input": "go"}, run_node, parallel=True)
+
+        assert len(writer_histories) == 2
+        # Writer's FIRST run already starts after Planner has delivered
+        # "plan" (readiness requires it), so Planner's conversation is
+        # already part of Writer's very first history -- there is no
+        # "critic" sender yet, since the loop hasn't fired back once.
+        assert writer_histories[0] == [{"role": "assistant", "content": "planner-said"}]
+        assert writer_histories[1] == [
+            {"role": "assistant", "content": "planner-said"},
+            {"role": "assistant", "content": "critic-said-1"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_entry_node_with_no_senders_gets_empty_history(self):
+        graph = {
+            "nodes": {"only": {"name": "Only"}},
+            "edges": [],
+            "entry_point": "only",
+            "exit_points": ["only"],
+        }
+        captured = []
+
+        async def run_node(node_id, node_config, inputs, predecessor_messages):
+            captured.append(predecessor_messages)
+            return ("done", [], None, None)
+
+        await run_graph(graph, {"input": "hi"}, run_node, parallel=True)
+        assert captured == [[]]

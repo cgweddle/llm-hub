@@ -435,3 +435,145 @@ class TestExecuteGraphLoops:
         assert len(writer_calls) == 1
         assert writer_calls[0] == {"plan": "PLAN", "research": "RESEARCH(PLAN)"}
         assert result["result"] == "combined:PLAN+RESEARCH(PLAN)"
+
+
+# ============================================================================
+# record_node session-per-write (parallel-agent-execution plan, step 2 /
+# decision 6): record_node must open its OWN DatabaseManager session for each
+# write, closed when done, rather than reusing AgentExecutor's shared
+# self.session — the same rule flow_runner._execute_node_async follows
+# because a shared Session isn't safe once sub-agents run under gather.
+# ============================================================================
+
+class _PoisonSession:
+    """Stands in for AgentExecutor's shared self.session. Any use at all is a
+    bug: record_node must never touch it."""
+
+    def add(self, *a, **k):
+        raise AssertionError("record_node used the shared executor session (add)")
+
+    def commit(self, *a, **k):
+        raise AssertionError("record_node used the shared executor session (commit)")
+
+    def refresh(self, *a, **k):
+        raise AssertionError("record_node used the shared executor session (refresh)")
+
+    def query(self, *a, **k):
+        raise AssertionError("record_node used the shared executor session (query)")
+
+    def close(self):
+        pass
+
+
+class TestRecordNodeSessionPerWrite:
+    @pytest.fixture
+    def parent_row(self, tmp_path, monkeypatch):
+        """A real per-test SQLite DB (same pattern as test_flow_runner_agents.py)
+        with a parent Execution row already committed, so record_node's writes
+        have a valid parent_id to attach to."""
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/test.db")
+        from database.database_setup import DatabaseManager, User, Execution
+
+        manager = DatabaseManager()
+        manager.create_tables()
+        session = manager.get_session()
+        user = User(username="tester", email="t@t.t", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+        parent = Execution(user_id=user.id, execution_type="agent", name="Parent", status="running")
+        session.add(parent)
+        session.commit()
+        session.refresh(parent)
+
+        parent_id, user_id = parent.id, user.id
+        session.close()
+        yield parent_id, user_id
+
+    @pytest.mark.asyncio
+    async def test_record_node_opens_and_closes_its_own_session_per_write(self, parent_row, monkeypatch):
+        parent_id, user_id = parent_row
+        import executors.agent_executor as agent_executor_module
+        from database.database_setup import DatabaseManager as RealDatabaseManager, Execution
+
+        opened = []
+
+        class TrackingDatabaseManager:
+            """Fake DatabaseManager that tracks every session it hands out so
+            the test can prove record_node opens one per write and closes it,
+            instead of sharing a single long-lived Session (unsafe under
+            concurrent sub-agent execution — see the plan's decision 6)."""
+
+            def __init__(self):
+                self._real = RealDatabaseManager()
+
+            def get_session(self):
+                session = self._real.get_session()
+                record = {"session": session, "closed": False}
+                real_close = session.close
+
+                def close():
+                    record["closed"] = True
+                    real_close()
+
+                session.close = close
+                opened.append(record)
+                return session
+
+        # Patched with raising=False: agent_executor.py does not import
+        # DatabaseManager at all today (it only ever uses the constructor's
+        # shared self.session), so this name doesn't exist yet — that's the
+        # point of this red test.
+        monkeypatch.setattr(agent_executor_module, "DatabaseManager", TrackingDatabaseManager, raising=False)
+
+        executor = AgentExecutor.__new__(AgentExecutor)
+        executor.session = _PoisonSession()  # must never be touched by record_node
+        executor.enable_retry = False
+        executor.retry_config = None
+
+        async def mock_run_sub_agent(node_id, node_config, inputs, built, predecessor_messages=None):
+            if node_id == "writer":
+                return ("Draft text", [], None)
+            return ("Summary of draft", [], None)
+
+        executor._run_sub_agent = mock_run_sub_agent
+
+        graph_config = {
+            "nodes": {
+                "writer": {"agent_type": "pydanticai", "name": "Writer"},
+                "summarizer": {"agent_type": "pydanticai", "name": "Summarizer"},
+            },
+            "edges": [{"from_node": "writer", "to_node": "summarizer", "is_loop": False}],
+            "entry_point": "writer",
+            "exit_points": ["summarizer"],
+        }
+
+        execution_stub = Mock(id=parent_id, user_id=user_id)
+
+        result = await executor._execute_graph(
+            graph_config, {"input": "Write something"}, execution_stub, builts_for(graph_config))
+
+        assert result["status"] == "completed"
+
+        # Two sub-nodes -> two writes -> two DISTINCT per-write sessions from
+        # DatabaseManager (never the executor's shared self.session), each
+        # closed once its write is done.
+        assert len(opened) == 2, "record_node should open one DatabaseManager session per write"
+        assert opened[0]["session"] is not opened[1]["session"]
+        assert all(record["closed"] for record in opened), "each per-write session must be closed"
+
+        # Independently verify the rows actually landed, via a fresh session.
+        check = RealDatabaseManager().get_session()
+        try:
+            rows = (
+                check.query(Execution)
+                .filter(Execution.parent_id == parent_id, Execution.execution_type == "agent")
+                .order_by(Execution.sequence)
+                .all()
+            )
+            assert [r.node_id for r in rows] == ["writer", "summarizer"]
+            assert rows[0].output_data == {"result": "Draft text"}
+            assert rows[1].output_data == {"result": "Summary of draft"}
+        finally:
+            check.close()

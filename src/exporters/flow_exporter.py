@@ -873,9 +873,9 @@ def _emit_single_node_agent(am: _AgentModule) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _emit_agent_files(am: _AgentModule) -> Dict[str, str]:
+def _emit_agent_files(am: _AgentModule, parallel: bool) -> Dict[str, str]:
     if am.is_multi:
-        return _emit_multi_node_agent(am)
+        return _emit_multi_node_agent(am, parallel)
     return {f"agents/{am.module}.py": _emit_single_node_agent(am)}
 
 
@@ -1060,7 +1060,7 @@ def _trim_agent_graph(graph_config: dict) -> dict:
     return result
 
 
-def _emit_agent_orchestrator(am: _AgentModule) -> str:
+def _emit_agent_orchestrator(am: _AgentModule, parallel: bool) -> str:
     lines = [
         f'"""Agent "{_docstring_text(am.agent.name)}" — exported from LLM Hub agent id '
         f'{am.agent.id}. Runs the graph in graph.json."""',
@@ -1079,17 +1079,17 @@ def _emit_agent_orchestrator(am: _AgentModule) -> str:
         "",
         "",
         f"async def {am.run_func}(inputs: dict) -> str:",
-        '    return (await run_graph(GRAPH_CONFIG, inputs, _run_node))["result"]',
+        f'    return (await run_graph(GRAPH_CONFIG, inputs, _run_node, parallel={parallel}))["result"]',
     ]
     return "\n".join(lines) + "\n"
 
 
-def _emit_multi_node_agent(am: _AgentModule) -> Dict[str, str]:
+def _emit_multi_node_agent(am: _AgentModule, parallel: bool) -> Dict[str, str]:
     pkg = f"agents/{am.module}"
     files: Dict[str, str] = {
         f"{pkg}/model.py": _emit_multi_model(am),
         f"{pkg}/graph.json": json.dumps(_trim_agent_graph(am.graph_config), indent=2) + "\n",
-        f"{pkg}/agent.py": _emit_agent_orchestrator(am),
+        f"{pkg}/agent.py": _emit_agent_orchestrator(am, parallel),
         f"{pkg}/__init__.py": f"from agents.{am.module}.agent import {am.run_func}\n",
         f"{pkg}/agents/__init__.py": _emit_sub_agents_init(am),
     }
@@ -1409,7 +1409,7 @@ def export_flow(flow, session, llm_config: dict,
     if agent_modules:
         files["agents/__init__.py"] = ""
         for am in agent_modules:
-            files.update(_emit_agent_files(am))
+            files.update(_emit_agent_files(am, parallel))
         if any(am.is_multi for am in agent_modules):
             files.update(_emit_runtime_files())
 

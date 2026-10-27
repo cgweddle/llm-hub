@@ -12,6 +12,20 @@ edges never gate readiness; after a node runs, the "fired" mark is cleared for
 any forward edge whose sender shares the node's strongly-connected component
 (loop refinement), forcing a fresh value before that edge can fire again.
 
+Every node that is ready at the same time runs concurrently (`parallel=True`,
+the default). Results are applied one at a time, in forward-topological
+order (then node id) when several finish together, so shared state is never
+touched mid-await by another task. A node re-triggered while its current run
+is still in flight is not started twice — it runs exactly once more after
+that run completes, with whatever inputs have arrived by then. `parallel`
+can be set to False to run one node at a time instead (the live runner
+always passes True; a standalone export can opt into sequential output).
+
+A node's `{message_history}` is the latest conversation of every node that
+delivered one of its current inputs (forward or loop edge), concatenated in
+forward-topological order then edge order. A node with no senders (the entry
+node, or one whose inputs never arrived) gets an empty list.
+
 This module is deliberately free of side effects — no database, no LangFuse,
 no PydanticAI imports. Node execution and structural recording are supplied as
 callables, so the same traversal drives both the live executor (which wraps
@@ -22,16 +36,21 @@ Injected callables:
 
 ``run_node(node_id, node_config, inputs, predecessor_messages)``
     async → ``(output, messages, chosen_path, trace_id)``. Runs one node.
-    ``inputs`` is that node's accumulated named-inputs dict. ``messages`` is
-    that run's full history (or None to leave it unchanged), ``chosen_path``
-    is the selected output-path name (or None), ``trace_id`` is an opaque
-    observability handle passed on to ``record_node`` (or None).
+    ``inputs`` is that node's accumulated named-inputs dict, snapshotted when
+    the node started. ``predecessor_messages`` is the node's message history
+    (see above), also snapshotted at start. ``messages`` is that run's full
+    history (or None to leave it unchanged), ``chosen_path`` is the selected
+    output-path name (or None), ``trace_id`` is an opaque observability
+    handle passed on to ``record_node`` (or None).
 
 ``record_node(node_id, node_config, inputs, output, chosen_path, trace_id)``
     Optional. Records the completed node (e.g. a structural execution row).
-    Called after ``previous_output`` has been applied, so ``output`` is final.
+    Called after ``previous_output`` has been applied, so ``output`` is
+    final. Never called for a cancelled node (fail-fast cancels siblings
+    before they complete).
 """
 
+import asyncio
 import logging
 from collections import deque
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -39,7 +58,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 RunNode = Callable[
-    [str, Dict[str, Any], Dict[str, str], Optional[List]],
+    [str, Dict[str, Any], Dict[str, str], List],
     Awaitable[Tuple[str, Optional[List], Optional[str], Optional[str]]],
 ]
 RecordNode = Callable[[str, Dict[str, Any], Dict[str, str], str, Optional[str], Optional[str]], None]
@@ -148,13 +167,15 @@ async def run_graph(
     run_node: RunNode,
     record_node: Optional[RecordNode] = None,
     max_loop_iterations: int = None,
+    parallel: bool = True,
 ) -> Dict[str, Any]:
     """Execute an agent graph via the lazy-readiness traversal (see module
     docstring).
 
     Side effects (tracing, DB writes) are the responsibility of the injected
     ``run_node`` / ``record_node`` callables; this function only walks the
-    graph.
+    graph. Every node ready at once runs concurrently unless
+    ``parallel=False``.
     """
     nodes_config = graph_config.get("nodes", {})
     entry_point = graph_config.get("entry_point")
@@ -184,51 +205,66 @@ async def run_graph(
     outputs: Dict[str, Any] = {}
     loop_counts: Dict[int, int] = {}
     execution_trace = []
-    messages: List = []
+    latest_messages: Dict[str, List] = {}
+    delivered_by: Dict[str, Dict[str, int]] = {}
 
+    running: Dict[str, "asyncio.Task"] = {}
+    rerun: set = set()
     queue = deque([entry_point])
 
-    async def run(node_id: str) -> None:
-        nonlocal messages
+    def history_for(node_id: str) -> List:
+        senders = []
+        seen_nodes = set()
+        for idx in delivered_by.get(node_id, {}).values():
+            from_node = edges[idx].get("from_node")
+            if from_node in seen_nodes:
+                continue
+            seen_nodes.add(from_node)
+            senders.append((topo_rank.get(from_node, 0), idx, from_node))
+        senders.sort()
+        history: List = []
+        for _, _, from_node in senders:
+            history.extend(latest_messages.get(from_node, []))
+        return history
+
+    async def execute(node_id: str, snapshot_inputs: Dict[str, Any], snapshot_history: List):
         node_config = nodes_config[node_id]
-
-        for idx, edge in forward_in[node_id]:
-            if idx not in fired:
-                node_inputs[node_id].setdefault(_target_input(edge), "")
-
-        predecessor_msgs = messages if messages else None
-
         try:
             output, node_messages, chosen_path, trace_id = await run_node(
-                node_id, node_config, node_inputs[node_id], predecessor_msgs
+                node_id, node_config, snapshot_inputs, snapshot_history
             )
         except Exception as e:
             logger.error(f"Sub-agent {node_id} failed: {e}")
             raise RuntimeError(
                 f"Agent node '{node_config.get('name', node_id)}' failed: {e}"
             ) from e
+        return snapshot_inputs, output, node_messages, chosen_path, trace_id
+
+    def apply_result(node_id: str, result: Tuple) -> None:
+        snapshot_inputs, output, node_messages, chosen_path, trace_id = result
+        node_config = nodes_config[node_id]
 
         if chosen_path:
             path_config = node_config.get("output_paths", {}).get(chosen_path, {})
             if isinstance(path_config, dict) and path_config.get("return_behavior") == "previous_output":
                 return_input = path_config.get("return_input") or "input"
-                output = node_inputs[node_id].get(return_input, "")
+                output = snapshot_inputs.get(return_input, "")
 
         outputs[node_id] = output
         if node_messages is not None:
-            messages = node_messages
+            latest_messages[node_id] = node_messages
 
         execution_trace.append({
             "node": node_id,
             "name": node_config.get("name", node_id),
             "agent_type": node_config.get("agent_type"),
-            "input": _preview(node_inputs[node_id]),
+            "input": _preview(snapshot_inputs),
             "output": _preview(output),
             "status": "completed",
         })
 
         if record_node is not None:
-            record_node(node_id, node_config, node_inputs[node_id], output, chosen_path, trace_id)
+            record_node(node_id, node_config, snapshot_inputs, output, chosen_path, trace_id)
 
         logger.debug(f"Sub-agent {node_id} completed")
 
@@ -259,6 +295,7 @@ async def run_graph(
                     continue
 
             node_inputs[to_node][_target_input(edge)] = output
+            delivered_by.setdefault(to_node, {})[_target_input(edge)] = idx
 
             if is_loop_edge:
                 queue.append(to_node)
@@ -270,9 +307,42 @@ async def run_graph(
                 else:
                     waiting.add(to_node)
 
+    def start_ready() -> None:
+        while queue and (parallel or not running):
+            n = queue.popleft()
+            if n in running:
+                rerun.add(n)
+                continue
+            for idx, edge in forward_in[n]:
+                if idx not in fired:
+                    node_inputs[n].setdefault(_target_input(edge), "")
+            snapshot_inputs = dict(node_inputs[n])
+            snapshot_history = history_for(n)
+            running[n] = asyncio.create_task(execute(n, snapshot_inputs, snapshot_history))
+
     while True:
-        while queue:
-            await run(queue.popleft())
+        start_ready()
+        if running:
+            done, _ = await asyncio.wait(running.values(), return_when=asyncio.FIRST_COMPLETED)
+            finished = sorted(
+                (n for n, task in running.items() if task in done),
+                key=lambda n: (topo_rank.get(n, 0), n),
+            )
+            for n in finished:
+                task = running.pop(n)
+                error = task.exception()
+                if error is not None:
+                    remaining = list(running.values())
+                    for other in remaining:
+                        other.cancel()
+                    if remaining:
+                        await asyncio.gather(*remaining, return_exceptions=True)
+                    raise error
+                apply_result(n, task.result())
+                if n in rerun:
+                    rerun.discard(n)
+                    queue.append(n)
+            continue
         if not waiting:
             break
         n = min(waiting, key=lambda node_id: topo_rank.get(node_id, 0))

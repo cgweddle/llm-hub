@@ -22,6 +22,7 @@ Features:
 """
 
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -32,7 +33,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from database.database import create_execution, update_execution
-from database.database_setup import Execution
+from database.database_setup import DatabaseManager, Execution
 from utils.prompt_template import resolve_user_prompt_template
 from runners.agent_runner import BuiltAgent
 from executors.agent_graph_engine import run_graph
@@ -57,6 +58,19 @@ from observability.langfuse_tracing import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _scoped_session():
+    """A short-lived DB session for a single write. Sub-agent nodes under
+    run_graph's parallel execution can't share AgentExecutor's long-lived
+    self.session, so each write (record_node, trace-id-on-failure) gets its
+    own session, closed immediately after."""
+    session = DatabaseManager().get_session()
+    try:
+        yield session
+    finally:
+        session.close()
 
 # Instrumentation is execution-side: this module runs agents, so it turns on
 # span emission for all PydanticAI agent runs in this process.
@@ -161,6 +175,8 @@ class AgentExecutor:
             if built is None:
                 raise ValueError(f"No compiled agent for sub-node '{node_id}'")
 
+            predecessor_messages = predecessor_messages or None
+
             # Bound outside the LANGFUSE branch so the failure handler can read it.
             captured_trace_id = None
             try:
@@ -186,34 +202,37 @@ class AgentExecutor:
                 # Store trace ID even on failure so the LangFuse trace is accessible
                 if execution and captured_trace_id:
                     langfuse_client.flush()
-                    update_execution(self.session, execution.id, langfuse_trace_id=captured_trace_id)
+                    with _scoped_session() as session:
+                        update_execution(session, execution.id, langfuse_trace_id=captured_trace_id)
                 raise
 
             return output, node_messages, chosen_path, captured_trace_id
 
         def record_node(node_id, node_config, node_inputs, output, chosen_path, trace_id):
             if execution and is_multi_node:
-                create_execution(
-                    self.session,
-                    parent_id=execution.id,
-                    user_id=execution.user_id,
-                    execution_type='agent',
-                    node_id=node_id,
-                    name=node_config.get("name", node_id),
-                    sequence=step["seq"],
-                    input_data={name: str(value)[:2000] for name, value in node_inputs.items()},
-                    output_data={"result": str(output)[:2000]},
-                    status='completed',
-                    started_at=datetime.now(),
-                    completed_at=datetime.now(),
-                    execution_metadata={
-                        "agent_type": node_config.get("agent_type"),
-                    },
-                    langfuse_trace_id=trace_id,
-                )
-                step["seq"] += 1
+                with _scoped_session() as session:
+                    create_execution(
+                        session,
+                        parent_id=execution.id,
+                        user_id=execution.user_id,
+                        execution_type='agent',
+                        node_id=node_id,
+                        name=node_config.get("name", node_id),
+                        sequence=step["seq"],
+                        input_data={name: str(value)[:2000] for name, value in node_inputs.items()},
+                        output_data={"result": str(output)[:2000]},
+                        status='completed',
+                        started_at=datetime.now(),
+                        completed_at=datetime.now(),
+                        execution_metadata={
+                            "agent_type": node_config.get("agent_type"),
+                        },
+                        langfuse_trace_id=trace_id,
+                    )
+                    step["seq"] += 1
             elif execution and trace_id:
-                update_execution(self.session, execution.id, langfuse_trace_id=trace_id)
+                with _scoped_session() as session:
+                    update_execution(session, execution.id, langfuse_trace_id=trace_id)
 
         result = await run_graph(
             graph_config,
@@ -221,6 +240,7 @@ class AgentExecutor:
             run_node,
             record_node=record_node,
             max_loop_iterations=max_loop_iterations,
+            parallel=True,
         )
         result["execution_id"] = execution.id if execution else None
         return result
